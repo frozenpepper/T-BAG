@@ -1,0 +1,19 @@
+{
+  "description": "T-BAG reconcile-first resume context",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(compact|resume)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/TBag/tools/context_checkpoint.py\" hook --harness codex --event sessionstart",
+            "statusMessage": "Reloading T-BAG run orientation",
+            "additionalContextLimit": 1800,
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

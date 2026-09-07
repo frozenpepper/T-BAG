@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(compact|resume)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}/TBag/tools/context_checkpoint.py\" hook --harness claude-code --event sessionstart",
+            "statusMessage": "Reloading T-BAG run orientation",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

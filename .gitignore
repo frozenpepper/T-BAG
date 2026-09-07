@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Runtime artifacts of running/installing the skill against this repo itself.
+TBag/
+# Legacy pre-T-BAG RC workspace; keep old runs out of project source.
+AnalystAndGrunt/
+.kilo/
