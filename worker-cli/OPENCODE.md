@@ -34,3 +34,7 @@ A stub report does not prove no useful work occurred. Inspect a bounded `worker.
 - stub + project movement → Analyst Recovery over the real worktree before more mutation.
 
 Use only T-BAG's tracked detached launch path. The event directory must remain queryable by `dsd_attempt.py inspect` while the worker runs. Raw `nohup`/background shells are not task execution because they bypass lifecycle supervision.
+
+## Startup admission
+
+Parallel tasks stay parallel, but their OpenCode **process starts** must not collide on shared CLI/bootstrap state. T-BAG therefore admits worker CLI starts through the machine-global launch gate using the run's `launch_start_interval_seconds` (default `3.0`). Detached monitors may be launched together; only the instant of `Popen` is spaced. Once admitted, all workers execute concurrently.

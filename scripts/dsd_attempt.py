@@ -109,22 +109,31 @@ def live_run_attempts(run:Path)->list[dict[str,Any]]:
     return live
 
 
-def resolve_runtime(run_info:dict[str,Any],tier:str,driver_override:str|None,model_override:str|None)->tuple[str,str,dict[str,Any]]:
-    configured=dsd_task.runtime_config(run_info,tier)
+def resolve_runtime(run_info:dict[str,Any],tier:str,driver_override:str|None,model_override:str|None,profile_name:str|None=None)->tuple[str,str,dict[str,Any],str]:
+    if profile_name and (driver_override or model_override):
+        raise ValueError("choose a configured --runtime-profile or an explicit driver/model override, not both")
+    if profile_name:
+        configured=dsd_task.runtime_profile(run_info,tier,profile_name)
+        if configured is None:
+            raise ValueError(f"runtime profile {tier}/{profile_name} is not configured or has no remaining uses")
+        selected=str(configured.get("name") or profile_name)
+    else:
+        configured=dsd_task.runtime_config(run_info,tier)
+        selected="default"
     configured_driver=str((configured or {}).get("driver") or "").strip()
     if driver_override and configured_driver and driver_override.strip()!=configured_driver and not model_override:
         raise ValueError(
             f"RUNTIME_OVERRIDE_MISMATCH: --driver {driver_override!r} differs from configured {tier} driver {configured_driver!r}; "
-            "supply an explicit --model for that driver or change the run runtime first"
+            "supply an explicit --model for that driver or register/select a runtime profile"
         )
     driver=(driver_override or (configured or {}).get("driver") or "").strip()
     model=(model_override or (configured or {}).get("model") or "").strip()
     options=(configured or {}).get("options") if isinstance((configured or {}).get("options"),dict) else {}
     if not driver or not model:
-        raise ValueError(f"MISSING_RUNTIME_CONFIG: {tier} tier needs both driver and model; resolve it from supplied authority/run config or ask the user, then run dsd_task.py set-runtime")
+        raise ValueError(f"MISSING_RUNTIME_CONFIG: {tier} authority lane needs a default driver/model; resolve it from owner authority/run config or ask once")
     if driver not in dsd_task.SUPPORTED_WORKER_DRIVERS:
-        raise ValueError(f"worker driver {driver!r} is configured but not wired; supported technical-worker drivers: {sorted(dsd_task.SUPPORTED_WORKER_DRIVERS)}")
-    return driver,model,dict(options)
+        raise ValueError(f"worker driver {driver!r} has no first-class T-BAG adapter; wired drivers: {sorted(dsd_task.SUPPORTED_WORKER_DRIVERS)}")
+    return driver,model,dict(options),selected
 
 
 def latest_session(task:dict[str,Any],role:str)->str|None:
@@ -146,7 +155,7 @@ def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:st
              interrupted Fixer turns may resume that same Fixer session.
     Analyst roles use their own explicit same-role continuation only.
     """
-    if role in {"reviewer","plan-reviewer","context-reviewer"}:
+    if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"}:
         if explicit or resume_last:
             raise ValueError(f"{role} must always start in a fresh session")
         return None
@@ -260,6 +269,8 @@ def task_input_groups(run:Path, phase:str, task:dict[str,Any], role:str, extra:l
     groups: dict[str,list[str]]={}
     for raw in extra: _add_input(groups,"authority_input",raw)
     _add_input(groups,"owner_decision",task.get("direct_owner_authority"))
+    for raw in task.get("followup_source_reports",[]) if isinstance(task.get("followup_source_reports"),list) else []:
+        _add_input(groups,"review_finding",raw)
     analysis=task.get("last_analysis") or {}
     if analysis.get("outcome") in {"resume","replan","replan-resume"}:
         _add_input(groups,"analyst_finding",analysis.get("report"))
@@ -388,9 +399,14 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     if role not in ROLE_NAMES: raise ValueError(f"unknown role: {role}")
     tier=DEFAULT_TIER[role]
     if args.tier and args.tier != tier:
-        raise ValueError(f"{role} is fixed to the {tier} worker class; configure the Grunt/Analyst runtime instead of overriding role tier")
+        raise ValueError(f"{role} is fixed to the {tier} authority lane; choose a runtime profile instead of changing authority")
+    profile_name=getattr(args,"runtime_profile",None) or task.get("pending_runtime_profile")
+    if role=="fixer" and status=="needs-fix" and not profile_name:
+        for prior in reversed(task.get("attempts",[])):
+            if isinstance(prior,dict) and prior.get("role")=="reviewer":
+                profile_name=str(prior.get("runtime_profile") or "default"); break
     continuing=bool(args.resume_last or args.resume_session)
-    if role in {"reviewer","plan-reviewer","context-reviewer"} and continuing:
+    if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"} and continuing:
         raise ValueError(f"{role} must always start in a fresh session; independent review may not resume prior worker/reviewer context")
     validate_launch_role(task,role,continuing=continuing)
     unresolved=[a for a in task.get("attempts",[]) if isinstance(a,dict) and dsd_task.attempt_is_unresolved(a)]
@@ -446,6 +462,10 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     scripts=Path(__file__).resolve().parent
     run_checked([sys.executable,str(scripts/"scope_snapshot.py"),"capture","--root",str(wt),"--baseline-ref",checkpoint,"--output",str(baseline)])
     brief=Path(str(task["brief"])).resolve(); input_groups=task_input_groups(run,phase,task,role,args.input or [])
+    if role=="phase-auditor":
+        dossier=event/"phase-gate-dossier.md"
+        dossier.write_text(dsd_task.phase_gate_dossier_text(run,phase,tid),encoding="utf-8")
+        _add_input(input_groups,"authority_input",dossier)
     authority_roles={"goal-planner","plan-reviewer","context-reviewer","planner","discovery","phase-surveyor","recovery","phase-auditor"}
     if role in authority_roles:
         plan_path=rules_snapshot.get("authority_plan")
@@ -480,21 +500,38 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         requested_model=(args.model or configured.get("model") or "").strip()
         if requested_driver != str(configured.get("driver") or "") or requested_model != str(configured.get("model") or ""):
             raise ValueError("Implementer/Reviewer/Fixer must use the configured Grunt runtime; change the run configuration rather than switching models inside one task loop")
-    driver,model,runtime_options=resolve_runtime(info,tier,args.driver,args.model)
+    driver,model,runtime_options,selected_profile=resolve_runtime(info,tier,args.driver,args.model,str(profile_name) if profile_name else None)
+    if selected_profile!="default":
+        # A configured max-use profile is an owner spend authorization. Reserving a
+        # use before process launch prevents concurrent parents from overspending it.
+        dsd_task.consume_runtime_profile(run,tier,selected_profile)
     launch_cmd=[sys.executable,str(scripts/"run_worker.py"),"--project-root",str(wt),"--run-root",str(run),"--task-id",tid,"--role",role,"--attempt",str(number),"--prompt-file",str(prompt),"--task-contract",str(brief),"--worker-rules",str(rules),"--scope-baseline",str(baseline),"--report",str(report),"--event-dir",str(event),"--log",str(log),"--db",str(db),"--driver",driver,"--model",model,"--tier",tier,"--detach"]
+    launch_interval=float(info.get("launch_start_interval_seconds",dsd_task.DEFAULT_LAUNCH_START_INTERVAL_SECONDS))
+    launch_cmd += ["--launch-start-interval-seconds",str(launch_interval)]
+    effort=str(runtime_options.get("effort") or "").strip()
+    if effort: launch_cmd += ["--effort",effort]
     if resume: launch_cmd += ["--resume-session",resume]
     if args.auto_flag is not None: launch_cmd += [f"--auto-flag={args.auto_flag}"]
     cp=run_checked(launch_cmd); launch=json.loads(cp.stdout)
-    record={"task_id":tid,"role":role,"tier":tier,"driver":driver,"model":model,"attempt":number,"event_dir":str(event),"status":"started","monitor_pid":launch.get("monitor_pid"),"checkpoint_ref":checkpoint,"checkpoint_oid":checkpoint_oid,"resume_session":resume,"worker_rules":str(rules),"workspace_mode":workspace_mode,"project_root":str(wt),"workspace_primary_head":ws.get("primary_head"),"analysis_view_generation":ws.get("analysis_view_generation"),"inputs":[p for values in input_groups.values() for p in values],"inputs_by_type":input_groups}
+    record={"task_id":tid,"role":role,"tier":tier,"runtime_profile":selected_profile,"driver":driver,"model":model,"attempt":number,"event_dir":str(event),"status":"started","monitor_pid":launch.get("monitor_pid"),"checkpoint_ref":checkpoint,"checkpoint_oid":checkpoint_oid,"resume_session":resume,"worker_rules":str(rules),"workspace_mode":workspace_mode,"project_root":str(wt),"workspace_primary_head":ws.get("primary_head"),"workspace_primary_status":ws.get("primary_status"),"analysis_view_generation":ws.get("analysis_view_generation"),"inputs":[p for values in input_groups.values() for p in values],"inputs_by_type":input_groups}
+    if runtime_options: record["runtime_options"]=runtime_options
     if role=="plan-reviewer": record["plan_review_target"]=plan_review_binding
     if role=="context-reviewer": record["context_review_target"]=context_review_binding
     record_path=event/"task-attempt.json"; dsd_task.write_json(record_path,record)
     class R: pass
     r=R(); r.run_root=run; r.phase_id=phase; r.task_id=tid; r.attempt_json=record_path
     dsd_task.command_record_attempt(r)
+    if task.get("pending_runtime_profile")==selected_profile:
+        state_path=dsd_task.task_file(run,phase,tid)
+        with dsd_task.file_lock(state_path.with_suffix(".lock")):
+            current=dsd_task.load_json(state_path)
+            if current.get("pending_runtime_profile")==selected_profile:
+                current.pop("pending_runtime_profile",None); current["updated_at"]=dsd_task.now(); dsd_task.write_json(state_path,current)
     # Launch output is a routing handoff. Runtime/workspace details are durable in the
     # attempt record and do not need to be re-injected into parent context each time.
-    return {"status":"started","run_root":str(run),"phase_id":phase,"task_id":tid,"attempt":label,"role":role,"event_dir":str(event)}
+    result={"status":"started","run_root":str(run),"phase_id":phase,"task_id":tid,"attempt":label,"role":role,"event_dir":str(event)}
+    if selected_profile!="default": result["runtime_profile"]=selected_profile
+    return result
 
 
 
@@ -562,13 +599,16 @@ def _iso_epoch(value: Any) -> float | None:
         return None
 
 
-def _completed_role_duration_reference(run:Path,phase:str,role:str,exclude_event:Path)->dict[str,Any]|None:
+def _completed_role_duration_reference(run:Path,phase:str,role:str,driver:str,model:str,profile:str,exclude_event:Path)->dict[str,Any]|None:
     durations=[]; tasks_dir=dsd_task.phase_root(run,phase)/"tasks"
     for state_path in tasks_dir.glob("*/task.json") if tasks_dir.is_dir() else []:
         try: task=dsd_task.load_json(state_path)
         except Exception: continue
         for attempt in task.get("attempts",[]):
             if not isinstance(attempt,dict) or attempt.get("role")!=role: continue
+            if driver and model:
+                if str(attempt.get("driver") or "")!=driver or str(attempt.get("model") or "")!=model: continue
+                if str(attempt.get("runtime_profile") or "default")!=profile: continue
             event=Path(str(attempt.get("event_dir") or ""))
             try:
                 if event.resolve()==exclude_event.resolve(): continue
@@ -629,23 +669,36 @@ def command_inspect(args:argparse.Namespace)->dict[str,Any]:
         try: started=event.stat().st_mtime
         except OSError: started=None
     elapsed=max(0,round(time.time()-started,1)) if started is not None else None
-    role=str(record.get("role") or "")
-    duration_ref=_completed_role_duration_reference(run,phase,role,event) if live and role and not getattr(args,"skip_duration_reference",False) else None
+    role=str(record.get("role") or ""); driver=str(record.get("driver") or ""); model=str(record.get("model") or ""); profile=str(record.get("runtime_profile") or "default")
+    duration_ref=_completed_role_duration_reference(run,phase,role,driver,model,profile,event) if live and role and not getattr(args,"skip_duration_reference",False) else None
     result={
         "task_id":tid,"event_dir":str(event),"state":state,"role":record.get("role"),"attempt_status":record.get("status"),
         "report_state":report_state,"log_bytes":log_obs.get("bytes",0),"log_age_seconds":log_obs.get("age_seconds"),
         "report_bytes":report_obs.get("bytes",0),"report_age_seconds":report_obs.get("age_seconds"),"elapsed_seconds":elapsed,
         "next_action":"gate" if terminal is not None else "running-progress-unknown" if live else "sweep-stale",
     }
+    if profile!="default": result["runtime_profile"]=profile
     if live:
         result["progress_assessment"]="unknown"
         if duration_ref:
-            result["role_duration_reference"]=duration_ref
+            result["runtime_duration_reference"]={**duration_ref,"runtime_profile":profile}
+            result["role_duration_reference"]=duration_ref  # legacy/debug alias; omit from ordinary parent routing logic
             median=float(duration_ref.get("median_seconds") or 0)
             report_age=report_obs.get("age_seconds"); log_age=log_obs.get("age_seconds")
-            if median>0 and elapsed is not None and duration_ref.get("samples",0)>=2 and elapsed>=max(1800.0,2.5*median) and isinstance(report_age,(int,float)) and report_age>=max(1800.0,median) and isinstance(log_age,(int,float)) and log_age<=300:
-                result["attention"]="long-running-with-stale-report-while-log-is-active"
-                result["next_action"]="consider-intervention"
+            anomalous=median>0 and elapsed is not None and duration_ref.get("samples",0)>=2 and elapsed>=max(1800.0,2.5*median) and isinstance(report_age,(int,float)) and report_age>=max(1800.0,median)
+            if anomalous:
+                if isinstance(log_age,(int,float)) and log_age<=300:
+                    result["attention"]="long-running-with-stale-report-while-log-is-active"
+                elif not log_obs.get("exists") or not isinstance(log_age,(int,float)) or log_age>=900:
+                    result["attention"]="silent-long-running"
+                if result.get("attention"):
+                    result["next_action"]="consider-intervention"
+        elif elapsed is not None:
+            # With no history, surface only extreme silence; never diagnose cause.
+            default_limit=7200.0 if dsd_task.DEFAULT_TIER.get(role)=="grunt" else 21600.0
+            log_age=log_obs.get("age_seconds"); report_age=report_obs.get("age_seconds")
+            if elapsed>=default_limit and (not log_obs.get("exists") or (isinstance(log_age,(int,float)) and log_age>=1800)) and isinstance(report_age,(int,float)) and report_age>=1800:
+                result["attention"]="silent-long-running"; result["next_action"]="consider-intervention"
     if terminal is not None:
         result["terminal"]={"status":terminal.get("status"),"exit_code":terminal.get("exit_code")}
     if getattr(args,"details",False):
@@ -678,9 +731,16 @@ def _gate_one(run:Path,phase:str,tid:str,event_arg:Path|None)->dict[str,Any]:
     if result["ready_for_interpretation"] and report.is_file():
         # The evidence gate already owns the report path. Surface only the bounded
         # routing section here so the parent does not spend a second tool call merely
-        # to extract the same attempt's verdict/disposition text. This is extraction,
-        # never semantic PASS/FAIL inference.
+        # to extract the same attempt's verdict/disposition text.
         result["report_surface"]=report_surface_helper.surface(report,max_lines=6,max_chars=1000)
+        try:
+            task=dsd_task.load_task(run,phase,tid); record=_attempt_record_for_event(task,event); role=str(record.get("role") or "")
+            declared=dsd_task.declared_report_outcome(report,role,required=False)
+            if declared: result["declared_outcome"]=declared
+            elif role in dsd_task.REPORT_OUTCOMES_BY_ROLE:
+                result["routing_protocol_error"]=f"{role} report lacks an exact first-line routing token"
+        except (OSError,ValueError,KeyError):
+            pass
     return result
 
 
@@ -755,7 +815,7 @@ def command_follow(args:argparse.Namespace)->dict[str,Any]:
 
 def parser()->argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
-    p=sub.add_parser("launch"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--role",choices=sorted(ROLE_NAMES)); p.add_argument("--tier",choices=("analyst","grunt"),help=argparse.SUPPRESS); p.add_argument("--driver"); p.add_argument("--model"); p.add_argument("--worker-rules"); p.add_argument("--db"); p.add_argument("--attempt",type=int); p.add_argument("--authority-input",dest="input",action="append",default=[]); p.add_argument("--input",dest="input",action="append",help=argparse.SUPPRESS); p.add_argument("--resume-session"); p.add_argument("--resume-last",action="store_true"); p.add_argument("--auto-flag",default="--auto")
+    p=sub.add_parser("launch"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--role",choices=sorted(ROLE_NAMES)); p.add_argument("--tier",choices=("analyst","grunt"),help=argparse.SUPPRESS); p.add_argument("--driver"); p.add_argument("--model"); p.add_argument("--runtime-profile"); p.add_argument("--worker-rules"); p.add_argument("--db"); p.add_argument("--attempt",type=int); p.add_argument("--authority-input",dest="input",action="append",default=[]); p.add_argument("--input",dest="input",action="append",help=argparse.SUPPRESS); p.add_argument("--resume-session"); p.add_argument("--resume-last",action="store_true"); p.add_argument("--auto-flag",default="--auto")
     p=sub.add_parser("gate"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",action="append",required=True); p.add_argument("--event-dir",type=Path)
     for name in ("inspect","follow"):
         p=sub.add_parser(name); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--event-dir",type=Path)

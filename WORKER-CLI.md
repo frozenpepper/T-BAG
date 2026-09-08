@@ -5,9 +5,11 @@ Cold-load this router only when CLI-specific launch, resume, storage, failure, o
 Wired technical-worker backends in this release:
 
 - `worker-cli/OPENCODE.md`
+- `worker-cli/OPENCODE2.md`
 - `worker-cli/CODEX.md`
+- `worker-cli/CLAUDE.md`
 
-Do not load unrelated CLI files. An unwired CLI is consultant-only until it has an adapter that preserves the lifecycle contract.
+Do not load unrelated CLI files. These adapters are **pre-wired optimizations**, not the semantic capability boundary of the skill: a capable parent may satisfy an unusual owner-requested CLI/tool path when it can preserve the T-BAG lifecycle contract. Repeated/common mechanisms should graduate into an adapter instead of being rediscovered every run.
 
 **Never bypass `dsd_attempt.py launch` for a technical task.** Every wired backend must preserve budget reservation, frozen checkpoint/scope baseline, attempt record, terminal event, report path, resumable session identity where supported, and arbitrary mid-flight inspection. Launch must return while the worker is running; completion may not be the only observation point.
 

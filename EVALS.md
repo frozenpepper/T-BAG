@@ -15,7 +15,7 @@ Use `evals/cases.jsonl` as the stable corpus. For a release candidate:
 
 Do not change expected behavior after seeing a result. Revise the case first, then rerun.
 
-The corpus focuses on behavioral contracts: planning/decomposition and authority, parent semantic abstention, deep Analyst/Reviewer reasoning, bounded perfection without scope creep, acceptance integrity, review/fix convergence, escalation, session/recovery choices, quiet operation and owner reporting, plan-owned assurance, runtime choice, and harness supervision/interactivity.
+The corpus focuses on behavioral contracts: planning/decomposition and authority, parent semantic abstention, deep Analyst/Reviewer reasoning, bounded quality, acceptance integrity, review/fix convergence, authority vs capability escalation, task-shape diagnosis, phase-exit gates, semantic runtime flexibility, session/recovery choices, owner reporting, plan-owned assurance, harness supervision/interactivity, parallel launch admission, and isolated OpenCode 2 worker use.
 
 Purely deterministic mechanics belong in `tests/`, not duplicated as prose evals.
 

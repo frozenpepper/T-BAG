@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -30,7 +31,8 @@ PLAN_FORMAT = "dsd-task-plan-v2.1"
 RUN_FORMAT = "dsd-run-v2.2"
 CONTROL_DIR = "TBag"
 CACHE_DIR = "t-bag"
-SUPPORTED_WORKER_DRIVERS = {"opencode", "codex"}
+SUPPORTED_WORKER_DRIVERS = {"opencode", "opencode2", "codex", "claude"}
+DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
 RUN_STATUSES = {"active", "completed", "human-blocked", "paused-by-user", "abandoned"}
 STATUSES = {
     "planned", "ready", "active", "awaiting-review", "needs-fix", "needs-analysis",
@@ -38,10 +40,22 @@ STATUSES = {
 }
 ATTEMPT_STATUSES = {
     "started", "gated", "report-recovery", "report-resume", "mutating-report-resume",
-    "mutating-report-recovery", "integrity-failed", "stale-unresolved",
+    "mutating-report-recovery", "integrity-failed", "stale-unresolved", "capability-routed",
 }
 KINDS = {"analysis", "implementation", "verification"}
 TIERS = {"analyst", "grunt"}
+
+# The first non-empty line of reports from routing roles is a tiny protocol, not
+# sentiment to be inferred by the parent. The worker owns the semantic judgment;
+# the control plane only records and routes the declared token.
+REPORT_OUTCOMES_BY_ROLE = {
+    "reviewer": {"PASS": "pass", "FAIL": "fail", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "plan-reviewer": {"PASS": "pass", "FAIL": "fail", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "context-reviewer": {"PASS": "pass", "FAIL": "fail", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "verification": {"PASS": "pass", "BLOCKED": "blocked", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "evidence-clerk": {"PASS": "pass", "BLOCKED": "blocked", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "phase-auditor": {"PASS": "pass", "BLOCKED": "blocked", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+}
 BASE_ROLES_BY_KIND = {
     "analysis": {"goal-planner", "plan-reviewer", "context-reviewer", "planner", "discovery", "phase-surveyor", "recovery", "phase-auditor"},
     "implementation": {"implementer"},
@@ -72,6 +86,119 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)
+
+
+def declared_report_outcome(report: Path, role: str, *, required: bool = False) -> str | None:
+    """Read an exact worker-declared routing token from the report's first line.
+
+    This deliberately does not classify prose. A routing role must put one exact token
+    on the first non-empty line; everything after it remains ordinary rich evidence.
+    """
+    allowed=REPORT_OUTCOMES_BY_ROLE.get(role)
+    if not allowed:
+        return None
+    if not report.is_file():
+        if required: raise ValueError(f"routing report missing: {report}")
+        return None
+    first=""
+    for raw in report.read_text(encoding="utf-8",errors="replace").splitlines():
+        if raw.strip():
+            first=raw.strip(); break
+    outcome=allowed.get(first)
+    if outcome is None and required:
+        raise ValueError(
+            f"{role} report must begin with one exact routing token: {', '.join(allowed)}; got {first!r}"
+        )
+    return outcome
+
+
+
+FOLLOWUP_HEADING = "## Follow-up obligations"
+
+def review_followup_items(report: Path) -> list[str]:
+    """Parse the Reviewer's explicit material carry-forward section.
+
+    This is deliberately structural, not semantic classification: the Reviewer decides
+    whether something is a material out-of-scope obligation. The kernel only preserves
+    exact bullet text once the dedicated heading is used.
+    """
+    if not report.is_file(): return []
+    lines=report.read_text(encoding="utf-8",errors="replace").splitlines()
+    starts=[i for i,line in enumerate(lines) if line.strip()==FOLLOWUP_HEADING]
+    if not starts: return []
+    if len(starts)>1: raise ValueError(f"Reviewer report contains multiple {FOLLOWUP_HEADING!r} sections")
+    items=[]
+    for raw in lines[starts[0]+1:]:
+        stripped=raw.strip()
+        if stripped.startswith("## "): break
+        if not stripped: continue
+        if not stripped.startswith("- ") or not stripped[2:].strip():
+            raise ValueError(f"{FOLLOWUP_HEADING} must contain only concise single-line '- ...' bullets")
+        items.append(stripped[2:].strip())
+    if not items: raise ValueError(f"{FOLLOWUP_HEADING} is present but contains no obligations")
+    return items
+
+def iter_review_findings(task: dict[str, Any]):
+    for review in task.get("review_history",[]):
+        if not isinstance(review,dict): continue
+        for finding in review.get("findings",[]):
+            if isinstance(finding,dict): yield review,finding
+
+def open_review_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
+    return [finding for _,finding in iter_review_findings(task) if str(finding.get("status") or "open")=="open"]
+
+def all_review_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
+    return [finding for _,finding in iter_review_findings(task)]
+
+def phase_open_review_findings(run: Path, phase: str) -> list[dict[str, Any]]:
+    out=[]; tasks_dir=phase_root(run,phase)/"tasks"
+    for state_path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
+        task=load_json(state_path)
+        for finding in open_review_findings(task):
+            out.append({"source_task":task.get("task_id"),**finding})
+    return out
+
+def _finding_refs(task: dict[str, Any], ids: list[str]) -> list[dict[str, Any]]:
+    wanted=set(map(str,ids)); found=[]
+    for _,finding in iter_review_findings(task):
+        if str(finding.get("finding_id") or "") in wanted: found.append(finding)
+    missing=sorted(wanted-{str(x.get("finding_id") or "") for x in found})
+    if missing: raise ValueError(f"unknown review finding id(s): {missing}")
+    return found
+
+def triage_review_findings(run: Path, phase: str, source_task_id: str, finding_ids: list[str], *, resolution: str, report: Path | None = None, plan: Path | None = None, status: str = "triaged", decision: Path | None = None) -> None:
+    source_path=task_file(run,phase,source_task_id)
+    with file_lock(source_path.with_suffix(".lock")):
+        source=load_json(source_path); findings=_finding_refs(source,finding_ids); stamp=now()
+        if status not in {"triaged","cancelled"}: raise ValueError(f"unsupported review finding closure status: {status}")
+        for finding in findings:
+            if str(finding.get("status") or "open")!="open": continue
+            finding["status"]=status; finding["resolution"]=resolution; finding["triaged_at"]=stamp
+            if report is not None: finding["resolution_report"]=str(report.resolve())
+            if plan is not None: finding["resolution_plan"]=str(plan.resolve())
+            if decision is not None: finding["resolution_decision"]=str(decision.resolve())
+        source["updated_at"]=stamp; write_json(source_path,source)
+
+def report_requests_capability(report: Path) -> bool:
+    if not report.is_file(): return False
+    for raw in report.read_text(encoding="utf-8",errors="replace").splitlines():
+        if raw.strip(): return raw.strip()=="ESCALATE CAPABILITY"
+    return False
+
+
+def accepted_outcome(task: dict[str, Any]) -> str | None:
+    raw=str(task.get("accepted_outcome") or "").strip().lower()
+    if raw: return raw
+    # Backward-compatible recovery for already-accepted v2.2 specialist tasks: infer
+    # only from the exact report protocol, never from prose sentiment.
+    report=Path(str(task.get("accepted_report") or ""))
+    role=str(task.get("role") or "")
+    return declared_report_outcome(report,role,required=False) if str(report) not in {"", "."} else None
+
+
+def owner_plan_dir(run: Path) -> Path:
+    """Human-facing plan/gate folder. This is a legible mirror, not worker authority."""
+    return run.resolve()/"plan"
 
 
 @contextlib.contextmanager
@@ -127,6 +254,12 @@ def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | 
         return False
     seen.add(tid)
     dep = load_task(run, phase, tid)
+    # A fresh Review may PASS the source task while discovering a separate material
+    # obligation that can invalidate already-frozen downstream work. Until an Analyst
+    # has explicitly reconciled those follow-ups with the plan, this dependency is not
+    # safe to treat as discharged.
+    if open_review_findings(dep):
+        return False
     if dep.get("status") == "superseded":
         raw = dep.get("superseded_by")
         successors = [raw] if isinstance(raw, str) and raw.strip() else list(raw) if isinstance(raw, list) else []
@@ -134,7 +267,13 @@ def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | 
         return bool(successors) and all(dependency_satisfied(run, phase, successor, seen) for successor in successors)
     if dep.get("requires_integration"):
         return dep.get("status") == "integrated"
-    return dep.get("status") in {"accepted", "integrated"}
+    if dep.get("status") not in {"accepted", "integrated"}:
+        return False
+    # Verification and phase gates are predicates, not merely evidence-producing
+    # tasks. Red evidence must remain red and may not release dependent work.
+    if dep.get("kind")=="verification" or dep.get("role")=="phase-auditor":
+        return accepted_outcome(dep)=="pass"
+    return True
 
 
 
@@ -182,7 +321,12 @@ def readiness(run: Path, phase: str, task: dict[str, Any]) -> tuple[bool, list[s
             if not dependency_satisfied(run, phase, dep): missing.append(dep)
         except ValueError:
             missing.append(dep)
-    return (not missing, missing)
+    # Material Review follow-ups are a short planning barrier for *new* phase work.
+    # Live attempts are never killed, and the mechanically-created triage Analyst is
+    # exempt, but no other frozen brief starts until the new obligation is reconciled.
+    if not task.get("followup_triage_for") and phase_open_review_findings(run,phase):
+        missing.append("review-followup-triage")
+    return (not missing, list(dict.fromkeys(missing)))
 
 
 def pid_alive(pid: Any) -> bool:
@@ -275,8 +419,8 @@ def normalize_task_spec(item: dict[str, Any], graph_dir: Path) -> dict[str, Any]
     default_role = "implementer" if kind == "implementation" else "verification" if kind == "verification" else "discovery"
     role = str(item.get("role") or default_role).lower()
     if role not in ROLE_NAMES: raise ValueError(f"{task_id}: unknown role {role!r}")
-    if role in {"goal-planner","plan-reviewer","context-reviewer"}:
-        raise ValueError(f"{task_id}: role {role!r} is a control-plane bootstrap/review role and cannot appear in an ordinary phase task graph")
+    if role in {"goal-planner","plan-reviewer","context-reviewer","phase-auditor"}:
+        raise ValueError(f"{task_id}: role {role!r} is a control-plane planning/review/gate role and cannot appear in an ordinary phase task graph")
     tier = str(item.get("tier") or DEFAULT_TIER[role]).lower()
     if tier not in TIERS: raise ValueError(f"{task_id}: tier must be analyst or grunt")
     brief_raw = item.get("brief")
@@ -318,18 +462,80 @@ def assert_acyclic(existing: dict[str, list[str]], proposed: dict[str, list[str]
     for node in graph: visit(node)
 
 
-def _runtime_spec(driver: str | None, model: str | None) -> dict[str, Any] | None:
+def _runtime_spec(driver: str | None, model: str | None, *, effort: str | None = None) -> dict[str, Any] | None:
     driver=(driver or "").strip(); model=(model or "").strip()
     if bool(driver) != bool(model):
         raise ValueError("worker runtime requires both driver and model, or neither")
     if not driver: return None
-    return {"driver": driver, "model": model, "options": {}}
+    options: dict[str, Any] = {}
+    effort=(effort or "").strip().lower()
+    if effort:
+        if not re.fullmatch(r"[a-z0-9_-]+",effort):
+            raise ValueError("runtime effort must be a simple CLI value")
+        if driver=="opencode":
+            raise ValueError("OpenCode has no provider-independent effort flag; encode effort in the selected model/endpoint/profile")
+        if driver=="claude" and effort not in {"low","medium","high","xhigh","max"}:
+            raise ValueError("Claude effort must be low, medium, high, xhigh, or max")
+        options["effort"]=effort
+    return {"driver": driver, "model": model, "options": options}
 
 
 def runtime_config(run_info: dict[str, Any], tier: str) -> dict[str, Any] | None:
     runtimes=run_info.get("worker_runtimes") if isinstance(run_info.get("worker_runtimes"),dict) else {}
     value=runtimes.get(tier)
     return value if isinstance(value,dict) and value.get("driver") and value.get("model") else None
+
+
+def configured_runtime_profiles(run_info: dict[str, Any], tier: str) -> list[dict[str, Any]]:
+    """Return valid configured profile rows in stable owner-declared order."""
+    ladders=run_info.get("runtime_profiles") if isinstance(run_info.get("runtime_profiles"),dict) else {}
+    raw=ladders.get(tier) if isinstance(ladders.get(tier),list) else []
+    out=[]
+    for item in raw:
+        if not isinstance(item,dict): continue
+        name=str(item.get("name") or "").strip()
+        driver=str(item.get("driver") or "").strip(); model=str(item.get("model") or "").strip()
+        if name and driver and model: out.append(item)
+    return out
+
+
+def runtime_profiles(run_info: dict[str, Any], tier: str) -> list[dict[str, Any]]:
+    """Return configured profiles that still have authorized uses available."""
+    out=[]
+    for item in configured_runtime_profiles(run_info,tier):
+        max_uses=item.get("max_uses"); uses=int(item.get("uses") or 0)
+        if isinstance(max_uses,int) and max_uses>=0 and uses>=max_uses: continue
+        out.append(item)
+    return out
+
+
+def runtime_profile(run_info: dict[str, Any], tier: str, name: str | None) -> dict[str, Any] | None:
+    if not name or name=="default":
+        base=runtime_config(run_info,tier)
+        return {**base,"name":"default","uses":None,"max_uses":None} if base else None
+    target=str(name).strip()
+    for item in runtime_profiles(run_info,tier):
+        if str(item.get("name"))==target: return item
+    return None
+
+
+def runtime_profile_names(run_info: dict[str, Any], tier: str) -> list[str]:
+    names=["default"] if runtime_config(run_info,tier) else []
+    names.extend(str(x.get("name")) for x in configured_runtime_profiles(run_info,tier))
+    return names
+
+
+def next_runtime_profile(run_info: dict[str, Any], tier: str, current: str | None) -> dict[str, Any] | None:
+    # Ordering is based on the configured ladder, not only profiles with remaining
+    # uses. Otherwise a just-consumed one-shot current profile disappears and the
+    # search can accidentally wrap backward to the default runtime.
+    names=runtime_profile_names(run_info,tier); cur=current or "default"
+    try: index=names.index(cur)
+    except ValueError: return None
+    for name in names[index+1:]:
+        profile=runtime_profile(run_info,tier,name)
+        if profile: return profile
+    return None
 
 
 def missing_runtime_tiers(run_info: dict[str, Any]) -> list[str]:
@@ -383,6 +589,9 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         if owner.get("format")!="tbag-runtime-owner-v1" or owner.get("run_id")!=slug(args.run_id) or Path(str(owner.get("project_root") or "")).resolve()!=project or Path(str(owner.get("run_root") or "")).resolve()!=run:
             raise ValueError(f"runtime_root is owned by a different run/project: {runtime}")
     if args.max_workers < 1: raise ValueError("--max-workers must be >= 1")
+    launch_interval=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS))
+    if not math.isfinite(launch_interval) or launch_interval < 0:
+        raise ValueError("--launch-start-interval-seconds must be a finite number >= 0")
     worker_runtimes = {
         "grunt": _runtime_spec(getattr(args,"grunt_driver",None),getattr(args,"grunt_model",None)),
         "analyst": _runtime_spec(getattr(args,"analyst_driver",None),getattr(args,"analyst_model",None)),
@@ -397,6 +606,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "format": RUN_FORMAT, "run_id": slug(args.run_id), "project_root": str(project),
         "runtime_root": str(runtime), "created_at": now(), "status": "active",
         "max_workers": args.max_workers,
+        "launch_start_interval_seconds": launch_interval,
         "escalation_enabled": getattr(args, "escalation", "on") == "on",
         "worker_runtimes": worker_runtimes,
     }
@@ -409,26 +619,75 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_runtime_status(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); info=load_run(run)
-    return {
+    result={
         "run_id":info["run_id"],
         "status":info.get("status","active"),
         "escalation_enabled":escalation_enabled(info),
+        "launch_start_interval_seconds":float(info.get("launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),
         "worker_runtimes":info.get("worker_runtimes",{}),
         "missing_runtime_config":missing_runtime_tiers(info),
-        "supported_worker_drivers":sorted(SUPPORTED_WORKER_DRIVERS),
+        "wired_worker_drivers":sorted(SUPPORTED_WORKER_DRIVERS),
     }
+    profiles=info.get("runtime_profiles") if isinstance(info.get("runtime_profiles"),dict) else {}
+    if profiles: result["runtime_profiles"]=profiles
+    return result
 
 
 def command_set_runtime(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); path=run_file(run)
     with file_lock(run/".run.lock"):
-        info=load_run(run); spec=_runtime_spec(args.driver,args.model)
+        info=load_run(run); spec=_runtime_spec(args.driver,args.model,effort=getattr(args,"effort",None))
         assert spec is not None
-        if args.driver not in SUPPORTED_WORKER_DRIVERS and not args.allow_unwired_driver:
+        if args.driver not in SUPPORTED_WORKER_DRIVERS:
             raise ValueError(f"worker driver {args.driver!r} is not wired; supported technical-worker drivers: {sorted(SUPPORTED_WORKER_DRIVERS)}")
         runtimes=info.get("worker_runtimes") if isinstance(info.get("worker_runtimes"),dict) else {}
         runtimes=dict(runtimes); runtimes[args.tier]=spec; info["worker_runtimes"]=runtimes; info["updated_at"]=now(); write_json(path,info)
     return {"tier":args.tier,"runtime":spec,"missing_runtime_config":missing_runtime_tiers(info)}
+
+
+def command_set_runtime_profile(args: argparse.Namespace) -> dict[str, Any]:
+    """Append or replace one optional stronger runtime in an authority lane.
+
+    The default two-model setup remains worker_runtimes. Profiles are cold optional
+    configuration and are considered only when explicitly requested or after a worker
+    declares ESCALATE CAPABILITY.
+    """
+    run=args.run_root.resolve(); path=run_file(run); name=slug(args.name)
+    if name=="default": raise ValueError("runtime profile name 'default' is reserved for the lane's normal runtime")
+    if args.max_uses is not None and args.max_uses < 1: raise ValueError("--max-uses must be >= 1")
+    with file_lock(run/".run.lock"):
+        info=load_run(run); spec=_runtime_spec(args.driver,args.model,effort=getattr(args,"effort",None)); assert spec is not None
+        if args.driver not in SUPPORTED_WORKER_DRIVERS:
+            raise ValueError(f"runtime profile driver {args.driver!r} has no first-class adapter; wired drivers: {sorted(SUPPORTED_WORKER_DRIVERS)}")
+        ladders=info.get("runtime_profiles") if isinstance(info.get("runtime_profiles"),dict) else {}
+        ladders=dict(ladders); rows=list(ladders.get(args.tier) or []) if isinstance(ladders.get(args.tier),list) else []
+        replacement={"name":name,**spec,"uses":0}
+        if args.max_uses is not None: replacement["max_uses"]=args.max_uses
+        found=False
+        for i,item in enumerate(rows):
+            if isinstance(item,dict) and str(item.get("name"))==name:
+                # Preserve consumed spend when changing the mechanical endpoint/model.
+                replacement["uses"]=int(item.get("uses") or 0); rows[i]=replacement; found=True; break
+        if not found: rows.append(replacement)
+        ladders[args.tier]=rows; info["runtime_profiles"]=ladders; info["updated_at"]=now(); write_json(path,info)
+    return {"tier":args.tier,"profile":replacement,"profile_order":runtime_profile_names(info,args.tier)}
+
+
+def consume_runtime_profile(run: Path, tier: str, name: str) -> None:
+    if name=="default": return
+    path=run_file(run)
+    with file_lock(run/".run.lock"):
+        info=load_run(run); ladders=info.get("runtime_profiles") if isinstance(info.get("runtime_profiles"),dict) else {}
+        rows=list(ladders.get(tier) or []) if isinstance(ladders.get(tier),list) else []
+        found=False
+        for item in rows:
+            if isinstance(item,dict) and str(item.get("name"))==name:
+                uses=int(item.get("uses") or 0); max_uses=item.get("max_uses")
+                if isinstance(max_uses,int) and uses>=max_uses:
+                    raise ValueError(f"runtime profile {tier}/{name} has exhausted its {max_uses} authorized use(s)")
+                item["uses"]=uses+1; found=True; break
+        if not found: raise ValueError(f"runtime profile {tier}/{name!s} is not configured or has no remaining uses")
+        ladders=dict(ladders); ladders[tier]=rows; info["runtime_profiles"]=ladders; info["updated_at"]=now(); write_json(path,info)
 
 
 def command_set_escalation(args: argparse.Namespace) -> dict[str, Any]:
@@ -864,7 +1123,7 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     # ``accepted`` terminal state instead of inventing a separate consumed/closed
     # lifecycle state. Implementation/verification tasks stay in their explicit
     # replan lane because their own obligation may still need resume/supersession.
-    source_closed=False
+    source_closed=False; followup_resolution=None
     source_path=task_file(run,phase,source["source_task_id"])
     with file_lock(source_path.with_suffix(".lock")):
         source_state=load_json(source_path)
@@ -873,6 +1132,13 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         if source_state.get("kind")=="analysis" and source_state.get("status") not in {"accepted","integrated","superseded"} and analysis.get("outcome")=="replan" and same_report:
             source_state["status"]="accepted"; source_state["accepted_at"]=now(); source_state["accepted_report"]=source["source_report"]
             source_state["graph_consumed_at"]=now(); source_state["updated_at"]=now(); write_json(source_path,source_state); source_closed=True
+            ids=[str(x) for x in source_state.get("followup_finding_ids",[]) if str(x)] if isinstance(source_state.get("followup_finding_ids"),list) else []
+            origin=str(source_state.get("followup_triage_for") or "")
+            if ids and origin:
+                followup_resolution=(origin,ids,Path(source["source_report"]))
+    if followup_resolution is not None:
+        origin,ids,resolution_report=followup_resolution
+        triage_review_findings(run,phase,origin,ids,resolution="analyst-replan",report=resolution_report,plan=graph_path)
 
     ready_registered=[]
     for task_id in registered:
@@ -903,6 +1169,193 @@ def command_ready(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_show(args: argparse.Namespace) -> dict[str, Any]:
     return load_task(args.run_root.resolve(), slug(args.phase_id), slug(args.task_id))
+
+
+def task_brief_objective(task: dict[str, Any], *, max_chars: int = 700) -> str:
+    """Extract a small human-oriented objective from a frozen task brief."""
+    path=Path(str(task.get("brief") or ""))
+    if not path.is_file(): return task_brief_label(task)
+    try: lines=path.read_text(encoding="utf-8",errors="replace").splitlines()
+    except OSError: return task_brief_label(task)
+    start=None
+    for i,raw in enumerate(lines[:120]):
+        if raw.strip().lower()=="## objective": start=i+1; break
+    if start is None: return task_brief_label(task)
+    chunks=[]
+    for raw in lines[start:start+20]:
+        line=raw.strip()
+        if line.startswith("## "): break
+        if line: chunks.append(line.lstrip("- "))
+    text=" ".join(chunks).strip()
+    return text[:max_chars] if text else task_brief_label(task)
+
+
+def phase_gate_dossier_text(run: Path, phase: str, gate_task_id: str | None = None) -> str:
+    """Build a compact factual phase packet; the Auditor still owns semantic judgment."""
+    rows=[]; tasks_dir=phase_root(run,phase)/"tasks"
+    for path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
+        task=load_json(path); tid=str(task.get("task_id") or path.parent.name)
+        if tid==gate_task_id: continue
+        role=str(task.get("role") or "")
+        if role=="phase-auditor": continue
+        status=str(task.get("status") or "")
+        outcome=accepted_outcome(task) if status in {"accepted","integrated"} else None
+        review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
+        analysis=task.get("last_analysis") if isinstance(task.get("last_analysis"),dict) else {}
+        detail=[]
+        if review.get("outcome"): detail.append(f"review={review.get('outcome')}")
+        if outcome: detail.append(f"accepted-outcome={outcome}")
+        if analysis.get("outcome"): detail.append(f"analysis={analysis.get('outcome')}")
+        deps=task.get("dependencies") if isinstance(task.get("dependencies"),list) else []
+        row=(
+            f"- **{task_brief_label(task)}** (`{tid}`; {task.get('kind')}/{role}; status={status}"
+            + (f"; {', '.join(detail)}" if detail else "")
+            + (f"; depends on {', '.join(map(str,deps))}" if deps else "")
+            + f")\n  - Objective: {task_brief_objective(task)}"
+        )
+        for finding in all_review_findings(task):
+            state=str(finding.get("status") or "open")
+            resolution=str(finding.get("resolution") or "")
+            suffix=f"; resolution={resolution}" if resolution else ""
+            row += f"\n  - Review follow-up `{finding.get('finding_id')}` ({state}{suffix}): {str(finding.get('text') or '')[:500]}"
+        rows.append(row)
+    plan=owner_plan_dir(run)/"PLAN.md"
+    prior=sorted(owner_plan_dir(run).glob(f"PHASE-{phase}-GATE-*.md")) if owner_plan_dir(run).is_dir() else []
+    lines=[
+        f"# Phase {phase} gate dossier",
+        "",
+        f"Accepted plan mirror: {plan if plan.is_file() else 'unavailable'}",
+        "",
+        "This dossier is mechanically assembled orientation, not a verdict. Audit the accepted plan and actual integrated production behavior.",
+        "",
+        "## Task outline and durable outcomes",
+        *(rows or ["- No registered non-gate tasks."]),
+    ]
+    if prior:
+        lines += ["", "## Earlier gate reviews", *[f"- {x.name}" for x in prior[-5:]]]
+    return "\n".join(lines)+"\n"
+
+
+def _phase_task_success(run: Path, phase: str, task: dict[str, Any]) -> bool:
+    if open_review_findings(task): return False
+    status=str(task.get("status") or "")
+    if task.get("requires_integration"): return status=="integrated"
+    if status=="superseded":
+        try: return dependency_satisfied(run,phase,str(task.get("task_id") or ""))
+        except ValueError: return False
+    if status not in {"accepted","integrated"}: return False
+    if task.get("kind")=="verification": return accepted_outcome(task)=="pass"
+    return True
+
+
+def phase_gate_state(run: Path, phase: str) -> dict[str, Any]:
+    """Return whether a non-bootstrap phase is mechanically ready for/freshly gated."""
+    if phase=="bootstrap": return {"required":False,"reason":"bootstrap"}
+    tasks_dir=phase_root(run,phase)/"tasks"; material=[]; gates=[]
+    for path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
+        task=load_json(path)
+        if task.get("role")=="phase-auditor": gates.append(task)
+        else: material.append(task)
+    if not material: return {"required":False,"reason":"no-phase-work"}
+    unfinished=[str(t.get("task_id")) for t in material if not _phase_task_success(run,phase,t)]
+    if unfinished: return {"required":True,"ready":False,"reason":"phase-work-incomplete","unfinished":unfinished}
+    latest_change=max((str(t.get("updated_at") or t.get("created_at") or "") for t in material),default="")
+    passes=[t for t in gates if accepted_outcome(t)=="pass" and str(t.get("status"))=="accepted"]
+    if passes:
+        latest=max(passes,key=lambda t:str(t.get("phase_gate_at") or t.get("accepted_at") or ""))
+        gate_at=str(latest.get("phase_gate_at") or latest.get("accepted_at") or "")
+        if gate_at and gate_at>=latest_change:
+            return {"required":True,"ready":False,"reason":"fresh-pass","gate_task":latest.get("task_id"),"gate_report":latest.get("owner_gate_report")}
+    live_or_open=[str(t.get("task_id")) for t in gates if str(t.get("status")) not in {"accepted","integrated","superseded"}]
+    if live_or_open: return {"required":True,"ready":False,"reason":"gate-in-progress","gate_tasks":live_or_open}
+    return {"required":True,"ready":True,"reason":"phase-work-complete-needs-gate"}
+
+
+def command_prepare_phase_gate(args: argparse.Namespace) -> dict[str, Any]:
+    run=args.run_root.resolve(); phase=slug(args.phase_id); state=phase_gate_state(run,phase)
+    if not state.get("required") or not state.get("ready"):
+        raise ValueError(f"phase gate is not ready: {state.get('reason')}")
+    tasks_dir=phase_root(run,phase)/"tasks"; existing=[]
+    for path in tasks_dir.glob("*/task.json") if tasks_dir.is_dir() else []:
+        task=load_json(path)
+        if task.get("role")=="phase-auditor": existing.append(task)
+    number=len(existing)+1; tid=f"PHASE-GATE-{number:02d}"
+    briefs=phase_root(run,phase)/"phase-gate-briefs"; briefs.mkdir(parents=True,exist_ok=True)
+    brief=briefs/f"{tid}.md"
+    brief.write_text(
+        f"# Phase {phase} exit gate {number}\n\n"
+        "## Objective\nJudge whether the phase's authoritative goals and exit predicates are actually satisfied by the integrated production system. Task completion counts are orientation only, never the verdict.\n\n"
+        "## Acceptance\n- Reconstruct the phase goals from the accepted plan and supplied phase dossier.\n"
+        "- Audit cross-task seams, durable lifecycle/state, production wiring, red/deferred prerequisites, and proof sensitivity that individual task reviews can miss.\n"
+        "- Inspect the actual integrated project state at the frozen phase-gate view.\n"
+        "- Return PASS only when the phase goals themselves are established; otherwise BLOCKED with a consolidated corrective gap set, or ESCALATE when authority is insufficient.\n",
+        encoding="utf-8"
+    )
+    class A: pass
+    a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.brief=brief; a.kind="analysis"; a.role="phase-auditor"; a.tier="analyst"; a.dependency=[]; a.requires_integration=False; a.reviews_task=None; a.owner_authority=None
+    with file_lock(phase_root(run,phase)/".tasks.lock"):
+        result=_command_register_direct_unlocked(a)
+    result["phase_gate"]=True; result["gate_number"]=number
+    return result
+
+
+def _write_owner_phase_gate(run: Path, phase: str, number: int, outcome: str, report: Path) -> Path:
+    root=owner_plan_dir(run); root.mkdir(parents=True,exist_ok=True)
+    dest=root/f"PHASE-{phase}-GATE-{number:02d}.md"
+    body=report.read_text(encoding="utf-8",errors="replace").splitlines()
+    # Drop the machine routing token from the human copy; outcome is rendered clearly.
+    while body and not body[0].strip(): body.pop(0)
+    if body: body=body[1:]
+    content=(
+        f"# Phase {phase} — Gate Review {number}\n\n"
+        f"**Result:** {outcome.upper()}  \n"
+        f"**Recorded:** {now()}\n\n"
+        + "\n".join(body).lstrip()
+    ).rstrip()+"\n"
+    tmp=dest.with_suffix(".md.tmp"); tmp.write_text(content,encoding="utf-8"); os.replace(tmp,dest)
+    return dest
+
+
+def _current_primary_marker(run: Path) -> tuple[str, str]:
+    """Return the tracked primary state used to reject stale phase-gate verdicts."""
+    info=load_run(run); project=Path(str(info["project_root"])).resolve()
+    head=subprocess.run(["git","rev-parse","HEAD"],cwd=project,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout.strip()
+    status=subprocess.run(["git","status","--porcelain=v1","--untracked-files=no","--",".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**"],cwd=project,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout.strip()
+    return head,status
+
+
+def command_phase_gate(args: argparse.Namespace) -> dict[str, Any]:
+    run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid); report=args.report.resolve()
+    with file_lock(path.with_suffix(".lock")):
+        task=load_json(path)
+        if task.get("role")!="phase-auditor" or task.get("kind")!="analysis": raise ValueError("phase-gate requires a Phase-Auditor analysis task")
+        attempt=matching_gated_attempt(task,"phase-auditor",report)
+        if attempt is None: raise ValueError("phase-gate report must come from a gated Phase-Auditor attempt")
+        require_current_attempt(task,attempt,reason="phase gate")
+        seen_head=str(attempt.get("workspace_primary_head") or ""); seen_status=str(attempt.get("workspace_primary_status") or "")
+        if seen_head:
+            current_head,current_status=_current_primary_marker(run)
+            if current_head!=seen_head or current_status!=seen_status:
+                raise ValueError("phase gate snapshot is stale because primary changed while the fresh Phase Auditor was running; launch a new Phase Gate")
+        outcome=declared_report_outcome(report,"phase-auditor",required=True)
+        if outcome=="capability": raise ValueError("Phase Auditor requested ESCALATE CAPABILITY; route capability escalation before recording the gate")
+        existing_reports=sorted(owner_plan_dir(run).glob(f"PHASE-{phase}-GATE-*.md")) if owner_plan_dir(run).is_dir() else []
+        number=len(existing_reports)+1
+        owner_report=_write_owner_phase_gate(run,phase,number,outcome,report)
+        record={"outcome":outcome,"report":str(report),"owner_report":str(owner_report),"attempt":str(attempt.get("event_dir")),"recorded_at":now(),"number":number}
+        task.setdefault("phase_gate_history",[]).append(record); task["last_phase_gate"]=record
+        task["phase_gate_at"]=record["recorded_at"]; task["owner_gate_report"]=str(owner_report); task["accepted_outcome"]=outcome
+        if outcome=="pass":
+            task["status"]="accepted"; task["accepted_at"]=now(); task["accepted_report"]=str(report)
+        elif outcome=="blocked":
+            task["status"]="needs-analysis"
+        else:
+            record_escalation(run,task,attempt,report,source="phase-gate")
+        task["updated_at"]=now(); write_json(path,task)
+    release_read_only_runtime(run,phase,tid)
+    result={"phase_id":phase,"task_id":tid,"outcome":outcome,"status":task["status"],"owner_gate_report":str(owner_report)}
+    if outcome=="escalate": result["escalation_target"]=(task.get("last_escalation") or {}).get("target")
+    return result
 
 
 def task_brief_label(task: dict[str, Any]) -> str:
@@ -1060,6 +1513,70 @@ def _workspace_cleanup_candidate(run: Path, phase: str, task: dict[str, Any]) ->
     return status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration"))
 
 
+def _followup_triage_task_for(task: dict[str, Any], findings: list[dict[str, Any]]) -> str | None:
+    ids={str(x.get("triage_task_id") or "") for x in findings if str(x.get("triage_task_id") or "")}
+    return next(iter(ids)) if len(ids)==1 else None
+
+def command_prepare_followup_triage(args: argparse.Namespace) -> dict[str, Any]:
+    """Create one bounded Analyst Planner task for unresolved Review follow-ups.
+
+    Reviewers preserve obligations; Analysts own decomposition. This control task is
+    mechanically authored because its objective is invariant: reconcile named findings
+    with the frozen plan before any new phase brief launches.
+    """
+    run=args.run_root.resolve(); phase=slug(args.phase_id); source_id=slug(args.task_id)
+    lock=phase_root(run,phase)/".tasks.lock"
+    with file_lock(lock):
+        source_path=task_file(run,phase,source_id)
+        with file_lock(source_path.with_suffix(".lock")):
+            source=load_json(source_path); findings=open_review_findings(source)
+            if not findings: raise ValueError("source task has no unresolved Review follow-up obligations")
+            if task_has_live_attempt(source):
+                raise ValueError("Review follow-up triage waits only for the current source attempt to finish; it does not wait for source integration")
+            existing=_followup_triage_task_for(source,findings)
+            if existing and task_file(run,phase,existing).is_file():
+                return {"source_task":source_id,"triage_task":existing,"finding_ids":[x["finding_id"] for x in findings],"existing":True}
+            base=f"FOLLOWUP-TRIAGE-{source_id}"; triage_id=base; index=1
+            while task_file(run,phase,triage_id).exists():
+                index+=1; triage_id=f"{base}-{index:02d}"
+            root=task_root(run,phase,triage_id); root.mkdir(parents=True,exist_ok=False)
+            finding_ids=[str(x["finding_id"]) for x in findings]
+            reports=[]
+            for review in source.get("review_history",[]):
+                if not isinstance(review,dict): continue
+                if any(str(f.get("finding_id") or "") in finding_ids for f in review.get("findings",[]) if isinstance(f,dict)):
+                    raw=str(review.get("report") or "")
+                    if raw and raw not in reports: reports.append(raw)
+            brief=root/"brief.md"
+            lines=[
+                f"# {triage_id} — Reconcile Review follow-up obligations from {source_id}",
+                "",
+                "## Objective",
+                "Reconcile the concrete material obligations below with the accepted phase plan before any new frozen phase task starts. Do not modify the project.",
+                "",
+                "## Follow-up obligations",
+                *[f"- [{x['finding_id']}] {x['text']}" for x in findings],
+                "",
+                "## Required disposition",
+                "- If the current frozen plan already genuinely covers every obligation, explain why and use `analysis-result --outcome resume`.",
+                "- If any brief/task/dependency must change, emit a replacement/amending task graph and use `analysis-result --outcome replan`. T-BAG already knows which findings this triage owns; do not repeat IDs as graph ceremony.",
+                "- If neither route is responsibly justified, escalate. Do not silently defer, waive, or relabel an obligation.",
+                "",
+                "## Planning discipline",
+                "When an existing downstream brief is no longer sufficient, replace it with a new task that `supersedes` the frozen task; do not mutate the old brief in place. An already-integrated task is corrected by an amending task that depends on it.",
+            ]
+            brief.write_text("\n".join(lines)+"\n",encoding="utf-8"); brief.chmod(0o444)
+            task={
+                "format":FORMAT,"phase_id":phase,"task_id":triage_id,"kind":"analysis","role":"planner","tier":"analyst",
+                "brief":str(brief.resolve()),"plan_source":None,"dependencies":[],"requires_integration":False,"status":"planned",
+                "attempts":[],"review_rounds":0,"review_history":[],"created_at":now(),
+                "followup_triage_for":source_id,"followup_finding_ids":finding_ids,"followup_source_reports":reports,
+            }
+            write_json(root/"task.json",task)
+            for finding in findings: finding["triage_task_id"]=triage_id
+            source["updated_at"]=now(); write_json(source_path,source)
+    return {"source_task":source_id,"triage_task":triage_id,"finding_ids":finding_ids,"existing":False}
+
 def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
     tid=str(task.get("task_id") or ""); status=str(task.get("status") or ""); attempts=[a for a in task.get("attempts",[]) if isinstance(a,dict)]; latest=attempts[-1] if attempts else {}
     event=Path(str(latest.get("event_dir") or "")) if latest else Path()
@@ -1067,6 +1584,8 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     attempt_status=str(latest.get("status") or "")
     role=str(latest.get("role") or task.get("role") or "")
     base={"phase_id":phase,"task_id":tid,"task_status":status}
+    if latest and attempt_status=="gated" and report_requests_capability(event/"report.md"):
+        return {**base,"action":"route-capability-escalation","report":str(event/"report.md"),"role":role}
     if latest and attempt_status=="started" and terminal:
         return {**base,"action":"gate-finished-attempt","event_dir":str(event)}
     # A live attempt already owns this task transition. Never advertise another
@@ -1077,6 +1596,9 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if attempt_status in {"report-recovery","report-resume","mutating-report-resume"}:
         session=latest.get("session_id") or latest.get("resume_session")
         return {**base,"action":"resume-recorded-session" if session else "retry-same-role-retained-workspace","role":role,"event_dir":str(event),**({"session_id":session} if session else {})}
+    findings=open_review_findings(task)
+    if any(not str(f.get("triage_task_id") or "") for f in findings):
+        return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}
     if status=="recovery-required": return {**base,"action":"launch-recovery"}
     if status=="needs-analysis": return {**base,"action":"launch-analyst-discovery"}
     if status=="needs-fix": return {**base,"action":"launch-fixer"}
@@ -1101,7 +1623,11 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
             recorded=task.get("last_context_review") if isinstance(task.get("last_context_review"),dict) else {}
             if str(recorded.get("reviewer_attempt") or "") == str(event): return None
             return {**base,"action":"record-context-review-outcome","report":str(event/"report.md")}
-        if role in {"discovery","planner","phase-surveyor","recovery","phase-auditor"} and task.get("kind") in {"implementation","verification"}:
+        if role=="phase-auditor":
+            return {**base,"action":"record-phase-gate","report":str(event/"report.md")}
+        if task.get("kind")=="verification" and role in BASE_ROLES_BY_KIND["verification"]:
+            return {**base,"action":"record-verification-result","report":str(event/"report.md")}
+        if role in {"discovery","planner","phase-surveyor","recovery"} and task.get("kind") in {"implementation","verification"}:
             return {**base,"action":"record-analyst-disposition","report":str(event/"report.md")}
         if task.get("kind") in {"analysis","verification"}: return {**base,"action":"accept-specialist-result","report":str(event/"report.md")}
     return None
@@ -1154,6 +1680,10 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
                 if action.get("action")=="await-human-decision": human.append(action)
             if _workspace_cleanup_candidate(run,phase,task): cleanup.append({"phase_id":phase,"task_id":tid})
             tasks.append({"phase_id":phase,"task_id":tid,"status":task.get("status"),"role":task.get("role"),"tier":task.get("tier"),"live":bool(current_live),"quiescent_conduit":_quiescent_reusable_review_conduit(task),"brief":task.get("brief"),"label":task_brief_label(task),"requires_integration":bool(task.get("requires_integration"))})
+    for phase in phases:
+        gate=phase_gate_state(run,phase)
+        if gate.get("required") and gate.get("ready"):
+            actions.append({"phase_id":phase,"action":"prepare-phase-gate","reason":gate.get("reason")})
     limit=int(info.get("max_workers") or 1); slots=max(0,limit-len(live))
     ignored={"waiting-dependencies","await-human-decision"}
     launch_actions={"launch-ready-task","launch-recovery","launch-analyst-discovery","launch-fixer","launch-fresh-reviewer","launch-or-reuse-fresh-plan-reviewer","resume-recorded-session"}
@@ -1201,6 +1731,159 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
             "cleanup_candidates":cleanup,"backlog":backlog,
         })
     return result
+
+def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
+    """Return a bounded human-orientation packet; the parent writes the prose."""
+    run=args.run_root.resolve(); info=load_run(run); phases_root=run/"phases"
+    phases=[slug(args.phase_id)] if getattr(args,"phase_id",None) else sorted(p.name for p in phases_root.iterdir() if p.is_dir()) if phases_root.is_dir() else []
+    state_labels={
+        "planned":"queued","ready":"ready to start","active":"worker result pending","awaiting-review":"independent review pending",
+        "needs-fix":"review findings being fixed","needs-analysis":"Analyst diagnosis/replanning needed","blocked":"owner decision required",
+        "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
+    }
+    running=[]; backlog=[]; completed=[]; gates=[]; open_followups=[]
+    for phase in phases:
+        gate_files=sorted(owner_plan_dir(run).glob(f"PHASE-{phase}-GATE-*.md")) if owner_plan_dir(run).is_dir() else []
+        if gate_files:
+            latest=gate_files[-1]; first=latest.read_text(encoding="utf-8",errors="replace").splitlines()[:8]
+            result_line=next((x for x in first if x.startswith("**Result:**")),"")
+            gates.append({"phase":phase,"result":result_line.replace("**Result:**","").strip(),"report":str(latest)})
+        tasks_dir=phase_root(run,phase)/"tasks"
+        for path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
+            task=load_json(path); status=str(task.get("status") or "")
+            for finding in open_review_findings(task):
+                open_followups.append({"phase":phase,"source_task":task.get("task_id"),"finding_id":finding.get("finding_id"),"finding":str(finding.get("text") or "")[:420],"triage_task":finding.get("triage_task_id")})
+            if task.get("role")=="phase-auditor" and status=="accepted": continue
+            purpose=task_brief_objective(task,max_chars=420)
+            if status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration")):
+                if status!="superseded":
+                    outcome="integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
+                    completed.append({"phase":phase,"purpose":purpose,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
+                continue
+            item={"phase":phase,"purpose":purpose,"task_id":task.get("task_id"),"state":state_labels.get(status,status)}
+            if task_has_live_attempt(task): running.append(item)
+            else: backlog.append(item)
+    # Owner orientation must stay bounded even on large programmes. Preserve complete
+    # counts/state distribution, but show only a small purpose-first preview; callers
+    # that explicitly need the full task inventory can use the cold `list` surface.
+    backlog_by_state: dict[str,int]={}
+    for item in backlog:
+        state=str(item.get("state") or "unknown"); backlog_by_state[state]=backlog_by_state.get(state,0)+1
+    completed.sort(key=lambda x:str(x.get("at") or ""),reverse=True)
+    result={
+        "run_status":info.get("status","active"),
+        "running":running,
+        "recent_outcomes":[{k:v for k,v in item.items() if k!="at"} for item in completed[:8]],
+        "backlog_count":len(backlog),
+        "backlog_by_state":backlog_by_state,
+        "backlog_preview":backlog[:12],
+    }
+    if len(backlog)>12: result["backlog_preview_truncated"]=True
+    if gates: result["phase_gates"]=gates
+    if open_followups:
+        result["open_review_followups"]={"count":len(open_followups),"preview":open_followups[:8],**({"truncated":True} if len(open_followups)>8 else {})}
+    human=[]
+    for task in iter_run_tasks(run):
+        esc=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
+        if task.get("status")=="blocked" and esc.get("target")=="human":
+            human.append({"phase":task.get("phase_id"),"purpose":task_brief_objective(task,max_chars=420),"task_id":task.get("task_id")})
+    if human: result["decisions_needed"]=human
+    return result
+
+
+def _control_subprocess_json(argv: list[str]) -> dict[str, Any]:
+    cp=subprocess.run(argv,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    try: data=json.loads(cp.stdout.strip().splitlines()[-1]) if cp.stdout.strip() else {}
+    except json.JSONDecodeError: data={}
+    if cp.returncode!=0:
+        raise ValueError(str(data.get("error") or cp.stderr.strip() or cp.stdout.strip() or f"control command exit {cp.returncode}"))
+    return data if isinstance(data,dict) else {"result":data}
+
+
+def command_advance(args: argparse.Namespace) -> dict[str, Any]:
+    """Reduce already-decided lifecycle transitions, then stop at real semantic/launch work.
+
+    This command never waits, chooses a model, interprets free prose, authors plans, or
+    launches workers. It only removes parent turns that would otherwise be a switch
+    statement over durable state and exact worker routing tokens.
+    """
+    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]
+    for index in range(max_steps):
+        class R: pass
+        r=R(); r.run_root=run; r.phase_id=getattr(args,"phase_id",None); r.no_sweep=index>0; r.details=False
+        state=command_reconcile_run(r); actions=list(state.get("first_useful_actions") or [])
+        if not actions:
+            return {"applied":applied,"stopped":"quiescent","state":state}
+        action=actions[0]; name=str(action.get("action") or ""); phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
+        try:
+            if name=="gate-finished-attempt":
+                scripts=Path(__file__).resolve().parent
+                result=_control_subprocess_json([sys.executable,str(scripts/"dsd_attempt.py"),"gate","--run-root",str(run),"--phase-id",phase,"--task-id",tid])
+            elif name=="route-capability-escalation":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"]))
+                result=command_capability_escalate(a)
+            elif name=="record-review-outcome":
+                report=Path(str(action["report"])); declared=declared_report_outcome(report,"reviewer",required=False)
+                if declared is None:
+                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                if declared not in {"pass","fail","escalate"}: break
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=report; a.outcome=declared
+                result=command_review(a)
+            elif name=="record-plan-review-outcome":
+                report=Path(str(action["report"])); declared=declared_report_outcome(report,"plan-reviewer",required=False)
+                if declared is None:
+                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                if declared not in {"pass","fail","escalate"}: break
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=report; a.outcome=declared
+                result=command_plan_review(a)
+            elif name=="record-context-review-outcome":
+                report=Path(str(action["report"])); declared=declared_report_outcome(report,"context-reviewer",required=False)
+                if declared is None:
+                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                if declared not in {"pass","fail","escalate"}: break
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=report; a.outcome=declared
+                result=command_context_review(a)
+            elif name=="record-verification-result":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"]))
+                result=command_verification_result(a)
+            elif name=="record-phase-gate":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"]))
+                result=command_phase_gate(a)
+            elif name=="accept-reviewed-task":
+                task=load_task(run,phase,tid)
+                if task.get("role")=="goal-planner":
+                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"state":state}
+                review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(review.get("report"))) if review.get("report") else None
+                result=command_accept(a)
+            elif name=="integrate-accepted-task":
+                scripts=Path(__file__).resolve().parent
+                result=_control_subprocess_json([sys.executable,str(scripts/"dsd_workspace.py"),"integrate","--run-root",str(run),"--phase-id",phase,"--task-id",tid])
+            elif name=="prepare-followup-triage":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid
+                result=command_prepare_followup_triage(a)
+            elif name=="prepare-phase-gate":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase
+                result=command_prepare_phase_gate(a)
+            else:
+                return {"applied":applied,"stopped":"semantic-or-launch-boundary","next_action":action,"state":state}
+        except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+            return {"applied":applied,"stopped":"control-error","next_action":action,"error":str(exc),"state":state}
+        applied.append({"action":name,"phase_id":phase or None,"task_id":tid or None,"result":result})
+    class R: pass
+    r=R(); r.run_root=run; r.phase_id=getattr(args,"phase_id",None); r.no_sweep=True; r.details=False
+    state=command_reconcile_run(r)
+    return {"applied":applied,"stopped":"step-limit","state":state}
+
 
 def command_idle_check(args: argparse.Namespace) -> dict[str, Any]:
     """Turn-boundary guard: say mechanically whether routine orchestration may stop."""
@@ -1478,6 +2161,9 @@ def command_review(args: argparse.Namespace) -> dict[str, Any]:
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path); report=args.report.resolve()
         if not report.is_file(): raise ValueError(f"review report missing: {report}")
+        declared=declared_report_outcome(report,"reviewer",required=False)
+        if declared=="capability": raise ValueError("Reviewer requested ESCALATE CAPABILITY; route capability escalation instead of recording a Review verdict")
+        if declared is not None and declared!=outcome: raise ValueError(f"Reviewer declared {declared!r} but --outcome was {outcome!r}; do not make the parent reinterpret the report")
         attempt=matching_gated_attempt(task,"reviewer",report)
         if attempt is None: raise ValueError("review outcome must refer to a gated Reviewer attempt for this task")
         require_current_attempt(task,attempt,reason="review outcome")
@@ -1487,13 +2173,23 @@ def command_review(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError("this Reviewer attempt already has a recorded semantic outcome")
         if task.get("status")!="awaiting-review": raise ValueError(f"review outcome requires task status awaiting-review; current status is {task.get('status')!r}")
         rounds=int(task.get("review_rounds") or 0)+1; task["review_rounds"]=rounds
-        recorded={"outcome":outcome,"report":str(report),"recorded_at":now(),"round":rounds,"attempt":attempt_path,"checkpoint_ref":attempt.get("checkpoint_ref")}
+        followups=review_followup_items(report)
+        stamp=now()
+        findings=[{
+            "finding_id":f"F-{tid}-R{rounds:02d}-{index:02d}",
+            "text":text,
+            "status":"open",
+            "created_at":stamp,
+        } for index,text in enumerate(followups,1)]
+        recorded={"outcome":outcome,"report":str(report),"recorded_at":stamp,"round":rounds,"attempt":attempt_path,"checkpoint_ref":attempt.get("checkpoint_ref")}
+        if findings: recorded["findings"]=findings
         history.append(recorded); task["last_review"]=recorded
         if outcome=="pass": task["status"]="review-passed"
         elif outcome=="fail": task["status"]="needs-fix"
         else: record_escalation(run,task,attempt,report,source="review")
         task["updated_at"]=now(); write_json(path,task)
     result={"task_id":tid,"outcome":outcome,"review_rounds":rounds,"status":task["status"]}
+    if findings: result["followup_findings"]=[x["finding_id"] for x in findings]
     if outcome=="escalate": result["escalation_target"]=(task.get("last_escalation") or {}).get("target")
     return result
 
@@ -1527,6 +2223,9 @@ def command_plan_review(args: argparse.Namespace) -> dict[str, Any]:
     outcome=args.outcome
     with file_lock(path.with_suffix(".lock")):
         report=args.report.resolve()
+        declared=declared_report_outcome(report,"plan-reviewer",required=False)
+        if declared=="capability": raise ValueError("Plan Reviewer requested ESCALATE CAPABILITY; route capability escalation instead")
+        if declared is not None and declared!=outcome: raise ValueError(f"Plan Reviewer declared {declared!r} but --outcome was {outcome!r}")
         review_task,attempt,target,target_id=_review_conduit_start(
             path,role="plan-reviewer",report=report,target_key="plan_review_target",label="plan-review"
         )
@@ -1570,6 +2269,9 @@ def command_context_review(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid); outcome=args.outcome
     with file_lock(path.with_suffix(".lock")):
         report=args.report.resolve()
+        declared=declared_report_outcome(report,"context-reviewer",required=False)
+        if declared=="capability": raise ValueError("Context Reviewer requested ESCALATE CAPABILITY; route capability escalation instead")
+        if declared is not None and declared!=outcome: raise ValueError(f"Context Reviewer declared {declared!r} but --outcome was {outcome!r}")
         review_task,attempt,target,target_id=_review_conduit_start(
             path,role="context-reviewer",report=report,target_key="context_review_target",label="context-review"
         )
@@ -1611,12 +2313,20 @@ def command_analysis_result(args: argparse.Namespace) -> dict[str, Any]:
         task=load_json(path); report=args.report.resolve()
         if task.get("status") in {"accepted","integrated","superseded"}: raise ValueError(f"cannot record a new analysis result for completed task status {task.get('status')!r}")
         if not report.is_file(): raise ValueError(f"Analyst report missing: {report}")
-        attempt=matching_gated_attempt(task,{"discovery","planner","phase-surveyor","recovery","phase-auditor"},report)
+        attempt=matching_gated_attempt(task,{"discovery","planner","phase-surveyor","recovery"},report)
         if attempt is None or attempt_tier(attempt)!="analyst": raise ValueError("analysis result must refer to a gated Analyst attempt for this task")
         require_current_attempt(task,attempt,reason="analysis result")
         outcome=args.outcome; task["last_analysis"]={"outcome":outcome,"report":str(report),"attempt":str(attempt.get("event_dir")),"recorded_at":now()}
         if outcome=="resume":
-            if task.get("kind") not in {"implementation","verification"}: raise ValueError("analysis-result resume is only valid for implementation/verification work returning from Analyst diagnosis")
+            if task.get("followup_triage_for") and task.get("kind")=="analysis":
+                ids=[str(x) for x in task.get("followup_finding_ids",[]) if str(x)]
+                if not ids: raise ValueError("follow-up triage task has no recorded finding IDs")
+                task["status"]="accepted"; task["accepted_at"]=now(); task["accepted_report"]=str(report)
+                task["updated_at"]=now(); write_json(path,task)
+                triage_review_findings(run,phase,str(task["followup_triage_for"]),ids,resolution="analyst-resume",report=report)
+                release_read_only_runtime(run,phase,tid)
+                return {"task_id":tid,"outcome":outcome,"status":"accepted","triaged_findings":ids}
+            if task.get("kind") not in {"implementation","verification"}: raise ValueError("analysis-result resume is valid only for implementation/verification diagnosis or Review follow-up triage")
             task["status"]="planned"
         elif outcome in {"replan","replan-resume"}:
             require_analyst_plan_graph(attempt, reason=f"analysis-result {outcome}")
@@ -1667,9 +2377,10 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         if not decision.is_file(): raise ValueError(f"decision file missing: {decision}")
         if decision.is_symlink(): raise ValueError("Human decision input must be a regular file, not a symlink")
         route=getattr(args,"route","resume")
-        if route=="accept":
+        followup_accept=bool(route=="accept" and task.get("kind")=="analysis" and task.get("followup_triage_for") and task.get("followup_finding_ids"))
+        if route=="accept" and not followup_accept:
             if task.get("kind")!="implementation" or not task.get("requires_integration"):
-                raise ValueError("Human accept route is only valid for a project-changing implementation task")
+                raise ValueError("Human accept route is valid only for a reviewed implementation or a mechanically-created Review follow-up triage")
             review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
             if review.get("outcome") not in {"fail","escalate"} or not Path(str(review.get("report") or "")).is_file():
                 raise ValueError("Human accept route requires an existing fresh Reviewer FAIL/ESCALATE record; it cannot bypass task Review")
@@ -1683,18 +2394,26 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         task.setdefault("human_decision_history",[]).append(recorded); task["last_human_decision"]=recorded
         if route=="accept":
             task["status"]="accepted"; task["accepted_at"]=now(); task["accepted_report"]=str(snapshot.resolve())
-            task["human_acceptance"]={
-                "decision":str(snapshot.resolve()),
-                "review_outcome":review.get("outcome"),
-                "review_report":review.get("report"),
-                "review_checkpoint_ref":review.get("checkpoint_ref"),
-                "recorded_at":now(),
-            }
+            if followup_accept:
+                task["human_acceptance"]={"decision":str(snapshot.resolve()),"purpose":"cancel-review-followup-obligations","recorded_at":now()}
+            else:
+                task["human_acceptance"]={
+                    "decision":str(snapshot.resolve()),
+                    "review_outcome":review.get("outcome"),
+                    "review_report":review.get("report"),
+                    "review_checkpoint_ref":review.get("checkpoint_ref"),
+                    "recorded_at":now(),
+                }
         else:
             task["status"]="needs-analysis" if route=="analysis" else "planned"
         task["updated_at"]=now(); write_json(path,task)
+        followup_cancel=(str(task.get("followup_triage_for") or ""),[str(x) for x in task.get("followup_finding_ids",[]) if str(x)],Path(str(escalation.get("report") or ""))) if followup_accept else None
+    if followup_cancel is not None:
+        source_id,finding_ids,escalation_report=followup_cancel
+        triage_review_findings(run,phase,source_id,finding_ids,resolution="human-cancelled",report=escalation_report if escalation_report.is_file() else None,status="cancelled",decision=snapshot)
     result={"task_id":tid,"status":task["status"],"decision":str(snapshot.resolve()),"route":route}
     if route=="accept": result["acceptance_basis"]="explicit-human-authority"
+    if followup_cancel is not None: result["cancelled_findings"]=followup_cancel[1]
     return result
 
 
@@ -1719,6 +2438,63 @@ def release_read_only_runtime(run: Path, phase: str, task_id: str) -> bool:
     ws["released"]=True; ws["released_at"]=now(); write_json(ws_path,ws)
     return True
 
+def command_verification_result(args: argparse.Namespace) -> dict[str, Any]:
+    """Record a Verification/Evidence-Clerk predicate result from its exact report token."""
+    run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid); report=args.report.resolve()
+    with file_lock(path.with_suffix(".lock")):
+        task=load_json(path)
+        if task.get("kind")!="verification" or task.get("role") not in BASE_ROLES_BY_KIND["verification"]:
+            raise ValueError("verification-result requires a Verification/Evidence-Clerk task")
+        attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["verification"],report)
+        if attempt is None: raise ValueError("verification-result report must come from a gated Verification/Evidence-Clerk attempt")
+        require_current_attempt(task,attempt,reason="verification result")
+        outcome=declared_report_outcome(report,str(attempt.get("role") or task.get("role") or "verification"),required=True)
+        if outcome=="capability": raise ValueError("Verification requested ESCALATE CAPABILITY; route capability escalation instead")
+        task["accepted_outcome"]=outcome
+        task["last_verification"]={"outcome":outcome,"report":str(report),"attempt":str(attempt.get("event_dir")),"recorded_at":now()}
+        if outcome=="pass":
+            task["status"]="accepted"; task["accepted_at"]=now(); task["accepted_report"]=str(report)
+        elif outcome=="blocked":
+            task["status"]="needs-analysis"
+        else:
+            record_escalation(run,task,attempt,report,source="verification-result")
+        task["updated_at"]=now(); write_json(path,task)
+    release_read_only_runtime(run,phase,tid)
+    result={"task_id":tid,"outcome":outcome,"status":task["status"]}
+    if outcome=="escalate": result["escalation_target"]=(task.get("last_escalation") or {}).get("target")
+    return result
+
+
+def command_capability_escalate(args: argparse.Namespace) -> dict[str, Any]:
+    """Move one task to the next configured runtime without widening its authority."""
+    run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid); report=args.report.resolve()
+    with file_lock(path.with_suffix(".lock")):
+        task=load_json(path); attempt=matching_any_gated_attempt(task,report)
+        if attempt is None: raise ValueError("capability escalation must reference a gated worker report for this task")
+        require_current_attempt(task,attempt,reason="capability escalation")
+        if not report_requests_capability(report): raise ValueError("worker did not declare exact first-line ESCALATE CAPABILITY")
+        role=str(attempt.get("role") or ""); tier=attempt_tier(attempt); current=str(attempt.get("runtime_profile") or "default")
+        info=load_run(run); stronger=next_runtime_profile(info,tier,current)
+        if role=="fixer" or stronger is None:
+            # A Fixer is intentionally coupled to the Reviewer session that found the
+            # defect. Switching its runtime would silently break that contract; and if
+            # no stronger same-lane profile exists, use the ordinary authority ladder.
+            escalation=record_escalation(run,task,attempt,report,source="capability-fallback")
+            task["updated_at"]=now(); write_json(path,task)
+            return {"task_id":tid,"route":"authority-escalation","from_profile":current,"escalation_target":escalation.get("target"),"status":task["status"]}
+        for entry in task.get("attempts",[]):
+            if isinstance(entry,dict) and Path(str(entry.get("event_dir") or "")).resolve()==Path(str(attempt.get("event_dir") or "")).resolve():
+                entry["status"]="capability-routed"; break
+        task["pending_runtime_profile"]=str(stronger.get("name"))
+        task.setdefault("capability_history",[]).append({
+            "from_profile":current,"to_profile":str(stronger.get("name")),"role":role,"report":str(report),"recorded_at":now()
+        })
+        if role=="reviewer": task["status"]="awaiting-review"
+        else: task["status"]="planned"
+        task["updated_at"]=now(); write_json(path,task)
+    return {"task_id":tid,"route":"same-authority-stronger-runtime","tier":tier,"from_profile":current,"to_profile":stronger.get("name"),"status":task["status"]}
+
+
 def command_accept(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
@@ -1732,6 +2508,8 @@ def command_accept(args: argparse.Namespace) -> dict[str, Any]:
         if kind=="implementation" and status!="review-passed": raise ValueError(f"implementation acceptance requires current review-passed state; current status is {status!r}")
         if kind=="analysis" and task.get("role") in {"plan-reviewer","context-reviewer"}:
             raise ValueError("Plan/Context Reviewer tasks are reusable review conduits; record their semantic outcome with the dedicated review command, do not accept the task itself")
+        if kind=="analysis" and task.get("role")=="phase-auditor":
+            raise ValueError("Phase-Auditor results use phase-gate so PASS/BLOCKED remains explicit and a human-readable gate report is saved in the run plan folder")
         if kind=="analysis" and task.get("role")=="goal-planner":
             if status!="review-passed": raise ValueError(f"Goal-Planner acceptance requires current review-passed state; current status is {status!r}")
         elif kind in {"analysis","verification"} and status!="active": raise ValueError(f"{kind} acceptance requires a completed/gated specialist attempt in active task state; current status is {status!r}")
@@ -1750,6 +2528,10 @@ def command_accept(args: argparse.Namespace) -> dict[str, Any]:
         elif kind=="verification":
             attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["verification"],report) if report else None
             if attempt is None: raise ValueError("verification acceptance report must be the report from a gated Verification/Evidence-Clerk attempt for this task")
+            outcome=declared_report_outcome(report,str(attempt.get("role") or task.get("role") or "verification"),required=True)
+            if outcome!="pass":
+                raise ValueError(f"verification declared {outcome!r}; use verification-result so red evidence remains red instead of accepting it as satisfied")
+            task["accepted_outcome"]="pass"
         elif kind=="implementation" and report is not None:
             review=task.get("last_review") or {}
             if str(review.get("report") or "") != str(report): raise ValueError("implementation acceptance report, when supplied, must be the recorded passing Reviewer report")
@@ -1788,9 +2570,10 @@ def command_supersede(args: argparse.Namespace) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
-    p=sub.add_parser("init-run"); p.add_argument("--project-root",type=Path,required=True); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--run-id",required=True); p.add_argument("--runtime-root"); p.add_argument("--max-workers",type=int,default=4); p.add_argument("--grunt-driver"); p.add_argument("--grunt-model"); p.add_argument("--analyst-driver"); p.add_argument("--analyst-model"); p.add_argument("--escalation",choices=("on","off"),default="on")
+    p=sub.add_parser("init-run"); p.add_argument("--project-root",type=Path,required=True); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--run-id",required=True); p.add_argument("--runtime-root"); p.add_argument("--max-workers",type=int,default=4); p.add_argument("--launch-start-interval-seconds",type=float,default=DEFAULT_LAUNCH_START_INTERVAL_SECONDS); p.add_argument("--grunt-driver"); p.add_argument("--grunt-model"); p.add_argument("--analyst-driver"); p.add_argument("--analyst-model"); p.add_argument("--escalation",choices=("on","off"),default="on")
     p=sub.add_parser("runtime-status"); p.add_argument("--run-root",type=Path,required=True)
-    p=sub.add_parser("set-runtime"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--tier",choices=sorted(TIERS),required=True); p.add_argument("--driver",required=True); p.add_argument("--model",required=True); p.add_argument("--allow-unwired-driver",action="store_true",help=argparse.SUPPRESS)
+    p=sub.add_parser("set-runtime"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--tier",choices=sorted(TIERS),required=True); p.add_argument("--driver",required=True); p.add_argument("--model",required=True); p.add_argument("--effort")
+    p=sub.add_parser("set-runtime-profile"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--tier",choices=sorted(TIERS),required=True); p.add_argument("--name",required=True); p.add_argument("--driver",required=True); p.add_argument("--model",required=True); p.add_argument("--effort"); p.add_argument("--max-uses",type=int)
     p=sub.add_parser("set-escalation"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--mode",choices=("on","off"),required=True)
     p=sub.add_parser("set-run-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--status",choices=sorted(RUN_STATUSES),required=True); p.add_argument("--reason")
     p=sub.add_parser("preflight-plan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--plan",type=Path,required=True)
@@ -1800,9 +2583,11 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("list"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--status",choices=sorted(STATUSES))
     p=sub.add_parser("sweep-stale"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("reconcile-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--no-sweep",action="store_true"); p.add_argument("--details",action="store_true")
+    p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
+    p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
-        description="Record the semantic outcome of a gated Analyst result. resume/replan-resume are only valid when an implementation/verification task is returning from Analyst diagnosis." if name=="analysis-result" else None
+        description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
         if name=="record-attempt": p.add_argument("--attempt-json",type=Path,required=True)
         elif name=="update-attempt": p.add_argument("--event-dir",type=Path,required=True); p.add_argument("--status",choices=sorted(ATTEMPT_STATUSES)); p.add_argument("--gate",type=Path); p.add_argument("--session-id")
@@ -1823,6 +2608,7 @@ def main() -> int:
         if args.command=="init-run": result=command_init(args)
         elif args.command=="runtime-status": result=command_runtime_status(args)
         elif args.command=="set-runtime": result=command_set_runtime(args)
+        elif args.command=="set-runtime-profile": result=command_set_runtime_profile(args)
         elif args.command=="set-escalation": result=command_set_escalation(args)
         elif args.command=="set-run-status": result=command_set_run_status(args)
         elif args.command=="preflight-plan": result=command_preflight_plan(args)
@@ -1832,6 +2618,8 @@ def main() -> int:
         elif args.command=="list": result=command_list(args)
         elif args.command=="sweep-stale": result=command_sweep_stale(args)
         elif args.command=="reconcile-run": result=command_reconcile_run(args)
+        elif args.command=="owner-status": result=command_owner_status(args)
+        elif args.command=="advance": result=command_advance(args)
         elif args.command=="idle-check": result=command_idle_check(args)
         elif args.command=="show": result=command_show(args)
         elif args.command=="record-attempt": result=command_record_attempt(args)

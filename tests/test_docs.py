@@ -95,6 +95,8 @@ class DocsTests(unittest.TestCase):
         self.assertIn("causal model",discovery)
         self.assertIn("smallest **complete** change",implementer)
         self.assertIn("interaction contracts",planner)
+        self.assertIn("Follow-up obligations",reviewer)
+        self.assertIn("already binds this triage task",planner)
         self.assertIn("named predicate through the real mechanism",verifier)
         for text in (reviewer,discovery,implementer,planner,verifier):
             self.assertIn("QUALITY.md",text)
@@ -193,6 +195,7 @@ class DocsTests(unittest.TestCase):
         self.assertIn("preflight-plan",text)
         self.assertIn("bare `- skill-id`",text)
         self.assertIn("accepted-but-red",text.lower())
+        self.assertIn("already bound to its exact finding IDs",text)
 
     def test_specialist_proof_skills_remain_focused(self):
         self.assertIn("break → observe RED → restore → observe GREEN",(ROOT/"worker/skills/positive-control/SKILL.md").read_text())
@@ -233,7 +236,7 @@ class DocsTests(unittest.TestCase):
 
     def test_cli_notes_are_cold_and_only_wired_tools_are_shipped(self):
         router=(ROOT/"WORKER-CLI.md").read_text(); skill=(ROOT/"SKILL.md").read_text()
-        for name in ("worker-cli/OPENCODE.md","worker-cli/CODEX.md"):
+        for name in ("worker-cli/OPENCODE.md","worker-cli/OPENCODE2.md","worker-cli/CODEX.md","worker-cli/CLAUDE.md"):
             self.assertIn(name,router); self.assertTrue((ROOT/name).is_file())
         self.assertNotIn("COMMAND-CODE",router); self.assertNotIn("worker-cli/KILO.md",router)
         self.assertIn("WORKER-CLI.md",skill)

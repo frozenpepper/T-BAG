@@ -62,17 +62,11 @@ Every backend must preserve budget reservation, baseline/scope evidence, attempt
 
 ## Review and escalation
 
-After a mutating Implementer/Fixer gate, launch a **fresh Grunt Reviewer** in the same worktree. Parent records explicit `pass|fail|escalate`; it does not shadow-review. Clarify an unclear disposition with that Reviewer.
+After a mutating Implementer/Fixer gate, a **fresh Grunt Reviewer** judges the frozen brief: PASS → `review-passed`; in-scope FAIL → Fixer; ESCALATE → Analyst. Fixer resumes the Reviewer that found the defects; the next Reviewer is fresh.
 
-- PASS → `review-passed`;
-- concrete in-scope FAIL → `needs-fix`;
-- Reviewer ESCALATE → `needs-analysis`.
+A Reviewer may also discover a concrete material obligation outside that task's acceptance. It records those only under exact `## Follow-up obligations` single-line bullets. They stay in review history; the source may still PASS/land, but new phase launches pause for one read-only Planner triage. The Planner either proves the frozen plan already covers every finding (`analysis-result resume`) or emits replacement/amending work (`replan`). Finding IDs stay bound to the triage, not the graph. An insufficient unstarted brief is replaced with `supersedes`; integrated work gets a dependent amendment. Only explicit Human cancellation may close it without plan coverage.
 
-On FAIL, Fixer resumes the Reviewer session that found the defects. If interrupted, resume Fixer. The next Reviewer is fresh and receives the latest worker report, not the prior review.
-
-On `needs-analysis`, use fresh same-task Discovery. Recovery is only for unexplained, out-of-authority, or unprovable residual state—not a killed process/missing report alone. Analyst results are `resume|replan|replan-resume|escalate`: continue; authorize replacement work; add graph work **and** resume the current implementation/verification lane; or reach Human authority. Carry/rebase conflicts route the successor itself to `needs-analysis` with evidence.
-
-Workers emit generic `ESCALATE`; routing is **Grunt → Analyst → Human**. Human decisions are frozen and passed as typed inputs. Human may explicitly accept a blocked implementation only after recorded fresh Reviewer FAIL/ESCALATE; the red review remains red. One Human-blocked task does not block independent work. Python never infers escalation from prose.
+`needs-analysis` uses fresh same-task Discovery. Recovery is only for unexplained/out-of-authority residual state, not ordinary process death. Analyst results are `resume|replan|replan-resume|escalate`. Worker escalation remains **Grunt → Analyst → Human**; Human decisions are frozen typed inputs. Human may explicitly accept a blocked implementation only after fresh Reviewer FAIL/ESCALATE, whose red record is preserved.
 
 ## Integration
 

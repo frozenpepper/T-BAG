@@ -12,4 +12,4 @@ PASS only when it is accurate, concise, recurring, correctly scoped and safe to 
 
 Review the whole proposal set for interacting instructions and contradictions; do not stop at the first wording problem.
 
-Open with exactly **`PASS`**, **`FAIL`**, or **`ESCALATE`**, plus the short reason. FAIL should consolidate all material corrections established in this pass.
+Open with exactly **`PASS`**, **`FAIL`**, **`ESCALATE`**, or **`ESCALATE CAPABILITY`**. Put only that routing token on the first non-empty line, then the short reason. FAIL should consolidate all material corrections established in this pass.

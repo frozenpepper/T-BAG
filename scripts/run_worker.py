@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -18,6 +20,7 @@ from _roles import ROLE_NAMES
 from _rules_snapshot import verify_snapshot
 
 PLACEHOLDER = "DSD_WORKER_REPORT_PLACEHOLDER_V2_1"
+DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
 
 
 def classify_report_text(text: str) -> str:
@@ -57,6 +60,80 @@ def atomic_json(path: Path, data: dict[str,Any])->None:
     tmp.write_text(json.dumps(data,indent=2,sort_keys=True)+"\n",encoding="utf-8"); os.replace(tmp,path)
 
 
+def launch_gate_root() -> Path:
+    """Machine-global admission state for the brief CLI bootstrap window.
+
+    The collision being protected can live in user-global CLI state, so this must not
+    be scoped to one T-BAG run or project. The files contain only timing metadata.
+    """
+    return (Path.home()/".cache"/"t-bag"/"launch-start-gate").resolve()
+
+
+def _finite_interval(value: Any, *, default: float = 0.0) -> float:
+    try: interval=float(value)
+    except (TypeError,ValueError): return default
+    return interval if math.isfinite(interval) and interval >= 0 else default
+
+
+def launch_start_delay(state: dict[str,Any], requested_interval: float, monotonic_now: float) -> float:
+    """Return the delay needed before the next CLI process may start.
+
+    Respect both the previous launcher's requested interval and this launcher's. This
+    prevents two runs with different settings from weakening one another. Monotonic
+    time avoids wall-clock corrections; a stored monotonic value greater than the
+    current clock is treated as stale (for example after reboot), never as a huge wait.
+    """
+    requested=_finite_interval(requested_interval)
+    previous=_finite_interval(state.get("interval_seconds"))
+    required=max(requested,previous)
+    try: last=float(state.get("started_monotonic"))
+    except (TypeError,ValueError): return 0.0
+    if not math.isfinite(last) or last < 0 or last > monotonic_now: return 0.0
+    return max(0.0,required-(monotonic_now-last))
+
+
+def staggered_popen(cmd: list[str], *, interval_seconds: float, gate_root: Path | None = None, **kwargs: Any) -> subprocess.Popen:
+    """Start one worker CLI under a machine-global, process-safe admission gate.
+
+    Detached T-BAG monitors may all exist concurrently. Only the instant of spawning
+    their underlying CLI processes is serialized/spaced; after Popen returns every
+    worker executes concurrently as normal.
+    """
+    interval=_finite_interval(interval_seconds,default=-1.0)
+    if interval < 0: raise ValueError("launch start interval must be a finite number >= 0")
+    root=(gate_root or launch_gate_root()).resolve(); root.mkdir(parents=True,exist_ok=True)
+    lock_path=root/"admission.lock"; state_path=root/"last-start.json"
+    with lock_path.open("a+") as handle:
+        fcntl.flock(handle.fileno(),fcntl.LOCK_EX)
+        try:
+            state: dict[str,Any] = {}
+            if state_path.is_file():
+                try:
+                    loaded=json.loads(state_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded,dict): state=loaded
+                except (OSError,json.JSONDecodeError):
+                    state={}
+            before=time.monotonic(); delay=launch_start_delay(state,interval,before)
+            if delay > 0: time.sleep(delay)
+            # Make the admission durable *before* spawning. If this write fails, no
+            # worker exists to become an unsupervised orphan. The post-spawn rewrite
+            # below only refines the timestamp and may safely degrade to this record.
+            admitted=time.monotonic()
+            gate_state={"format":"tbag-launch-start-gate-v1","started_monotonic":admitted,"started_at":now(),"interval_seconds":interval}
+            atomic_json(state_path,gate_state)
+            proc=subprocess.Popen(cmd,**kwargs)
+            started=time.monotonic()
+            if started != admitted:
+                gate_state={**gate_state,"started_monotonic":started,"started_at":now()}
+                try:
+                    atomic_json(state_path,gate_state)
+                except Exception as exc:
+                    print(f"T-BAG launch gate warning: post-spawn timing refinement failed: {exc}",file=sys.stderr)
+            return proc
+        finally:
+            fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+
+
 def parse_sessions(value: Any)->list[dict[str,Any]]:
     if isinstance(value,list): return [x for x in value if isinstance(x,dict)]
     if isinstance(value,dict):
@@ -80,6 +157,25 @@ def lookup_session_id(env: dict[str,str], title: str, *, timeout_seconds: float 
     return None,f"no session matched title {title!r}"
 
 
+def opencode_json_session_id(log: Path)->tuple[str|None,str|None]:
+    """Recover an OpenCode JSON-event session id without querying shared host state."""
+    if not log.is_file(): return None,"OpenCode JSONL log missing"
+    found=[]
+    for raw in log.read_text(encoding="utf-8",errors="replace").splitlines():
+        try: item=json.loads(raw)
+        except json.JSONDecodeError: continue
+        if not isinstance(item,dict): continue
+        candidates=[item.get("sessionID"),item.get("sessionId"),item.get("session_id")]
+        part=item.get("part")
+        if isinstance(part,dict): candidates += [part.get("sessionID"),part.get("sessionId"),part.get("session_id")]
+        for ident in candidates:
+            if ident: found.append(str(ident))
+    found=list(dict.fromkeys(found))
+    if len(found)==1: return found[0],None
+    if len(found)>1: return None,f"multiple OpenCode session ids found in JSONL log: {found[:3]}"
+    return None,"no OpenCode session id found in JSONL log"
+
+
 
 
 def capture_live_session_id(args: argparse.Namespace, env: dict[str,str], title: str, log: Path, proc: subprocess.Popen, *, attempts: int = 4, delay_seconds: float = 0.5) -> tuple[str|None,str|None]:
@@ -94,6 +190,8 @@ def capture_live_session_id(args: argparse.Namespace, env: dict[str,str], title:
     for index in range(max(1,attempts)):
         if index: time.sleep(delay_seconds)
         if args.driver=="opencode": sid,error=lookup_session_id(env,title,timeout_seconds=5)
+        elif args.driver=="opencode2": sid,error=opencode_json_session_id(log)
+        elif args.driver=="claude": sid,error=claude_session_id(log)
         else: sid,error=codex_session_id(log)
         if sid: return sid,None
         last_error=error
@@ -117,16 +215,44 @@ def codex_session_id(log: Path)->tuple[str|None,str|None]:
     return None,"no Codex thread.started event found in JSONL log"
 
 
+def claude_session_id(log: Path)->tuple[str|None,str|None]:
+    """Recover Claude Code's session id from stream-json output."""
+    if not log.is_file(): return None,"Claude stream-json log missing"
+    found=[]
+    for raw in log.read_text(encoding="utf-8",errors="replace").splitlines():
+        try: item=json.loads(raw)
+        except json.JSONDecodeError: continue
+        if not isinstance(item,dict): continue
+        ident=item.get("session_id") or item.get("sessionId")
+        if ident: found.append(str(ident))
+    found=list(dict.fromkeys(found))
+    if len(found)==1: return found[0],None
+    if len(found)>1: return None,f"multiple Claude session ids found in stream log: {found[:3]}"
+    return None,"no Claude session_id found in stream-json log"
+
+
 def worker_command(args: argparse.Namespace,p:dict[str,Path],env:dict[str,str])->tuple[list[str],dict[str,str],str,Path]:
     """Build a lifecycle-safe command for one mechanically wired worker driver."""
     prompt=p["prompt"].read_text(encoding="utf-8")
+    effort=str(getattr(args,"effort",None) or "").strip().lower()
     title=args.title or f"dsd:{args.task_id}:{args.role}:{args.attempt}"
     if args.driver=="opencode":
+        if effort: raise ValueError("OpenCode worker effort has no provider-independent CLI contract; choose effort through the configured model/profile endpoint instead")
         if not shutil.which("opencode"): raise FileNotFoundError("opencode executable not found")
         p["db"].parent.mkdir(parents=True,exist_ok=True); env=dict(env); env["OPENCODE_DB"]=str(p["db"])
         cmd=["opencode","run","--model",args.model]
         if args.auto_flag: cmd.append(args.auto_flag)
         cmd += ["--title",title,"--dir",str(p["project_root"])]
+        if args.resume_session: cmd += ["--session",args.resume_session]
+        cmd.append(prompt)
+        return cmd,env,title,p["project_root"]
+    if args.driver=="opencode2":
+        if not shutil.which("opencode2"): raise FileNotFoundError("opencode2 executable not found")
+        p["db"].parent.mkdir(parents=True,exist_ok=True); env=dict(env); env["OPENCODE_DB"]=str(p["db"])
+        cmd=["opencode2","--standalone","run","--format","json","--model",args.model]
+        if args.auto_flag: cmd.append(args.auto_flag)
+        cmd += ["--title",title,"--dir",str(p["project_root"])]
+        if effort: cmd += ["--variant",effort]
         if args.resume_session: cmd += ["--session",args.resume_session]
         cmd.append(prompt)
         return cmd,env,title,p["project_root"]
@@ -141,10 +267,27 @@ def worker_command(args: argparse.Namespace,p:dict[str,Path],env:dict[str,str])-
         # from the mutating task worktree and add only the attempt directory for their report.
         cwd=p["project_root"] if writes else p["event_dir"]
         cmd=["codex","exec","--json","--model",args.model,"--sandbox","workspace-write","--cd",str(cwd)]
+        if effort: cmd[2:2]=["--config",f'model_reasoning_effort="{effort}"']
         if writes: cmd[2:2]=["--add-dir",str(p["event_dir"])]
         if args.resume_session: cmd += ["resume",args.resume_session,prompt]
         else: cmd.append(prompt)
         return cmd,dict(env),title,cwd
+    if args.driver=="claude":
+        if not shutil.which("claude"): raise FileNotFoundError("claude executable not found")
+        # Claude Code print mode gives us the normal agentic tools without an
+        # interactive terminal. stream-json preserves liveness/session evidence while
+        # --add-dir grants the attempt report directory alongside the project view.
+        # `acceptEdits` + explicit common agent tools works across Claude Code plans
+        # more broadly than optional `auto` mode while remaining non-interactive. The
+        # assigned project view itself enforces read-only Analyst roles at filesystem
+        # level; mutating roles already execute in isolated T-BAG worktrees.
+        cmd=["claude","-p","--output-format","stream-json","--verbose","--model",args.model,"--permission-mode","acceptEdits","--allowedTools","Bash,Read,Edit,Write,Glob,Grep","--add-dir",str(p["event_dir"])]
+        if effort: cmd += ["--effort",effort]
+        if args.resume_session: cmd += ["--resume",args.resume_session]
+        cmd.append(prompt)
+        return cmd,dict(env),title,p["project_root"]
+    if effort:
+        raise ValueError(f"worker driver {args.driver!r} has no T-BAG effort adapter; omit effort or use a first-class backend with stable effort control")
     raise ValueError(f"worker driver {args.driver!r} is not wired in this release")
 
 def placeholder_text(event_dir: Path)->str:
@@ -175,13 +318,15 @@ def reserve(args: argparse.Namespace, p: dict[str,Path])->str:
     event=p["event_dir"]; event.mkdir(parents=True,exist_ok=True)
     reservation=event/"launch-reservation.json"
     attempt_paths=[reservation,event/"attempt.json",event/"terminal.json",p["report"],p["log"]]
-    if args.driver=="codex": attempt_paths.append(event/"worker.stderr.log")
+    if args.driver in {"opencode2","codex","claude"}: attempt_paths.append(event/"worker.stderr.log")
     for path in attempt_paths:
         if path.exists(): raise ValueError(f"attempt path already exists: {path}")
     p["report"].write_text(placeholder_text(event),encoding="utf-8")
     task_text=p["task"].read_text(encoding="utf-8",errors="replace")
     data={
         "format":"dsd-worker-launch-reservation-v2.2","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"attempt":args.attempt,
+        "effort":getattr(args,"effort",None),
+        "launch_start_interval_seconds":getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS),
         "writes_project":False if args.force_read_only else role_writes_project(args.role,task_text),
         "project_root":str(p["project_root"]),"task_contract":str(p["task"]),"worker_rules":str(p["rules"]),"prompt_file":str(p["prompt"]),
         "scope_baseline":str(p["baseline"]),"report":str(p["report"]),"log":str(p["log"]),"db":str(p["db"]),"reserved_at":now(),
@@ -205,26 +350,27 @@ def freeze_scope(p: dict[str,Path])->tuple[str|None,str|None]:
 
 def terminal_error(args: argparse.Namespace,p:dict[str,Path],error:str,exit_code:int=2,started_at:str|None=None)->int:
     scope,scope_error=freeze_scope(p)
-    terminal={"format":"dsd-worker-terminal-v2.2","status":"launcher-error","task_id":args.task_id,"role":args.role,"attempt":args.attempt,"tier":args.tier,"driver":args.driver,"model":args.model,"exit_code":exit_code,"error":error,"started_at":started_at,"ended_at":now(),"report":str(p["report"]),"report_state":report_state(p["report"]),"scope_diff":scope,"scope_error":scope_error}
+    terminal={"format":"dsd-worker-terminal-v2.2","status":"launcher-error","task_id":args.task_id,"role":args.role,"attempt":args.attempt,"tier":args.tier,"driver":args.driver,"model":args.model,"effort":getattr(args,"effort",None),"exit_code":exit_code,"error":error,"started_at":started_at,"ended_at":now(),"report":str(p["report"]),"report_state":report_state(p["report"]),"scope_diff":scope,"scope_error":scope_error}
     atomic_json(p["event_dir"]/"terminal.json",terminal); return exit_code
 
 
 def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
-    p["log"].parent.mkdir(parents=True,exist_ok=True); env=os.environ.copy(); started=now()
+    p["log"].parent.mkdir(parents=True,exist_ok=True); env=os.environ.copy(); started=None
     try: cmd,env,title,launch_cwd=worker_command(args,p,env)
     except FileNotFoundError as exc: return terminal_error(args,p,str(exc),127,reserved_at)
     except (OSError,ValueError) as exc: return terminal_error(args,p,str(exc),2,reserved_at)
-    stderr_path=p["event_dir"]/"worker.stderr.log" if args.driver=="codex" else None
+    stderr_path=p["event_dir"]/"worker.stderr.log" if args.driver in {"opencode2","codex","claude"} else None
     out=None; err=None
     try:
         out=p["log"].open("xb",buffering=0)
         if stderr_path is not None: err=stderr_path.open("xb",buffering=0)
-        proc=subprocess.Popen(cmd,cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT)
+        proc=staggered_popen(cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT)
+        started=now()
     except Exception as exc:
         if out is not None: out.close()
         if err is not None: err.close()
         return terminal_error(args,p,f"failed to launch {args.driver}: {exc}",2,started)
-    attempt={"format":"dsd-worker-attempt-v2.2","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"attempt":args.attempt,"event_dir":str(p["event_dir"]),"project_root":str(p["project_root"]),"worker_pid":proc.pid,"launcher_pid":os.getpid(),"reserved_at":reserved_at,"started_at":started,"resume_session":args.resume_session}
+    attempt={"format":"dsd-worker-attempt-v2.2","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"effort":getattr(args,"effort",None),"attempt":args.attempt,"event_dir":str(p["event_dir"]),"project_root":str(p["project_root"]),"worker_pid":proc.pid,"launcher_pid":os.getpid(),"reserved_at":reserved_at,"started_at":started,"resume_session":args.resume_session,"launch_start_interval_seconds":getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)}
     if stderr_path is not None: attempt["stderr_log"]=str(stderr_path)
     atomic_json(p["event_dir"]/"attempt.json",attempt)
     session_id,session_error=capture_live_session_id(args,env,title,p["log"],proc)
@@ -239,6 +385,8 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     if not session_id:
         if args.resume_session: session_id,session_error=args.resume_session,None
         elif args.driver=="opencode": session_id,session_error=lookup_session_id(env,title)
+        elif args.driver=="opencode2": session_id,session_error=opencode_json_session_id(p["log"])
+        elif args.driver=="claude": session_id,session_error=claude_session_id(p["log"])
         else: session_id,session_error=codex_session_id(p["log"])
     terminal={"format":"dsd-worker-terminal-v2.2","status":"process-exited","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"attempt":args.attempt,"exit_code":rc,"worker_pid":proc.pid,"launcher_pid":os.getpid(),"session_id":session_id,"session_lookup_error":session_error,"reserved_at":reserved_at,"started_at":started,"ended_at":now(),"report":str(p["report"]),"report_state":report_state(p["report"]),"scope_diff":scope,"scope_error":scope_error}
     if stderr_path is not None: terminal["stderr_log"]=str(stderr_path)
@@ -249,7 +397,7 @@ def parser()->argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--project-root",type=Path,required=True); ap.add_argument("--run-root",type=Path,required=True); ap.add_argument("--task-id",required=True); ap.add_argument("--role",choices=sorted(ROLE_NAMES),required=True); ap.add_argument("--attempt",type=int,required=True)
     ap.add_argument("--prompt-file",type=Path,required=True); ap.add_argument("--task-contract",type=Path,required=True); ap.add_argument("--worker-rules",type=Path,required=True); ap.add_argument("--scope-baseline",type=Path,required=True); ap.add_argument("--report",type=Path,required=True); ap.add_argument("--event-dir",type=Path,required=True); ap.add_argument("--log",type=Path,required=True); ap.add_argument("--db",type=Path,required=True)
-    ap.add_argument("--driver",required=True); ap.add_argument("--model",required=True); ap.add_argument("--tier",choices=("analyst","grunt"),required=True); ap.add_argument("--title"); ap.add_argument("--resume-session"); ap.add_argument("--force-read-only",action="store_true"); ap.add_argument("--auto-flag",default="--auto"); ap.add_argument("--detach",action="store_true"); ap.add_argument("--_child",action="store_true",help=argparse.SUPPRESS); ap.add_argument("--_reserved_at",help=argparse.SUPPRESS)
+    ap.add_argument("--driver",required=True); ap.add_argument("--model",required=True); ap.add_argument("--effort"); ap.add_argument("--tier",choices=("analyst","grunt"),required=True); ap.add_argument("--title"); ap.add_argument("--resume-session"); ap.add_argument("--force-read-only",action="store_true"); ap.add_argument("--auto-flag",default="--auto"); ap.add_argument("--launch-start-interval-seconds",type=float,default=DEFAULT_LAUNCH_START_INTERVAL_SECONDS); ap.add_argument("--detach",action="store_true"); ap.add_argument("--_child",action="store_true",help=argparse.SUPPRESS); ap.add_argument("--_reserved_at",help=argparse.SUPPRESS)
     return ap
 
 

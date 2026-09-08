@@ -12,4 +12,6 @@ Apply `QUALITY.md` to the plan as an executable system. Challenge goal/requireme
 
 Do not stop at the first defect; return the consolidated material correction set.
 
-Open with exactly **`PASS`**, **`FAIL`**, or **`ESCALATE`**. PASS only when the plan is sound execution authority; FAIL when corrections are knowable; ESCALATE when genuine owner authority is missing.
+Apply a **one focused worker-session fit** test to every proposed task. Split independent acceptance clusters or unrelated ownership centers; do not split a truly atomic cross-cutting change merely to make it smaller. A task that still hides major diagnosis/architecture is not Grunt-ready.
+
+Open with exactly **`PASS`**, **`FAIL`**, **`ESCALATE`**, or **`ESCALATE CAPABILITY`**. PASS only when the plan is sound execution authority; FAIL when corrections are knowable; ESCALATE when authority/task-shape problems require broader analysis; ESCALATE CAPABILITY only when this plan review itself is well-scoped but the current runtime is insufficient.

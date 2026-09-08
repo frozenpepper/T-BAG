@@ -581,4 +581,116 @@ class ComponentsTests(unittest.TestCase):
             cp=subprocess.run([node,'--check',str(plugin)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             self.assertEqual(cp.returncode,0,cp.stderr)
 
+
+    def test_worker_effort_maps_to_native_codex_and_claude_controls(self):
+        event=self.root/'effort-event'; event.mkdir(); prompt=self.root/'effort-prompt.txt'; prompt.write_text('worker prompt')
+        task=self.root/'effort-task.md'; task.write_text('# Task\n\nRead only.\n')
+        p={"prompt":prompt,"task":task,"project_root":self.project,"event_dir":event,"db":self.root/'db.sqlite'}
+        old=run_worker.shutil.which
+        try:
+            run_worker.shutil.which=lambda name: f'/usr/local/bin/{name}' if name in {'codex','claude','opencode','opencode2'} else old(name)
+            codex=SimpleNamespace(driver='codex',model='astra',effort='high',resume_session=None,task_id='T',role='discovery',attempt=1,force_read_only=True,title=None,auto_flag='--auto')
+            cmd,_,_,_=run_worker.worker_command(codex,p,{})
+            self.assertIn('--config',cmd); self.assertIn('model_reasoning_effort="high"',cmd)
+            claude=SimpleNamespace(driver='claude',model='opus',effort='medium',resume_session=None,task_id='T',role='discovery',attempt=1,force_read_only=True,title=None,auto_flag='--auto')
+            cmd,_,_,_=run_worker.worker_command(claude,p,{})
+            self.assertIn('--effort',cmd); self.assertEqual(cmd[cmd.index('--effort')+1],'medium')
+            opencode=SimpleNamespace(driver='opencode',model='provider/model',effort='high',resume_session=None,task_id='T',role='discovery',attempt=1,force_read_only=True,title=None,auto_flag='--auto')
+            with self.assertRaisesRegex(ValueError,'no provider-independent CLI contract'):
+                run_worker.worker_command(opencode,p,{})
+            opencode2=SimpleNamespace(driver='opencode2',model='provider/model',effort='deep',resume_session=None,task_id='T',role='discovery',attempt=1,force_read_only=True,title=None,auto_flag='--auto')
+            cmd,_,_,_=run_worker.worker_command(opencode2,p,{})
+            self.assertIn('--variant',cmd); self.assertEqual(cmd[cmd.index('--variant')+1],'deep')
+        finally:
+            run_worker.shutil.which=old
+
+    def test_opencode2_worker_adapter_is_standalone_isolated_json_and_resumable(self):
+        event=self.root/'opencode2-event'; event.mkdir(); prompt=self.root/'opencode2-prompt.txt'; prompt.write_text('worker prompt')
+        task=self.root/'opencode2-task.md'; task.write_text('# Task\n\nRead only.\n')
+        db=self.root/'opencode2-db.sqlite'
+        p={"prompt":prompt,"task":task,"project_root":self.project,"event_dir":event,"db":db}
+        args=SimpleNamespace(driver='opencode2',model='opencode-go/muse-spark-1.3',effort='high',resume_session='ses_abc',task_id='T2',role='discovery',attempt=2,force_read_only=True,title='tbag-opencode2',auto_flag='--auto')
+        old=run_worker.shutil.which
+        try:
+            run_worker.shutil.which=lambda name: '/usr/local/bin/opencode2' if name=='opencode2' else old(name)
+            cmd,env,title,cwd=run_worker.worker_command(args,p,os.environ.copy())
+        finally:
+            run_worker.shutil.which=old
+        self.assertEqual(cmd[:3],['opencode2','--standalone','run'])
+        self.assertIn('--format',cmd); self.assertEqual(cmd[cmd.index('--format')+1],'json')
+        self.assertIn('--model',cmd); self.assertEqual(cmd[cmd.index('--model')+1],'opencode-go/muse-spark-1.3')
+        self.assertIn('--variant',cmd); self.assertEqual(cmd[cmd.index('--variant')+1],'high')
+        self.assertIn('--session',cmd); self.assertEqual(cmd[cmd.index('--session')+1],'ses_abc')
+        self.assertIn('--dir',cmd); self.assertEqual(cmd[cmd.index('--dir')+1],str(self.project))
+        self.assertEqual(env['OPENCODE_DB'],str(db)); self.assertEqual(title,'tbag-opencode2'); self.assertEqual(cwd,self.project)
+
+        log=event/'worker.log'
+        log.write_text('{"type":"step_start","sessionID":"ses_live","part":{"sessionID":"ses_live"}}\n{"type":"text","sessionID":"ses_live"}\n')
+        self.assertEqual(run_worker.opencode_json_session_id(log),('ses_live',None))
+
+    def test_launch_start_delay_respects_both_runs_and_ignores_stale_monotonic_clock(self):
+        # A short-interval run cannot weaken the interval requested by the launch that
+        # immediately preceded it; a longer current interval is likewise respected.
+        self.assertAlmostEqual(run_worker.launch_start_delay({'started_monotonic':100.0,'interval_seconds':5.0},1.0,101.0),4.0)
+        self.assertAlmostEqual(run_worker.launch_start_delay({'started_monotonic':100.0,'interval_seconds':1.0},5.0,101.0),4.0)
+        self.assertEqual(run_worker.launch_start_delay({'started_monotonic':5000.0,'interval_seconds':30.0},3.0,10.0),0.0)
+
+    def test_staggered_popen_records_global_admission_after_spawn(self):
+        gate=self.root/'global-launch-gate'; sleeps=[]; calls=[]
+        class FakeProc:
+            pid=123
+        old_popen=run_worker.subprocess.Popen; old_monotonic=run_worker.time.monotonic; old_sleep=run_worker.time.sleep
+        ticks=iter([100.0,100.0,100.0,101.0,103.0,103.0])
+        try:
+            run_worker.subprocess.Popen=lambda cmd,**kwargs: calls.append(list(cmd)) or FakeProc()
+            run_worker.time.monotonic=lambda: next(ticks)
+            run_worker.time.sleep=lambda seconds: sleeps.append(seconds)
+            first=run_worker.staggered_popen(['worker-a'],interval_seconds=3.0,gate_root=gate)
+            second=run_worker.staggered_popen(['worker-b'],interval_seconds=1.0,gate_root=gate)
+        finally:
+            run_worker.subprocess.Popen=old_popen; run_worker.time.monotonic=old_monotonic; run_worker.time.sleep=old_sleep
+        self.assertEqual(first.pid,123); self.assertEqual(second.pid,123); self.assertEqual(calls,[['worker-a'],['worker-b']])
+        self.assertEqual(sleeps,[2.0])
+        state=json.loads((gate/'last-start.json').read_text())
+        self.assertEqual(state['interval_seconds'],1.0); self.assertEqual(state['started_monotonic'],103.0)
+
+    def test_staggered_popen_cannot_orphan_worker_on_post_spawn_state_failure(self):
+        gate=self.root/'global-launch-gate-postwrite'; calls=[]
+        class FakeProc:
+            pid=456
+        old_popen=run_worker.subprocess.Popen; old_monotonic=run_worker.time.monotonic; old_atomic=run_worker.atomic_json
+        writes=[0]
+        try:
+            run_worker.subprocess.Popen=lambda cmd,**kwargs: calls.append(list(cmd)) or FakeProc()
+            ticks=iter([200.0,200.0,200.1])
+            run_worker.time.monotonic=lambda: next(ticks)
+            def flaky_atomic(path,data):
+                writes[0] += 1
+                if writes[0] == 2:
+                    raise OSError('simulated cache write failure')
+                return old_atomic(path,data)
+            run_worker.atomic_json=flaky_atomic
+            proc=run_worker.staggered_popen(['worker-a'],interval_seconds=3.0,gate_root=gate)
+        finally:
+            run_worker.subprocess.Popen=old_popen; run_worker.time.monotonic=old_monotonic; run_worker.atomic_json=old_atomic
+        self.assertEqual(proc.pid,456); self.assertEqual(calls,[['worker-a']])
+        state=json.loads((gate/'last-start.json').read_text())
+        self.assertEqual(state['started_monotonic'],200.0)
+
+    def test_claude_worker_adapter_uses_headless_stream_json_and_resumable_session(self):
+        event=self.root/'claude-event'; event.mkdir(); prompt=self.root/'prompt.txt'; prompt.write_text('worker prompt')
+        task=self.root/'task.md'; task.write_text('# task\n'); rules=self.root/'rules.md'; rules.write_text('# rules\n'); baseline=self.root/'baseline.json'; baseline.write_text('{}')
+        p={'prompt':prompt,'event_dir':event,'project_root':self.project,'task':task,'rules':rules,'baseline':baseline,'report':event/'report.md','log':event/'worker.log','db':self.root/'db.sqlite','run_root':self.run}
+        args=SimpleNamespace(driver='claude',model='claude-opus-5',resume_session='sess-123',task_id='T1',role='discovery',attempt=2,force_read_only=True,title=None)
+        original=shutil.which
+        try:
+            shutil.which=lambda name: '/usr/local/bin/claude' if name=='claude' else original(name)
+            cmd,env,title,cwd=run_worker.worker_command(args,p,os.environ.copy())
+        finally:
+            shutil.which=original
+        self.assertEqual(cmd[0],'claude'); self.assertIn('-p',cmd); self.assertIn('stream-json',cmd); self.assertIn('--verbose',cmd); self.assertIn('--permission-mode',cmd); self.assertIn('acceptEdits',cmd); self.assertIn('--allowedTools',cmd); self.assertIn('Bash,Read,Edit,Write,Glob,Grep',cmd); self.assertIn('--resume',cmd); self.assertIn('sess-123',cmd); self.assertEqual(cwd,self.project)
+        log=event/'worker.log'; log.write_text('{"type":"system","session_id":"session-abc"}\n')
+        self.assertEqual(run_worker.claude_session_id(log),("session-abc",None))
+
+
 if __name__=='__main__': unittest.main()

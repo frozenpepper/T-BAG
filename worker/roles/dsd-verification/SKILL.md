@@ -14,4 +14,4 @@ Treat preregistered checks baseline-relatively unless the brief explicitly estab
 
 If the predicate fails, gather only enough bounded evidence to distinguish product failure from an insensitive/broken verification mechanism. Substantial diagnosis/design routes `ESCALATE`.
 
-Open with **`PASS`**, **`BLOCKED`**, or **`ESCALATE`**. BLOCKED is valid evidence, not semantic success.
+Open with exactly **`PASS`**, **`BLOCKED`**, **`ESCALATE`**, or **`ESCALATE CAPABILITY`**. BLOCKED is valid evidence, not semantic success. Use capability escalation only when the predicate and task shape are sound but this runtime cannot responsibly establish the result.

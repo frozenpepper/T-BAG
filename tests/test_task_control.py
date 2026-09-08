@@ -1027,6 +1027,263 @@ class TaskControlTests(unittest.TestCase):
         dep=dsd_task.load_task(self.run,"P1","DEP-DROPPED"); ready,missing=dsd_task.readiness(self.run,"P1",dep)
         self.assertFalse(ready); self.assertEqual(missing,["OLD-DROPPED"])
 
+
+    def test_verification_blocked_stays_red_and_does_not_release_dependents(self):
+        self.write_plan([
+            {"task_id":"V1","kind":"verification","role":"verification","tier":"grunt","dependencies":[],"requires_integration":False},
+            {"task_id":"T-AFTER-V","kind":"implementation","role":"implementer","tier":"grunt","dependencies":["V1"]},
+        ])
+        event=dsd_task.task_root(self.run,"P1","V1")/"attempts"/"verification-1"; event.mkdir(parents=True)
+        report=event/"report.md"; report.write_text("BLOCKED\nThe required production predicate is not yet established.\n")
+        task=dsd_task.load_task(self.run,"P1","V1"); task["attempts"].append({"task_id":"V1","role":"verification","tier":"grunt","status":"gated","event_dir":str(event)}); task["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1","V1"),task)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="V1"; a.report=report
+        out=dsd_task.command_verification_result(a)
+        self.assertEqual(out["outcome"],"blocked"); self.assertEqual(out["status"],"needs-analysis")
+        self.assertFalse(dsd_task.dependency_satisfied(self.run,"P1","V1"))
+        downstream=dsd_task.load_task(self.run,"P1","T-AFTER-V"); self.assertEqual(dsd_task.readiness(self.run,"P1",downstream),(False,["V1"]))
+
+    def test_capability_ladder_strengthens_runtime_without_widening_authority(self):
+        class A: pass
+        for name,driver,model in (("deep","claude","claude-opus-5"),("frontier","codex","astra-high")):
+            a=A(); a.run_root=self.run; a.tier="analyst"; a.name=name; a.driver=driver; a.model=model; a.max_uses=None
+            dsd_task.command_set_runtime_profile(a)
+        self.write_plan([{"task_id":"AN-DEEP","kind":"analysis","role":"discovery","tier":"analyst","dependencies":[],"requires_integration":False}])
+        event=dsd_task.task_root(self.run,"P1","AN-DEEP")/"attempts"/"discovery-1"; event.mkdir(parents=True)
+        report=event/"report.md"; report.write_text("ESCALATE CAPABILITY\nThe authority is sufficient, but this runtime cannot safely finish the diagnosis.\n")
+        task=dsd_task.load_task(self.run,"P1","AN-DEEP"); task["attempts"].append({"task_id":"AN-DEEP","role":"discovery","tier":"analyst","driver":"opencode","model":"analyst/model","runtime_profile":"default","status":"gated","event_dir":str(event)}); task["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1","AN-DEEP"),task)
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="AN-DEEP"; a.report=report
+        out=dsd_task.command_capability_escalate(a); self.assertEqual(out["route"],"same-authority-stronger-runtime"); self.assertEqual(out["to_profile"],"deep")
+        routed=dsd_task.load_task(self.run,"P1","AN-DEEP"); self.assertEqual(routed["role"],"discovery"); self.assertEqual(routed["tier"],"analyst"); self.assertEqual(routed["pending_runtime_profile"],"deep")
+
+
+    def test_capability_ladder_does_not_wrap_backward_when_current_one_shot_is_consumed(self):
+        class A: pass
+        for name,driver,model,max_uses in (("deep","claude","claude-opus-5",1),("frontier","codex","astra-high",None)):
+            a=A(); a.run_root=self.run; a.tier="analyst"; a.name=name; a.driver=driver; a.model=model; a.max_uses=max_uses
+            dsd_task.command_set_runtime_profile(a)
+        dsd_task.consume_runtime_profile(self.run,"analyst","deep")
+        info=dsd_task.load_run(self.run)
+        self.assertIsNone(dsd_task.runtime_profile(info,"analyst","deep"))
+        nxt=dsd_task.next_runtime_profile(info,"analyst","deep")
+        self.assertIsNotNone(nxt); self.assertEqual(nxt["name"],"frontier")
+
+
+    def test_phase_gate_is_fresh_bound_and_writes_legible_top_level_plan_report(self):
+        self.write_plan([{"task_id":"T-GATE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        t=dsd_task.load_task(self.run,"P1","T-GATE"); t["status"]="integrated"; t["integrated_at"]=dsd_task.now(); t["updated_at"]=t["integrated_at"]; dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-GATE"),t)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; prep=dsd_task.command_prepare_phase_gate(a); gate_id=prep["registered"][0]
+        event=dsd_task.task_root(self.run,"P1",gate_id)/"attempts"/"phase-auditor-1"; event.mkdir(parents=True)
+        report=event/"report.md"; report.write_text("PASS\n## What is true now\nThe phase goal is satisfied through the integrated production path.\n")
+        gate=dsd_task.load_task(self.run,"P1",gate_id); head=git(self.project,"rev-parse","HEAD"); gate["attempts"].append({"task_id":gate_id,"role":"phase-auditor","tier":"analyst","status":"gated","event_dir":str(event),"workspace_primary_head":head,"workspace_primary_status":""}); gate["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1",gate_id),gate)
+        (self.project/"a.txt").write_text("dirty\n")
+        r=A(); r.run_root=self.run; r.phase_id="P1"; r.task_id=gate_id; r.report=report
+        with self.assertRaisesRegex(ValueError,"snapshot is stale"):
+            dsd_task.command_phase_gate(r)
+        (self.project/"a.txt").write_text("a\n")
+        out=dsd_task.command_phase_gate(r); owner=Path(out["owner_gate_report"])
+        self.assertEqual(owner.parent,self.run/"plan"); self.assertEqual(owner.name,"PHASE-P1-GATE-01.md"); self.assertIn("**Result:** PASS",owner.read_text()); self.assertIn("The phase goal is satisfied",owner.read_text())
+        self.assertEqual(dsd_task.phase_gate_state(self.run,"P1")["reason"],"fresh-pass")
+
+    def test_phase_gate_history_is_append_only_and_easy_to_browse(self):
+        self.write_plan([{"task_id":"T-GATE-HIST","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        t=dsd_task.load_task(self.run,"P1","T-GATE-HIST"); t["status"]="integrated"; t["updated_at"]=dsd_task.now(); dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-GATE-HIST"),t)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; first=dsd_task.command_prepare_phase_gate(a); first_id=first["registered"][0]
+        e1=dsd_task.task_root(self.run,"P1",first_id)/"attempts"/"phase-auditor-1"; e1.mkdir(parents=True); r1=e1/"report.md"; r1.write_text("BLOCKED\nA cross-task persistence seam is still unproven.\n")
+        g1=dsd_task.load_task(self.run,"P1",first_id); g1["attempts"].append({"task_id":first_id,"role":"phase-auditor","tier":"analyst","status":"gated","event_dir":str(e1),"workspace_primary_head":git(self.project,"rev-parse","HEAD"),"workspace_primary_status":""}); g1["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1",first_id),g1)
+        q=A(); q.run_root=self.run; q.phase_id="P1"; q.task_id=first_id; q.report=r1; out1=dsd_task.command_phase_gate(q); self.assertEqual(out1["outcome"],"blocked")
+        rr=A(); rr.run_root=self.run; rr.phase_id="P1"; rr.no_sweep=True; rr.details=False
+        routed=dsd_task.command_reconcile_run(rr); self.assertTrue(any(x.get("action")=="launch-analyst-discovery" and x.get("task_id")==first_id for x in routed.get("first_useful_actions",[])))
+        # Corrective replanning consumes the old gate task; the historical red report stays.
+        g1=dsd_task.load_task(self.run,"P1",first_id); g1["status"]="accepted"; g1["updated_at"]=dsd_task.now(); dsd_task.write_json(dsd_task.task_file(self.run,"P1",first_id),g1)
+        second=dsd_task.command_prepare_phase_gate(a); second_id=second["registered"][0]; self.assertEqual(second_id,"PHASE-GATE-02")
+        e2=dsd_task.task_root(self.run,"P1",second_id)/"attempts"/"phase-auditor-1"; e2.mkdir(parents=True); r2=e2/"report.md"; r2.write_text("PASS\nThe corrective work closes the persistence seam and the phase goal is now proven.\n")
+        g2=dsd_task.load_task(self.run,"P1",second_id); g2["attempts"].append({"task_id":second_id,"role":"phase-auditor","tier":"analyst","status":"gated","event_dir":str(e2),"workspace_primary_head":git(self.project,"rev-parse","HEAD"),"workspace_primary_status":""}); g2["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1",second_id),g2)
+        q.task_id=second_id; q.report=r2; out2=dsd_task.command_phase_gate(q); self.assertEqual(out2["outcome"],"pass")
+        reports=sorted((self.run/"plan").glob("PHASE-P1-GATE-*.md")); self.assertEqual([x.name for x in reports],["PHASE-P1-GATE-01.md","PHASE-P1-GATE-02.md"]); self.assertIn("BLOCKED",reports[0].read_text()); self.assertIn("PASS",reports[1].read_text())
+
+    def test_advance_prepares_phase_gate_then_stops_at_fresh_auditor_launch(self):
+        self.write_plan([{"task_id":"T-GATE-ADV","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        t=dsd_task.load_task(self.run,"P1","T-GATE-ADV"); t["status"]="integrated"; t["updated_at"]=dsd_task.now(); dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-GATE-ADV"),t)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.max_steps=4
+        out=dsd_task.command_advance(a)
+        self.assertEqual(out["applied"][0]["action"],"prepare-phase-gate")
+        self.assertEqual(out["stopped"],"semantic-or-launch-boundary")
+        self.assertEqual(out["next_action"]["action"],"launch-ready-task")
+        gate=dsd_task.load_task(self.run,"P1",out["next_action"]["task_id"]); self.assertEqual(gate["role"],"phase-auditor")
+
+    def test_advance_records_exact_verification_then_stops_before_worker_launch(self):
+        self.write_plan([
+            {"task_id":"V-ADV","kind":"verification","role":"verification","tier":"grunt","dependencies":[],"requires_integration":False},
+            {"task_id":"T-ADV","kind":"implementation","role":"implementer","tier":"grunt","dependencies":["V-ADV"]},
+        ])
+        event=dsd_task.task_root(self.run,"P1","V-ADV")/"attempts"/"verification-1"; event.mkdir(parents=True)
+        report=event/"report.md"; report.write_text("PASS\nThe predicate is established.\n"); (event/"terminal.json").write_text("{}\n")
+        v=dsd_task.load_task(self.run,"P1","V-ADV"); v["attempts"].append({"task_id":"V-ADV","role":"verification","tier":"grunt","status":"gated","event_dir":str(event)}); v["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1","V-ADV"),v)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.max_steps=4
+        out=dsd_task.command_advance(a); self.assertEqual(out["applied"][0]["action"],"record-verification-result"); self.assertEqual(out["stopped"],"semantic-or-launch-boundary"); self.assertEqual(out["next_action"]["action"],"launch-ready-task")
+        self.assertEqual(dsd_task.load_task(self.run,"P1","T-ADV").get("attempts"),[])
+
+    def _integrated_task_with_followup(self, source="T-FOLLOW", dependent="T-DOWN"):
+        self.write_plan([
+            {"task_id":source,"kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":dependent,"kind":"implementation","role":"implementer","tier":"grunt","dependencies":[source]},
+        ])
+        report=self.gated_review_report(source,text="PASS\n\n## Follow-up obligations\n- Production cutover wiring required by downstream work is still absent.\n")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id=source; a.report=report; a.outcome="pass"
+        out=dsd_task.command_review(a); self.assertEqual(len(out["followup_findings"]),1)
+        a.report=report; dsd_task.command_accept(a); dsd_task.command_integrated(a)
+        return out["followup_findings"][0],report
+
+    def test_review_followup_is_durable_and_blocks_new_phase_launches(self):
+        finding_id,_=self._integrated_task_with_followup()
+        source=dsd_task.load_task(self.run,"P1","T-FOLLOW")
+        finding=source["review_history"][-1]["findings"][0]
+        self.assertEqual(finding["finding_id"],finding_id); self.assertEqual(finding["status"],"open")
+        self.assertFalse(dsd_task.dependency_satisfied(self.run,"P1","T-FOLLOW"))
+        down=dsd_task.load_task(self.run,"P1","T-DOWN"); ok,missing=dsd_task.readiness(self.run,"P1",down)
+        self.assertFalse(ok); self.assertIn("review-followup-triage",missing)
+        self.assertEqual(dsd_task.phase_gate_state(self.run,"P1")["reason"],"phase-work-incomplete")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.max_steps=4
+        advanced=dsd_task.command_advance(a)
+        self.assertEqual(advanced["applied"][0]["action"],"prepare-followup-triage")
+        self.assertEqual(advanced["stopped"],"semantic-or-launch-boundary")
+        triage=dsd_task.load_task(self.run,"P1",advanced["next_action"]["task_id"])
+        self.assertEqual(triage["role"],"planner"); self.assertEqual(triage["followup_finding_ids"],[finding_id])
+
+    def test_followup_triage_can_run_alongside_source_fixer_without_releasing_other_phase_work(self):
+        self.write_plan([
+            {"task_id":"T-FAIL-SRC","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"T-INDEPENDENT","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+        ])
+        report=self.gated_review_report("T-FAIL-SRC",text="FAIL\nThe assigned change has an in-scope defect.\n\n## Follow-up obligations\n- A separate production cutover seam must be reconciled with the phase plan.\n")
+        (report.parent/"terminal.json").write_text("{}\n")
+        class A: pass
+        r=A(); r.run_root=self.run; r.phase_id="P1"; r.task_id="T-FAIL-SRC"; r.report=report; r.outcome="fail"
+        dsd_task.command_review(r)
+        adv=A(); adv.run_root=self.run; adv.phase_id="P1"; adv.max_steps=3
+        out=dsd_task.command_advance(adv); self.assertEqual(out["applied"][0]["action"],"prepare-followup-triage")
+        probe=A(); probe.run_root=self.run; probe.phase_id="P1"; probe.no_sweep=True; probe.details=True
+        state=dsd_task.command_reconcile_run(probe); actions=state["actions"]
+        self.assertTrue(any(x.get("action")=="launch-fixer" and x.get("task_id")=="T-FAIL-SRC" for x in actions))
+        self.assertTrue(any(x.get("action")=="launch-ready-task" and str(x.get("task_id") or "").startswith("FOLLOWUP-TRIAGE-") for x in actions))
+        independent=next(x for x in actions if x.get("task_id")=="T-INDEPENDENT")
+        self.assertEqual(independent["action"],"waiting-dependencies"); self.assertIn("review-followup-triage",independent["blocked_by"])
+
+    def test_followup_triage_resume_resolves_obligation_and_unblocks_plan(self):
+        finding_id,_=self._integrated_task_with_followup(source="T-RESUME",dependent="T-AFTER")
+        class A: pass
+        prep=A(); prep.run_root=self.run; prep.phase_id="P1"; prep.task_id="T-RESUME"
+        triage_id=dsd_task.command_prepare_followup_triage(prep)["triage_task"]
+        report=self.gated_analysis_report(triage_id,role="planner",text="The existing downstream brief already owns the cutover wiring and remains sufficient.\n")
+        r=A(); r.run_root=self.run; r.phase_id="P1"; r.task_id=triage_id; r.report=report; r.outcome="resume"
+        out=dsd_task.command_analysis_result(r); self.assertEqual(out["triaged_findings"],[finding_id])
+        source=dsd_task.load_task(self.run,"P1","T-RESUME"); finding=source["review_history"][-1]["findings"][0]
+        self.assertEqual(finding["status"],"triaged"); self.assertEqual(finding["resolution"],"analyst-resume")
+        self.assertTrue(dsd_task.dependency_satisfied(self.run,"P1","T-RESUME"))
+        self.assertTrue(dsd_task.readiness(self.run,"P1",dsd_task.load_task(self.run,"P1","T-AFTER"))[0])
+
+    def test_human_can_explicitly_cancel_escalated_followup_obligation(self):
+        finding_id,_=self._integrated_task_with_followup(source="T-CANCEL",dependent="T-CANCEL-DOWN")
+        class A: pass
+        prep=A(); prep.run_root=self.run; prep.phase_id="P1"; prep.task_id="T-CANCEL"
+        triage_id=dsd_task.command_prepare_followup_triage(prep)["triage_task"]
+        report=self.gated_analysis_report(triage_id,role="planner",text="This obligation may no longer be required; only the owner can cancel it.\n")
+        ar=A(); ar.run_root=self.run; ar.phase_id="P1"; ar.task_id=triage_id; ar.report=report; ar.outcome="escalate"
+        out=dsd_task.command_analysis_result(ar); self.assertEqual(out["status"],"blocked")
+        decision=self.run/"cancel-followup.md"; decision.write_text("Cancel this follow-up obligation for the current phase.\n")
+        r=A(); r.run_root=self.run; r.phase_id="P1"; r.task_id=triage_id; r.decision=decision; r.route="accept"
+        resolved=dsd_task.command_resolve_escalation(r); self.assertEqual(resolved["cancelled_findings"],[finding_id])
+        source=dsd_task.load_task(self.run,"P1","T-CANCEL"); finding=source["review_history"][-1]["findings"][0]
+        self.assertEqual(finding["status"],"cancelled"); self.assertEqual(finding["resolution"],"human-cancelled")
+        self.assertTrue(Path(finding["resolution_decision"]).is_file())
+        self.assertTrue(dsd_task.readiness(self.run,"P1",dsd_task.load_task(self.run,"P1","T-CANCEL-DOWN"))[0])
+
+    def test_followup_replan_uses_bound_finding_set_and_replaces_stale_brief(self):
+        finding_id,_=self._integrated_task_with_followup(source="T-UP",dependent="T-STALE-DOWN")
+        class A: pass
+        prep=A(); prep.run_root=self.run; prep.phase_id="P1"; prep.task_id="T-UP"
+        triage_id=dsd_task.command_prepare_followup_triage(prep)["triage_task"]
+        event=dsd_task.task_root(self.run,"P1",triage_id)/"attempts"/"planner-1"; tasks=event/"plan"/"tasks"; tasks.mkdir(parents=True)
+        report=event/"report.md"; report.write_text("The frozen downstream brief is no longer executable; replace it.\n")
+        (tasks/"T-FIXED-DOWN.md").write_text("# Fixed downstream\n\n## Objective\nCarry the newly discovered production cutover wiring through live acceptance.\n")
+        graph=event/"plan"/"task-graph.json"
+        graph.write_text(json.dumps({"format":dsd_task.PLAN_FORMAT,"tasks":[{"task_id":"T-FIXED-DOWN","kind":"implementation","role":"implementer","tier":"grunt","brief":"tasks/T-FIXED-DOWN.md","dependencies":["T-UP"],"supersedes":["T-STALE-DOWN"]}]}))
+        triage=dsd_task.load_task(self.run,"P1",triage_id); triage["attempts"].append({"task_id":triage_id,"role":"planner","tier":"analyst","status":"gated","event_dir":str(event)}); triage["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1",triage_id),triage)
+        pf=A(); pf.run_root=self.run; pf.phase_id="P1"; pf.plan=graph
+        self.assertTrue(dsd_task.command_preflight_plan(pf)["valid"])
+        ar=A(); ar.run_root=self.run; ar.phase_id="P1"; ar.task_id=triage_id; ar.report=report; ar.outcome="replan"
+        dsd_task.command_analysis_result(ar)
+        reg=dsd_task.command_register_plan(pf); self.assertIn("T-FIXED-DOWN",reg["registered"])
+        source=dsd_task.load_task(self.run,"P1","T-UP"); finding=source["review_history"][-1]["findings"][0]
+        self.assertEqual(finding["finding_id"],finding_id); self.assertEqual(finding["status"],"triaged"); self.assertEqual(finding["resolution"],"analyst-replan")
+        self.assertEqual(dsd_task.load_task(self.run,"P1","T-STALE-DOWN")["status"],"superseded")
+        self.assertTrue(dsd_task.readiness(self.run,"P1",dsd_task.load_task(self.run,"P1","T-FIXED-DOWN"))[0])
+
+    def test_followup_section_is_structural_not_freeform_prose_parser(self):
+        self.write_plan([{"task_id":"T-BAD-FOLLOW","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        report=self.gated_review_report("T-BAD-FOLLOW",text="PASS\n\n## Follow-up obligations\nThis prose is not a machine bullet.\n")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-BAD-FOLLOW"; a.report=report; a.outcome="pass"
+        with self.assertRaisesRegex(ValueError,"single-line"):
+            dsd_task.command_review(a)
+
+    def test_phase_gate_dossier_keeps_review_followup_and_analyst_resolution_visible(self):
+        finding_id,_=self._integrated_task_with_followup(source="T-DOSSIER",dependent="T-DOSSIER-DOWN")
+        class A: pass
+        prep=A(); prep.run_root=self.run; prep.phase_id="P1"; prep.task_id="T-DOSSIER"
+        triage_id=dsd_task.command_prepare_followup_triage(prep)["triage_task"]
+        report=self.gated_analysis_report(triage_id,role="planner",text="Current phase plan already covers this obligation.\n")
+        r=A(); r.run_root=self.run; r.phase_id="P1"; r.task_id=triage_id; r.report=report; r.outcome="resume"
+        dsd_task.command_analysis_result(r)
+        dossier=dsd_task.phase_gate_dossier_text(self.run,"P1")
+        self.assertIn(finding_id,dossier); self.assertIn("analyst-resume",dossier); self.assertIn("cutover wiring",dossier)
+
+    def test_followup_finding_ownership_is_bound_to_triage_task_not_plan_metadata(self):
+        finding_id,_=self._integrated_task_with_followup(source="T-BOUND",dependent="T-BOUND-DOWN")
+        class A: pass
+        prep=A(); prep.run_root=self.run; prep.phase_id="P1"; prep.task_id="T-BOUND"
+        triage_id=dsd_task.command_prepare_followup_triage(prep)["triage_task"]
+        triage=dsd_task.load_task(self.run,"P1",triage_id)
+        self.assertEqual(triage["followup_finding_ids"],[finding_id])
+        source=dsd_task.load_task(self.run,"P1","T-BOUND")
+        self.assertEqual(source["review_history"][-1]["findings"][0]["status"],"open")
+        self.assertFalse(dsd_task.readiness(self.run,"P1",dsd_task.load_task(self.run,"P1","T-BOUND-DOWN"))[0])
+
+    def test_owner_status_surfaces_open_review_followups_without_dumping_reports(self):
+        finding_id,_=self._integrated_task_with_followup(source="T-OWNER-FOLLOW",dependent="T-OWNER-DOWN")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"
+        out=dsd_task.command_owner_status(a); packet=out["open_review_followups"]
+        self.assertEqual(packet["count"],1); self.assertEqual(packet["preview"][0]["finding_id"],finding_id)
+        self.assertIn("cutover wiring",packet["preview"][0]["finding"])
+
+    def test_owner_status_is_bounded_but_keeps_complete_backlog_counts(self):
+        self.write_plan([
+            {"task_id":f"T-STATUS-{i:02d}","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}
+            for i in range(15)
+        ])
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"
+        out=dsd_task.command_owner_status(a)
+        self.assertEqual(out["backlog_count"],15); self.assertEqual(len(out["backlog_preview"]),12); self.assertTrue(out["backlog_preview_truncated"])
+        self.assertEqual(sum(out["backlog_by_state"].values()),15)
+
+    def test_owner_status_supplies_plain_language_purpose_before_internal_id(self):
+        self.write_plan([{"task_id":"T-OWNER","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[],"text":"# Boot cache writer\n\n## Objective\nMake startup reuse the persisted boot cache instead of recomputing it.\n"}])
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"
+        out=dsd_task.command_owner_status(a); item=next(x for x in out["backlog_preview"] if x["task_id"]=="T-OWNER")
+        self.assertIn("startup reuse the persisted boot cache",item["purpose"])
+
+
+
 if __name__ == "__main__": unittest.main()
 
 class RuntimeBootstrapTests(unittest.TestCase):

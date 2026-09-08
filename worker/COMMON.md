@@ -20,7 +20,9 @@ A complete report can legitimately conclude `FAIL`, `BLOCKED`, or `NOT READY`. E
 
 ## Escalation
 
-Return **`ESCALATE`** when responsible progress would require guessing outside your authority/capability. State the blocker, decisive evidence, important unknowns, useful options/tradeoffs and recommendation when justified, plus work that can continue independently. Do not choose the recipient; the orchestrator owns routing.
+Return **`ESCALATE`** when responsible progress requires broader diagnosis, redesign, authority, or a task-shape change such as splitting work that is too large/coarse for one focused worker session. State the blocker, decisive evidence, important unknowns, useful options/tradeoffs and recommendation when justified, plus work that can continue independently. Do not choose the recipient; the orchestrator owns routing.
+
+Return exact first-line **`ESCALATE CAPABILITY`** only when the task is still correctly scoped and inside your existing authority, but the current runtime/model cannot responsibly complete it. This asks T-BAG for a stronger configured runtime in the **same authority lane** when available; it is not a substitute for splitting an oversized task or escalating architecture/authority.
 
 ## Scope
 

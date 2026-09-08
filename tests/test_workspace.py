@@ -72,6 +72,24 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(out["changed"]); self.assertEqual((self.project/"a.txt").read_text(),"landed\n")
         final=dsd_task.load_task(self.run,"P","T-FAST-LAND"); self.assertEqual(final["status"],"integrated"); self.assertEqual(final["last_review"]["outcome"],"pass")
 
+    def test_integrate_shortcut_preserves_reviewer_followup_obligation(self):
+        self.register("T-FOLLOWUP-LAND"); ws=self.ws("T-FOLLOWUP-LAND"); wt=Path(ws["worktree"]); (wt/"a.txt").write_text("landed-with-followup\n")
+        class A: pass
+        c=A(); c.run_root=self.run; c.phase_id="P"; c.task_id="T-FOLLOWUP-LAND"; c.label="reviewer-1"
+        checkpoint=dsd_workspace.command_checkpoint(c)["checkpoint_ref"]
+        event=dsd_task.task_root(self.run,"P","T-FOLLOWUP-LAND")/"attempts"/"reviewer-1"; event.mkdir(parents=True)
+        report=event/"report.md"; report.write_text("PASS\n\n## Follow-up obligations\n- Production cutover wiring still needs an explicit end-to-end task.\n")
+        (event/"terminal.json").write_text(json.dumps({"status":"process-exited","exit_code":0}))
+        task=dsd_task.load_task(self.run,"P","T-FOLLOWUP-LAND"); task.setdefault("attempts",[]).append({"task_id":"T-FOLLOWUP-LAND","role":"reviewer","tier":"grunt","status":"gated","event_dir":str(event),"checkpoint_ref":checkpoint}); task["status"]="awaiting-review"; dsd_task.write_json(dsd_task.task_file(self.run,"P","T-FOLLOWUP-LAND"),task)
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="T-FOLLOWUP-LAND"; a.review_pass_report=report
+        out=dsd_workspace.command_integrate(a)
+        self.assertEqual(out["status"],"integrated"); self.assertEqual((self.project/"a.txt").read_text(),"landed-with-followup\n")
+        final=dsd_task.load_task(self.run,"P","T-FOLLOWUP-LAND")
+        findings=final["review_history"][-1]["findings"]
+        self.assertEqual(len(findings),1); self.assertEqual(findings[0]["status"],"open")
+        self.assertIn("cutover wiring",findings[0]["text"])
+        self.assertFalse(dsd_task._phase_task_success(self.run,"P",final))
+
     def test_explicit_human_acceptance_lands_exact_red_reviewer_checkpoint(self):
         self.register("T-HUMAN-LAND"); ws=self.ws("T-HUMAN-LAND"); wt=Path(ws["worktree"]); (wt/"a.txt").write_text("human-authorized\n")
         class A: pass

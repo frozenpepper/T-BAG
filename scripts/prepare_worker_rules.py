@@ -348,6 +348,13 @@ def main() -> int:
             "run_rules": run_rules,
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         root.parent.mkdir(parents=True, exist_ok=True); tmp.rename(root)
+        # Maintain one human-facing plan folder for the run. Worker authority remains
+        # the frozen revision snapshot; this mirror exists so owners can read the plan
+        # and chronological phase-gate reports without navigating attempt internals.
+        if plan is not None:
+            owner_plan_dir=run/"plan"; owner_plan_dir.mkdir(parents=True,exist_ok=True)
+            owner_plan=owner_plan_dir/"PLAN.md"; owner_tmp=owner_plan.with_suffix(".md.tmp")
+            shutil.copyfile(plan,owner_tmp); os.replace(owner_tmp,owner_plan)
         print(json.dumps(verify_snapshot(rules), indent=2, sort_keys=True)); return 0
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(json.dumps({"ok":False,"command":"prepare-worker-rules","error":str(exc)},sort_keys=True,separators=(",",":")))

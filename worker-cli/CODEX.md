@@ -8,6 +8,8 @@ T-BAG uses Codex JSONL execution while preserving worker-budget reservation, tas
 
 Mutating roles run with the assigned task worktree as their working project surface and the attempt directory writable for reports. Read-only roles write from the attempt directory while the rendered prompt names the frozen project view explicitly. Do not reproduce the transport command by hand; the adapter owns current sandbox/working-directory details.
 
+A configured runtime `effort` is passed through as Codex `model_reasoning_effort` for that worker session.
+
 ## Resume
 
 Resume the recorded thread only for healthy interrupted same-role work whose authority/task basis remains valid. A new T-BAG attempt/report still records the continuation. Do not preserve a confused or non-converging frame merely because a thread ID exists.
