@@ -1,14 +1,12 @@
 # T-BAG — The Beauty And the Grunt
 
-I think of modern LLM skills as **semantic software**. Traditional software expects fixed inputs and APIs; a skill can take goals, constraints, model choices, exceptions and changes of mind in natural language. The model supplies judgment; the skill supplies durable structure and mechanics.
+I think of modern LLM skills as **semantic software**: natural language supplies goals, constraints and exceptions; the model supplies judgment; the skill supplies durable structure and mechanics.
 
-T-BAG applies that idea to one problem: **how do you keep attacking hard technical work for hours or days without the orchestrator becoming the bottleneck, losing the plot after compaction, or asking a human to rescue every setback?**
+T-BAG applies that idea to one problem: **how do you keep attacking hard technical work for hours or days without the orchestrator becoming the bottleneck or losing the plot after compaction?**
 
 ## T-BAG the problem
 
 T-BAG is for problems you do not want an agent to merely discuss. **Literally T-BAG the problem: stomp on it repeatedly until it stops being a problem.**
-
-Give it a goal or an accepted plan:
 
 ```text
 problem
@@ -28,9 +26,30 @@ A Grunt that hits something outside its authority escalates instead of inventing
 Grunt → Analyst → Human
 ```
 
-Runtime strength is separate from authority. Cheap models can do repetitive implementation/review work; stronger reasoning stays cold until needed. A stronger model never silently gains a wider job.
+Runtime strength is separate from authority. Cheap models can do repetitive work; stronger reasoning stays cold until needed. The point is not one giant agent. It is a structure that keeps hitting the problem, reviews itself adversarially, recovers, replans when assumptions break, and continues until the plan is exhausted.
 
-The point is not one giant agent that knows everything. It is a structure that keeps hitting the problem from fresh angles, reviews its own work adversarially, recovers from failure, replans when assumptions break, and continues until the plan is exhausted.
+## Install / setup
+
+T-BAG is a **whole skill folder**: keep the repo intact; `SKILL.md` alone is not enough. You need Python 3 and whichever worker CLIs you choose, installed/authenticated.
+
+For Claude Code:
+
+```bash
+mkdir -p ~/.claude/skills
+git clone https://github.com/frozenpepper/T-BAG.git ~/.claude/skills/t-bag
+```
+
+Start a new Claude Code session and invoke `/t-bag ...`.
+
+Update with:
+
+```bash
+git -C ~/.claude/skills/t-bag pull --ff-only
+```
+
+For another supported parent, put the repo in that host's skill directory. Parent adapters exist for **Claude Code, OpenCode, Codex and Kilo**; worker adapters for **OpenCode, OpenCode 2, Codex and Claude**.
+
+On first use T-BAG resolves missing Grunt/Analyst runtime choices from your prompt/config (or asks once), then installs/checks the project-local harness adapter. There is no hidden model/provider default.
 
 ## The orchestrator is lightweight on purpose
 
@@ -38,17 +57,15 @@ The parent is deliberately **not** the repository engineer, main reviewer, or wa
 
 Workers read source, run tests, write code and produce evidence. Reviewers start fresh. Fixers resume the Reviewer that found the defect. Analysts own architecture, replanning and hard diagnosis. Deterministic tooling owns task state, dependencies, worktrees, checkpoints and integration.
 
-That keeps the parent's token diet small enough to orchestrate for days instead of drowning in source code, logs and worker history.
+That keeps the parent's token diet small enough to orchestrate for days instead of drowning in source, logs and worker history.
 
 A task fails. A reviewer catches another bug. A dependency was wrong. One model gets stuck. The plan changes. The parent gets compacted overnight. **The run keeps moving.**
 
 ## Memory lives outside the chat
 
-Plans, task briefs, attempts, reports, reviews, checkpoints, phase gates and Git carry the durable truth. Chat is a control surface over that state, not its only copy.
+Plans, briefs, attempts, reports, reviews, checkpoints, phase gates and Git carry the durable truth. Chat is a control surface over that state, not its only copy.
 
-So the parent can be compacted, restarted, or replaced by a fresh session and reconcile from recorded state. It does not need to remember what task 37 was doing three days ago.
-
-**Small active context, large durable memory.** That lets the orchestrator stay useful for very large jobs.
+The parent can be compacted, restarted, or replaced by a fresh session and reconcile from recorded state. **Small active context, large durable memory.**
 
 ## What using it can feel like
 
@@ -78,17 +95,13 @@ Use it only where it adds value, then continue with the normal runtime.
 
 ## What T-BAG provides
 
-- **Goal → reviewed plan → executable work**, or execution of a plan you already have.
-- **Parallel Grunts** with isolated mutable worktrees and frozen read-only views.
-- **Fresh review loops:** Implementer → Reviewer → Fixer → new Reviewer until PASS.
-- **Analyst replanning/escalation** for uncertainty, architecture and broken assumptions.
-- **Human escalation** only when owner authority is genuinely required.
-- **Independent Phase Gates** against the accumulated goal, not task-count theater.
+- **Goal → reviewed plan → executable work**, or execution of an existing plan.
+- **Parallel Grunts** with isolated worktrees and fresh review/fix loops.
+- **Analyst escalation/replanning**, Human escalation, and independent Phase Gates.
 - **Durable recovery** across crashes, compaction and parent-session replacement.
-- **Mixed runtimes:** OpenCode, OpenCode 2, Codex and Claude have first-class worker adapters.
-- **Safe concurrency:** parallel workers, staggered fragile CLI starts.
+- **Mixed runtimes** and collision-safe concurrency.
 
-T-BAG's rule is simple: **let LLMs reason where meaning matters; remember the decision once; mechanize the stable consequence.**
+T-BAG's rule: **let LLMs reason where meaning matters; remember the decision once; mechanize the stable consequence.**
 
 ## Where to look next
 
@@ -97,7 +110,7 @@ T-BAG's rule is simple: **let LLMs reason where meaning matters; remember the de
 | Parent/orchestration behavior | `SKILL.md` |
 | Operator commands | `PROMPTS.md` |
 | Runtime/model configuration | `CONFIG.md` |
-| Task/worktree/lifecycle/integration mechanics | `WORKSPACE.md` |
+| Task/worktree/lifecycle/integration | `WORKSPACE.md` |
 | Context composition | `CONTEXT.md` |
 | Harness behavior | `HARNESS.md` + harness-specific file |
 | Worker roles | `worker/` |
