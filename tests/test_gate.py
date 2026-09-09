@@ -83,4 +83,20 @@ class GateTests(unittest.TestCase):
         from _contract import allowed_source_changes
         self.assertEqual(allowed_source_changes("# T\n## Allowed source changes\n- `docs/My File.md`\n"), ["docs/My File.md"])
 
+    def test_declared_generated_counterpart_is_admitted_only_with_authorized_source_change(self):
+        self.task.write_text(
+            "# T\n## Allowed source changes\n- `schema`\n\n## Generated output derivations\n- `schema` => `generated/client`\n"
+        )
+        good=self.make(role="implementer",writes=True,changed=["schema/model.baml","generated/client/model.ts"])
+        self.assertTrue(good["integrity_ok"],good["errors"]); self.assertEqual(good["generated_admissions"][0]["path"],"generated/client/model.ts")
+        bad=self.make(role="implementer",writes=True,changed=["generated/client/model.ts"])
+        self.assertFalse(bad["integrity_ok"]); self.assertEqual(bad["generated_admissions"],[])
+
+    def test_fixture_and_write_authority_may_not_overlap(self):
+        from _contract import validate_path_relationships
+        text="# T\n## Allowed source changes\n- `node_modules/tool`\n\n## Required worktree fixtures\n- `node_modules`\n"
+        with self.assertRaisesRegex(ValueError,"cannot also be worker write authority"):
+            validate_path_relationships(text)
+
+
 if __name__=="__main__":unittest.main()

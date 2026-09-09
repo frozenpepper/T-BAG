@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from _roles import DEFAULT_TIER, ESCALATION_LADDER, ROLE_NAMES
-from _contract import allowed_source_changes, declared_worker_skill_tags, has_explicit_write_restriction, required_worktree_fixtures, role_writes_project
+from _contract import allowed_source_changes, declared_worker_skill_tags, generated_output_mappings, has_explicit_write_restriction, required_worktree_fixtures, role_writes_project, validate_path_relationships
 from _rules_snapshot import rules_revisions, verify_snapshot
 
 FORMAT = "dsd-task-state-v2.1"
@@ -89,10 +89,12 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def declared_report_outcome(report: Path, role: str, *, required: bool = False) -> str | None:
-    """Read an exact worker-declared routing token from the report's first line.
+    """Read an explicit worker routing disposition without interpreting prose.
 
-    This deliberately does not classify prose. A routing role must put one exact token
-    on the first non-empty line; everything after it remains ordinary rich evidence.
+    New workers put one exact token on the first non-empty line. For durable reports
+    produced by older/less obedient workers, also accept one exact ``Disposition:``
+    header in the opening block. This is a structural compatibility surface, not a
+    sentiment classifier: free prose never becomes lifecycle authority.
     """
     allowed=REPORT_OUTCOMES_BY_ROLE.get(role)
     if not allowed:
@@ -100,16 +102,29 @@ def declared_report_outcome(report: Path, role: str, *, required: bool = False) 
     if not report.is_file():
         if required: raise ValueError(f"routing report missing: {report}")
         return None
-    first=""
-    for raw in report.read_text(encoding="utf-8",errors="replace").splitlines():
-        if raw.strip():
-            first=raw.strip(); break
+    nonempty=[raw.strip() for raw in report.read_text(encoding="utf-8",errors="replace").splitlines() if raw.strip()]
+    first=nonempty[0] if nonempty else ""
     outcome=allowed.get(first)
-    if outcome is None and required:
+    if outcome is not None:
+        return outcome
+    explicit=[]
+    for line in nonempty[:12]:
+        if not line.startswith("Disposition:"):
+            continue
+        token=line[len("Disposition:"):].strip()
+        if token in allowed:
+            explicit.append(token)
+    explicit=list(dict.fromkeys(explicit))
+    if len(explicit)==1:
+        return allowed[explicit[0]]
+    if len(explicit)>1:
+        raise ValueError(f"{role} report contains conflicting explicit Disposition headers: {explicit}")
+    if required:
         raise ValueError(
-            f"{role} report must begin with one exact routing token: {', '.join(allowed)}; got {first!r}"
+            f"{role} report must begin with one exact routing token or contain one exact opening 'Disposition: TOKEN' header; "
+            f"allowed tokens: {', '.join(allowed)}; got first line {first!r}"
         )
-    return outcome
+    return None
 
 
 
@@ -279,39 +294,54 @@ def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | 
 
 
 def superseded_workspace_retention(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any]:
-    """Describe whether a superseded mutable workspace still protects successor work.
+    """Protect only superseded mutable state that can still be lost.
 
-    Cleanup may reclaim a predecessor only after every recorded successor has integrated
-    or one successor has durably captured the predecessor delta through ``carry_from``.
-    This is deliberately derived from durable task records rather than a new retention
-    state machine.
+    Read-only/result tasks have no project delta to preserve. For project-changing
+    tasks, cleanup asks about the actual retained delta rather than using successor
+    completion as a proxy: no delta, a frozen carry-forward, explicit Analyst
+    re-derivation, or exact materialization in primary are all durable dispositions.
+    Anything else remains padlocked.
     """
     tid=slug(str(task.get("task_id") or ""))
     if str(task.get("status") or "")!="superseded":
-        return {"retain":False,"successors":[],"integrated":[],"carry_captured_by":[]}
+        return {"retain":False,"reason":"not-superseded"}
+    if task.get("kind")!="implementation" or not task.get("requires_integration"):
+        return {"retain":False,"reason":"non-mutating-result-is-durable"}
+    ws_path=task_root(run,phase,tid)/"workspace.json"
+    if not ws_path.is_file():
+        return {"retain":False,"reason":"no-workspace"}
+    try:
+        delta=inspect_carry_delta(run,phase,tid)
+    except ValueError as exc:
+        text=str(exc)
+        if "has no durable project delta beyond its task baseline" in text:
+            return {"retain":False,"reason":"no-unintegrated-delta","changed_paths":[]}
+        return {"retain":True,"reason":"delta-not-provable","error":text}
+
     raw=task.get("superseded_by")
     successors=[raw] if isinstance(raw,str) and raw.strip() else list(raw) if isinstance(raw,list) else []
     successors=[slug(str(x)) for x in successors if str(x).strip()]
-    integrated=[]; captured=[]; missing=[]
+    captured=[]
     for sid in successors:
         try: successor=load_task(run,phase,sid)
-        except ValueError:
-            missing.append(sid); continue
-        if successor.get("status")=="integrated": integrated.append(sid)
+        except ValueError: continue
         if successor.get("carry_from")==tid:
             patch=Path(str(successor.get("carry_forward_patch") or ""))
             if patch.is_file(): captured.append(sid)
-    all_integrated=bool(successors) and not missing and len(integrated)==len(successors)
-    # A bare supersede with no recorded successor is explicit retirement/abandonment;
-    # there is no successor carry-forward relation for cleanup to protect.
-    safe=not successors or bool(captured) or all_integrated
+    disposition=task.get("supersession_delta") if isinstance(task.get("supersession_delta"),dict) else {}
+    mode=str(disposition.get("mode") or "")
+    if captured:
+        return {"retain":False,"reason":"carry-forward-captured","successors":successors,"carry_captured_by":captured,"changed_paths":delta["changed_paths"]}
+    if mode=="rederive-from-primary":
+        return {"retain":False,"reason":"analyst-explicit-rederive","successors":successors,"changed_paths":delta["changed_paths"]}
+
+    primary=Path(str(load_run(run)["project_root"])).resolve()
+    cp=subprocess.run(["git","apply","--reverse","--check","-"],cwd=primary,input=delta["patch_bytes"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    if cp.returncode==0:
+        return {"retain":False,"reason":"delta-materialized-in-primary","successors":successors,"changed_paths":delta["changed_paths"]}
     return {
-        "retain":not safe,
-        "successors":successors,
-        "integrated":integrated,
-        "carry_captured_by":captured,
-        "missing_successors":missing,
-        "reason":"no-recorded-successor" if not successors else "carry-forward-captured" if captured else "successors-integrated" if all_integrated else "successor-still-needs-workspace-or-carry-forward",
+        "retain":True,"reason":"unintegrated-delta-not-durably-disposed",
+        "successors":successors,"carry_captured_by":captured,"changed_paths":delta["changed_paths"],
     }
 
 def readiness(run: Path, phase: str, task: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -741,7 +771,22 @@ def command_set_run_status(args: argparse.Namespace) -> dict[str, Any]:
         if getattr(args,"reason",None): info["status_reason"]=args.reason
         else: info.pop("status_reason",None)
         write_json(path,info)
-    return {"run_id":info["run_id"],"status":info["status"],"reason":info.get("status_reason")}
+    result={"run_id":info["run_id"],"status":info["status"],"reason":info.get("status_reason")}
+    if args.status=="completed":
+        try:
+            import dsd_workspace
+            housekeeping=dsd_workspace.reap_safe_runtime(run,drop_current_analysis=True)
+            result["runtime_housekeeping"]={k:v for k,v in housekeeping.items() if v}
+            class P: pass
+            purge=P(); purge.run_root=run; purge.dry_run=False
+            try:
+                purged=dsd_workspace.command_purge_run(purge)
+                result["runtime_purged"]=bool(purged.get("purged"))
+            except ValueError as exc:
+                result["runtime_purge_deferred"]=str(exc)[:800]
+        except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+            result["runtime_housekeeping_deferred"]=str(exc)[:800]
+    return result
 
 
 
@@ -757,7 +802,7 @@ def _command_register_direct_unlocked(args: argparse.Namespace) -> dict[str, Any
     # Direct registration has no task-graph preflight, so still validate every
     # mechanically parsed contract section before freezing the brief read-only.
     brief_text=brief.read_text(encoding="utf-8",errors="replace")
-    allowed_source_changes(brief_text); declared_worker_skill_tags(brief_text); required_worktree_fixtures(brief_text)
+    allowed_source_changes(brief_text); generated_output_mappings(brief_text); declared_worker_skill_tags(brief_text); required_worktree_fixtures(brief_text); validate_path_relationships(brief_text)
     kind=args.kind; default_role="implementer" if kind=="implementation" else "verification" if kind=="verification" else "discovery"; role=args.role or default_role
     if role not in ROLE_NAMES: raise ValueError(f"unknown role: {role}")
     tier=args.tier or DEFAULT_TIER[role]
@@ -859,10 +904,16 @@ def inspect_carry_delta(run: Path, phase: str, source_task: str) -> dict[str, An
             if check and cp.returncode:
                 raise ValueError(f"cannot snapshot carry_from {source_task}: git {' '.join(argv)} failed: {cp.stderr.decode(errors='replace')[:500]}")
             return cp
+        fixture_prefixes=[str(x).replace("\\","/").strip("/") for x in ws.get("fixture_mirrors",[]) if str(x).strip("/")]
+        pathspec=["."]
+        for rel in ["TBag","AnalystAndGrunt",*fixture_prefixes]:
+            pathspec.extend([f":(exclude){rel}",f":(exclude){rel}/**"])
         git_bytes("read-tree",baseline)
         git_bytes("add","-A","--",".")
-        patch=git_bytes("diff","--cached","--binary",baseline,"--",".").stdout
-        raw=git_bytes("diff","--cached","--name-only","-z","--no-renames",baseline,"--",".").stdout
+        for rel in ["TBag","AnalystAndGrunt",*fixture_prefixes]:
+            git_bytes("reset","-q",baseline,"--",rel,check=False)
+        patch=git_bytes("diff","--cached","--binary",baseline,"--",*pathspec).stdout
+        raw=git_bytes("diff","--cached","--name-only","-z","--no-renames",baseline,"--",*pathspec).stdout
     changed=[item.decode("utf-8",errors="surrogateescape") for item in raw.split(b"\0") if item]
     if not patch and not changed:
         raise ValueError(f"carry_from source {source_task} has no durable project delta beyond its task baseline; use supersedes without carry_from")
@@ -965,6 +1016,8 @@ def preflight_plan_contents(run: Path, phase: str, graph_path: Path) -> list[dic
         try:
             brief_text=Path(spec["brief"]).read_text(encoding="utf-8",errors="replace")
             allowed_source_changes(brief_text)
+            generated_output_mappings(brief_text)
+            validate_path_relationships(brief_text)
             requested_skills = declared_worker_skill_tags(brief_text)
             if frozen_skill_ids is not None:
                 unknown_skills = sorted(set(requested_skills) - frozen_skill_ids)
@@ -1064,6 +1117,9 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     run = args.run_root.resolve(); load_run(run); phase = slug(args.phase_id)
     graph_path = args.plan.resolve(); source = validate_analyst_plan_source(run, phase, graph_path)
     specs = preflight_plan_contents(run, phase, graph_path)
+    graph=load_json(graph_path)
+    rederive_from_primary=set(slug(str(x)) for x in graph.get("rederive_from_primary",[]) if str(x).strip())
+    carry_sources={str(spec.get("carry_from")) for spec in specs if spec.get("carry_from")}
 
     # Freeze explicit predecessor carryover before changing predecessor lifecycle state.
     # The snapshot lives under the replacement task record, so later predecessor cleanup
@@ -1116,7 +1172,12 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
             prior=old_state.get("superseded_by")
             prior_ids=[prior] if isinstance(prior,str) and prior.strip() else list(prior) if isinstance(prior,list) else []
             merged=list(dict.fromkeys([slug(str(x)) for x in prior_ids if str(x).strip()]+new_ids))
-            old_state["status"] = "superseded"; old_state["superseded_by"] = merged; old_state["updated_at"] = now(); write_json(old_path, old_state)
+            old_state["status"] = "superseded"; old_state["superseded_by"] = merged
+            if old in rederive_from_primary:
+                old_state["supersession_delta"]={"mode":"rederive-from-primary","recorded_at":now(),"successors":merged}
+            elif old in carry_sources:
+                old_state["supersession_delta"]={"mode":"carry-forward","recorded_at":now(),"successors":merged}
+            old_state["updated_at"] = now(); write_json(old_path, old_state)
 
     # A standalone Analyst control task whose approved result was *this* graph has
     # finished once registration succeeds. Reuse the existing non-integration
@@ -1659,10 +1720,19 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     implementation, reinterpret worker reports, or invent technical priorities.
     """
     run=args.run_root.resolve(); info=load_run(run)
+    housekeeping={}
     if not getattr(args,"no_sweep",False):
         class S: pass
         sweep=S(); sweep.run_root=run; sweep.phase_id=getattr(args,"phase_id",None)
         swept=command_sweep_stale(sweep)
+        # Housekeeping is a lifecycle consequence, not a parent TODO. Reconcile is the
+        # universal start/resume boundary, so it opportunistically reaps only resources
+        # whose durability can already be proved mechanically.
+        try:
+            import dsd_workspace
+            housekeeping=dsd_workspace.reap_safe_runtime(run,phase_id=getattr(args,"phase_id",None))
+        except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+            housekeeping={"deferred":str(exc)[:800]}
     else: swept={"marked":[],"count":0}
     phases=[slug(args.phase_id)] if getattr(args,"phase_id",None) else sorted(p.name for p in (run/"phases").iterdir() if p.is_dir()) if (run/"phases").is_dir() else []
     tasks=[]; actions=[]; live=[]; human=[]; cleanup=[]
@@ -1723,12 +1793,15 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     if human: result["human_blocks"]=human
     if unresolved_state: result["unresolved_state"]=unresolved_state
     if swept.get("count"): result["swept_stale"]=swept
+    if housekeeping.get("cleaned") or housekeeping.get("orphan_databases_removed") or housekeeping.get("analysis_views_removed"):
+        result["runtime_reaped"]={k:v for k,v in housekeeping.items() if v and k!="skipped"}
+    if housekeeping.get("deferred"): result["runtime_reap_deferred"]=housekeeping["deferred"]
     if getattr(args,"details",False):
         result.update({
             "worker_runtimes":info.get("worker_runtimes"),"escalation":info.get("escalation"),"latest_worker_rules":_latest_rules_revision(run),
             "swept_stale":swept,"live_attempts":live,"actions":actions,"first_useful_actions":first_useful,
             "human_blocks":human,"unresolved_state":unresolved_state,"task_count":len(tasks),"status_counts":status_counts,
-            "cleanup_candidates":cleanup,"backlog":backlog,
+            "cleanup_candidates":cleanup,"runtime_housekeeping":housekeeping,"backlog":backlog,
         })
     return result
 
@@ -2586,7 +2659,7 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
-    for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
+    for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
         description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
         if name=="record-attempt": p.add_argument("--attempt-json",type=Path,required=True)
@@ -2594,6 +2667,7 @@ def parser() -> argparse.ArgumentParser:
         elif name=="review": p.add_argument("--outcome",choices=("pass","fail","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
         elif name=="plan-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
         elif name=="context-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
+        elif name=="verification-result": p.add_argument("--report",type=Path,required=True)
         elif name=="analysis-result": p.add_argument("--outcome",choices=("resume","replan","replan-resume","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
         elif name=="escalate": p.add_argument("--report",type=Path,required=True)
         elif name=="resolve-escalation": p.add_argument("--decision",type=Path,required=True); p.add_argument("--route",choices=("resume","analysis","accept"),default="resume")
@@ -2627,6 +2701,7 @@ def main() -> int:
         elif args.command=="review": result=command_review(args)
         elif args.command=="plan-review": result=command_plan_review(args)
         elif args.command=="context-review": result=command_context_review(args)
+        elif args.command=="verification-result": result=command_verification_result(args)
         elif args.command=="analysis-result": result=command_analysis_result(args)
         elif args.command=="escalate": result=command_escalate(args)
         elif args.command=="resolve-escalation": result=command_resolve_escalation(args)

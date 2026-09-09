@@ -31,7 +31,7 @@ class RuntimeAndEvalTests(unittest.TestCase):
     def test_parent_help_keeps_internal_semantic_transitions_behind_advance(self):
         help_text=subprocess.run([sys.executable,str(SCRIPTS/'dsd_task.py'),'--help'],text=True,stdout=subprocess.PIPE,check=True).stdout
         self.assertIn('advance',help_text); self.assertIn('owner-status',help_text)
-        self.assertNotIn('verification-result',help_text); self.assertNotIn('phase-gate',help_text); self.assertNotIn('capability-escalate',help_text); self.assertNotIn('prepare-phase-gate',help_text)
+        self.assertIn('verification-result',help_text); self.assertNotIn('phase-gate',help_text); self.assertNotIn('capability-escalate',help_text); self.assertNotIn('prepare-phase-gate',help_text)
 
     def test_opencode_harness_detection_never_claims_live_plugin_capability(self):
         sys.path.insert(0,str(SCRIPTS))
@@ -47,7 +47,7 @@ class RuntimeAndEvalTests(unittest.TestCase):
         out=json.loads(cp.stdout); self.assertGreaterEqual(out['cases'],10)
         cases=[json.loads(x) for x in (ROOT/'evals'/'cases.jsonl').read_text().splitlines() if x.strip()]
         ids={x['id'] for x in cases}
-        self.assertTrue({'runtime-partial','major-vague-work','technical-llm-failure','parallel-ready','review-fix-loop','quiet-user-reporting','owner-requested-status-report','semantic-abstention-after-review','plan-owned-assurance','session-continuity','goal-only-bootstrap','midflight-attempt-observability','opencode-launch-follow-yield','deep-reviewer-system-interactions','deep-analyst-causal-system-reasoning','bounded-perfection-worker-quality','early-integration-feedback','semantic-runtime-adapters-are-optimizations','capability-ladder-stays-cold','long-attempt-diagnosis-before-retry','phase-exit-gate-is-product-goal-review','review-followup-obligation-cannot-evaporate','review-followup-invalidates-frozen-phase-frontier','staggered-worker-cli-starts-remain-parallel','opencode2-worker-isolation'}.issubset(ids))
+        self.assertTrue({'runtime-partial','major-vague-work','technical-llm-failure','parallel-ready','review-fix-loop','quiet-user-reporting','owner-requested-status-report','semantic-abstention-after-review','plan-owned-assurance','session-continuity','goal-only-bootstrap','midflight-attempt-observability','opencode-launch-follow-yield','deep-reviewer-system-interactions','deep-analyst-causal-system-reasoning','bounded-perfection-worker-quality','early-integration-feedback','semantic-runtime-adapters-are-optimizations','capability-ladder-stays-cold','long-attempt-diagnosis-before-retry','phase-exit-gate-is-product-goal-review','review-followup-obligation-cannot-evaporate','review-followup-invalidates-frozen-phase-frontier','staggered-worker-cli-starts-remain-parallel','opencode2-worker-isolation','runtime-housekeeping-is-lifecycle-owned','superseded-workspace-padlock-is-delta-aware','launcher-fixtures-never-become-worker-output','stale-room-detects-same-status-byte-change'}.issubset(ids))
 
     def test_hot_context_stays_compact(self):
         self.assertLessEqual((ROOT/'SKILL.md').stat().st_size,7500)

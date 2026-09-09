@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _contract import allowed_source_changes, has_explicit_write_restriction, role_writes_project
+from _contract import allowed_source_changes, generated_output_mappings, has_explicit_write_restriction, role_writes_project
+from _rules_snapshot import verify_snapshot
 from run_worker import classify_report_text
 
 
@@ -25,6 +26,21 @@ def read_json(path: Path)->dict[str,Any]:
 def in_prefix(path: str, prefix: str)->bool:
     p=path.replace("\\","/").strip("/"); q=prefix.replace("\\","/").strip("/")
     return p==q or p.startswith(q+"/")
+
+
+def generated_rules(reservation: dict[str, Any], task_text: str) -> list[dict[str, str]]:
+    rules=list(generated_output_mappings(task_text))
+    raw=reservation.get("worker_rules")
+    if isinstance(raw,str) and raw and Path(raw).is_file():
+        snapshot=verify_snapshot(Path(raw))
+        protocol_raw=snapshot.get("project_protocol")
+        if isinstance(protocol_raw,str) and protocol_raw and Path(protocol_raw).is_file():
+            rules.extend(generated_output_mappings(Path(protocol_raw).read_text(encoding="utf-8",errors="replace")))
+    seen=set(); out=[]
+    for item in rules:
+        key=(item["source"],item["generated"])
+        if key not in seen: seen.add(key); out.append(item)
+    return out
 
 
 def gate(event: Path)->dict[str,Any]:
@@ -60,10 +76,22 @@ def gate(event: Path)->dict[str,Any]:
         errors.append("worker changed TBag control/evidence tree: "+", ".join(forbidden_control[:20]))
     if not writes and changed:
         errors.append("read-only attempt changed project/worktree state: "+", ".join(changed[:20])+"; attempt artifacts belong under the launcher-supplied attempt directory/report parent, not the assigned project view. If the changed path is a cache/build artifact (for example __pycache__/*.pyc), the brief itself contains a mutating verification step; fix the verification command rather than retrying the read-only worker")
+    generated_admissions=[]
     if writes and task_text and has_explicit_write_restriction(task_text):
         allowed=allowed_source_changes(task_text)
         outside=[p for p in changed if not any(in_prefix(p,q) for q in allowed)]
-        if outside: errors.append("project changes exceeded explicit Allowed source changes: "+", ".join(outside[:20]))
+        rules=generated_rules(reservation,task_text)
+        still_outside=[]
+        for path in outside:
+            admitted=None
+            for rule in rules:
+                if not in_prefix(path,rule["generated"]): continue
+                source_hits=[changed_path for changed_path in changed if in_prefix(changed_path,rule["source"]) and any(in_prefix(changed_path,q) for q in allowed)]
+                if source_hits:
+                    admitted={"path":path,"source_prefix":rule["source"],"generated_prefix":rule["generated"],"source_changes":source_hits[:8]}; break
+            if admitted: generated_admissions.append(admitted)
+            else: still_outside.append(path)
+        if still_outside: errors.append("project changes exceeded explicit Allowed source changes: "+", ".join(still_outside[:20]))
 
     if report_state in {"missing","launcher-placeholder"}:
         if writes and changed:
@@ -90,7 +118,7 @@ def gate(event: Path)->dict[str,Any]:
         "format":"dsd-evidence-gate-v2.1","integrity_ok":integrity_ok,"ready_for_interpretation":ready,
         "disposition":disposition,"errors":errors,"warnings":warnings,"task_id":reservation.get("task_id"),"role":role,
         "tier":reservation.get("tier"),"model":reservation.get("model"),"event_dir":str(event),"task":str(task),"report":str(report),
-        "report_state":report_state,"writes_project":writes,"scope":scope,"terminal_event":str(terminal_path) if terminal_path.is_file() else None,
+        "report_state":report_state,"writes_project":writes,"scope":scope,"generated_admissions":generated_admissions,"terminal_event":str(terminal_path) if terminal_path.is_file() else None,
         "exit_code":terminal.get("exit_code") if isinstance(terminal,dict) else None,"session_id":terminal.get("session_id") if isinstance(terminal,dict) else None,
     }
 

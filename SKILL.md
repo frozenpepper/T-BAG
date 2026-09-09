@@ -35,7 +35,7 @@ Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs a
 - **Scope:** follow relevant interactions deeply enough to establish the assigned conclusion; unrelated obligations go to planning/escalation.
 - **Succession:** supersession/deferral does not erase obligations. Bulk closure requires an explicit successor or Human cancellation.
 - **Context:** workers receive frozen common rules, technical method when applicable, one role, optional Project Protocol, selected skills, brief and typed inputs. Rich parent history stays parent-only. The parent is a router, not a reader: never pipe raw logs/reports or full process commands into context; consume bounded JSON/routing surfaces directly instead of reformatting them through helper scripts.
-- **Blast radius:** the parent never raw-deletes shared cache/project/run roots or anything outside the current run's owned directories. `~/.cache/t-bag` is a multi-project store. Disk pressure is resolved with scoped cleanup/`purge-run` or by asking the owner, never `rm -rf` on a shared root.
+- **Cleanup/blast radius:** runtime cleanup is lifecycle-owned; the parent never inventories or raw-deletes cache paths. T-BAG reaps only mechanically disposable state inside the current run's owned runtime. `~/.cache/t-bag` is shared; never `rm -rf` it.
 
 ## Owner communication
 

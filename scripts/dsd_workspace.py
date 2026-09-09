@@ -244,15 +244,18 @@ def _primary_view_marker(primary: Path) -> tuple[str, str]:
 
 
 def _view_matches_primary(item: dict[str, Any], run: Path, primary: Path) -> bool:
-    head,status=_primary_view_marker(primary)
-    if item.get("primary_head")!=head or item.get("primary_status")!=status: return False
     current=integrated_primary_untracked_inputs(run,primary)
     current_paths={str(x.get("path") or "") for x in current if str(x.get("path") or "")}
     recorded=item.get("integrated_primary_inputs") if isinstance(item.get("integrated_primary_inputs"),list) else []
     recorded_paths={str(x.get("path") or "") for x in recorded if isinstance(x,dict) and str(x.get("path") or "")}
     if current_paths!=recorded_paths: return False
     view=Path(str(item.get("path") or ""))
-    return all(_same_primary_file(primary,view,rel) for rel in current_paths)
+    if not all(_same_primary_file(primary,view,rel) for rel in current_paths): return False
+    baseline=str(item.get("baseline_ref") or "")
+    if baseline and run_cmd(["git","rev-parse","--verify",baseline],primary,check=False).returncode==0:
+        return _primary_matches_snapshot(primary,baseline,excluded_paths=sorted(current_paths))
+    head,status=_primary_view_marker(primary)
+    return item.get("primary_head")==head and item.get("primary_status")==status
 
 
 def acquire_analysis_view(run: Path) -> dict[str, Any]:
@@ -393,8 +396,8 @@ def copy_integrated_primary_inputs(primary: Path, worktree: Path, inputs: list[d
     return copied
 
 
-def _review_delta_paths(worktree: Path, base: str, reviewed_ref: str) -> tuple[list[str], list[str]]:
-    raw=run_cmd(["git","diff","--name-status","-z",f"{base}..{reviewed_ref}","--","."],worktree).stdout
+def _review_delta_paths(worktree: Path, base: str, reviewed_ref: str, *, fixture_prefixes: list[str] | None = None) -> tuple[list[str], list[str]]:
+    raw=run_cmd(["git","diff","--name-status","-z",f"{base}..{reviewed_ref}","--",*_project_pathspec(fixture_prefixes=fixture_prefixes or [])],worktree).stdout
     changed=[]; added=[]; parts=raw.split(b"\0"); i=0
     while i < len(parts):
         status=parts[i].decode("utf-8",errors="surrogateescape") if parts[i] else ""; i+=1
@@ -511,7 +514,7 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         fixture_snapshot=dsd_task.task_root(run,phase,tid)/"fixture-snapshot"
         fixture_mirrors=copy_required_fixtures(primary,fixture_snapshot,task_text)
         copy_required_fixtures(fixture_snapshot,worktree,task_text)
-        run_cmd(["git","add","-A"],worktree)
+        _stage_durable_project_state(worktree,fixture_prefixes=fixture_mirrors)
         # T-BAG-integrated non-tracked additions are reviewed project state, not ambient
         # ignored input. Force them into the task-local baseline so .gitignore cannot
         # make integrated primary state disappear from later checkpoints/reviews.
@@ -568,14 +571,44 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
 
 
 
+def _workspace_fixture_prefixes(ws: dict[str, Any]) -> list[str]:
+    raw=ws.get("fixture_mirrors") if isinstance(ws.get("fixture_mirrors"),list) else []
+    return list(dict.fromkeys(str(x).replace("\\","/").strip("/") for x in raw if str(x).strip("/")))
+
+
+def _project_pathspec(*, fixture_prefixes: list[str] | None = None, extra_excludes: list[str] | None = None) -> list[str]:
+    """Git pathspec for durable project state, excluding launcher-owned inputs."""
+    prefixes=["TBag","AnalystAndGrunt",*(fixture_prefixes or []),*(extra_excludes or [])]
+    out=["."]
+    for rel in list(dict.fromkeys(x.replace("\\","/").strip("/") for x in prefixes if x)):
+        out.extend([f":(exclude){rel}",f":(exclude){rel}/**"] )
+    return out
+
+
+def _stage_durable_project_state(root: Path, *, fixture_prefixes: list[str] | None = None) -> None:
+    """Stage project state while keeping launcher-owned fixture inputs out of Git."""
+    run_cmd(["git","add","-A","--","."],root)
+    for rel in ["TBag","AnalystAndGrunt",*(fixture_prefixes or [])]:
+        run_cmd(["git","reset","-q","HEAD","--",rel],root,check=False)
+
+
+def _primary_matches_snapshot(primary: Path, snapshot_ref: str, *, excluded_paths: list[str] | None = None) -> bool:
+    """Compare frozen tracked project bytes with the current primary working tree."""
+    if not snapshot_ref:
+        return False
+    cp=run_cmd(["git","diff","--quiet",snapshot_ref,"--",*_project_pathspec(extra_excludes=excluded_paths or [])],primary,check=False)
+    return cp.returncode==0
+
+
 def _workspace_tree_matches_baseline(ws: dict[str, Any]) -> bool:
     """Whether an isolated workspace contains no task-authored project delta."""
     wt=Path(str(ws.get("worktree") or ""))
     baseline=str(ws.get("baseline_branch") or ""); task_branch=str(ws.get("task_branch") or "")
     if not wt.is_dir() or not baseline or not task_branch: return False
-    status=git_text(wt,"status","--porcelain=v1","--untracked-files=all","--",".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**")
+    pathspec=_project_pathspec(fixture_prefixes=_workspace_fixture_prefixes(ws))
+    status=git_text(wt,"status","--porcelain=v1","--untracked-files=all","--",*pathspec)
     if status: return False
-    return run_cmd(["git","diff","--quiet",f"{baseline}..{task_branch}","--",".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**"],wt,check=False).returncode==0
+    return run_cmd(["git","diff","--quiet",f"{baseline}..{task_branch}","--",*pathspec],wt,check=False).returncode==0
 
 
 def _same_primary_file(primary: Path, worktree: Path, rel: str) -> bool:
@@ -590,17 +623,6 @@ def _same_primary_file(primary: Path, worktree: Path, rel: str) -> bool:
 def _workspace_primary_changed(run: Path, phase: str, task: dict[str, Any], ws: dict[str, Any]) -> tuple[bool,str]:
     primary=Path(str(ws.get("primary_root") or "")).resolve(); wt=Path(str(ws.get("worktree") or "")).resolve()
     if not primary.is_dir() or not wt.is_dir(): return False,"workspace-missing"
-    head,status=_primary_view_marker(primary)
-    old_head=str(ws.get("primary_head") or ""); old_status=ws.get("primary_status")
-    if old_head:
-        if head!=old_head or (isinstance(old_status,str) and status!=old_status): return True,"primary-tracked-state-changed"
-    else:
-        # Backward-compatible inference for workspaces created before primary markers
-        # were recorded. The baseline snapshot commit is a child of the primary HEAD
-        # from which the workspace was born.
-        parent=run_cmd(["git","rev-parse",f"{ws.get('baseline_branch')}^"],wt,check=False)
-        if parent.returncode==0 and parent.stdout.decode(errors="replace").strip()!=head:
-            return True,"primary-head-changed"
     desired=integrated_primary_untracked_inputs(run,primary)
     desired_paths={str(x.get("path") or "") for x in desired if str(x.get("path") or "")}
     copied=ws.get("integrated_primary_inputs") if isinstance(ws.get("integrated_primary_inputs"),list) else ws.get("dependency_untracked_inputs") if isinstance(ws.get("dependency_untracked_inputs"),list) else []
@@ -608,6 +630,20 @@ def _workspace_primary_changed(run: Path, phase: str, task: dict[str, Any], ws: 
     if desired_paths!=copied_paths: return True,"integrated-primary-untracked-set-changed"
     for rel in sorted(desired_paths):
         if not _same_primary_file(primary,wt,rel): return True,"integrated-primary-untracked-content-changed"
+
+    # Compare the baseline snapshot commit with the *current working tree bytes*.
+    # HEAD/status markers cannot notice a second edit to a path that was already dirty.
+    baseline=str(ws.get("baseline_branch") or "")
+    if baseline and run_cmd(["git","rev-parse","--verify",baseline],primary,check=False).returncode==0:
+        if not _primary_matches_snapshot(primary,baseline,excluded_paths=sorted(desired_paths)):
+            return True,"primary-tracked-state-changed"
+        return False,"current"
+
+    # Legacy fallback for bindings whose baseline ref has already disappeared.
+    head,status=_primary_view_marker(primary)
+    old_head=str(ws.get("primary_head") or ""); old_status=ws.get("primary_status")
+    if old_head and (head!=old_head or (isinstance(old_status,str) and status!=old_status)):
+        return True,"primary-tracked-state-changed"
     return False,"current"
 
 
@@ -668,7 +704,7 @@ def command_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     if ws.get("mode","isolated-worktree")!="isolated-worktree": raise ValueError("shared analysis views are frozen and cannot receive task checkpoints")
     wt=Path(ws["worktree"]); label=safe_component(args.label); ref="/".join(["dsd-checkpoint", safe_component(dsd_task.load_run(run)["run_id"]), safe_component(phase), safe_component(tid), label])
     if run_cmd(["git","show-ref","--verify","--quiet",f"refs/heads/{ref}"],wt,check=False).returncode==0: raise ValueError(f"checkpoint already exists: {ref}")
-    run_cmd(["git","add","-A"],wt)
+    _stage_durable_project_state(wt,fixture_prefixes=_workspace_fixture_prefixes(ws))
     run_cmd(internal_git(run,"-c","user.name=TBag","-c","user.email=analyst-grunt@local","commit","--allow-empty","-m",f"Analyst-Grunt checkpoint {phase}/{tid} before {label}"),wt)
     run_cmd(["git","branch",ref,"HEAD"],wt)
     return {"task_id":tid,"checkpoint_ref":ref,"checkpoint_oid":git_text(wt,"rev-parse",ref),"worktree":str(wt)}
@@ -725,7 +761,8 @@ def _command_integrate_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("accepted project-changing task has no integration authority: require a fresh Reviewer PASS or explicit Human acceptance of the exact red Reviewer checkpoint")
     if run_cmd(["git","show-ref","--verify","--quiet",f"refs/heads/{reviewed_ref}"],wt,check=False).returncode!=0:
         raise ValueError(f"review checkpoint ref is missing: {reviewed_ref}")
-    if run_cmd(["git","diff","--quiet",f"{reviewed_ref}..{ws['task_branch']}","--","."],wt,check=False).returncode!=0 or git_text(wt,"status","--porcelain"):
+    fixture_prefixes=_workspace_fixture_prefixes(ws); durable_pathspec=_project_pathspec(fixture_prefixes=fixture_prefixes)
+    if run_cmd(["git","diff","--quiet",f"{reviewed_ref}..{ws['task_branch']}","--",*durable_pathspec],wt,check=False).returncode!=0 or git_text(wt,"status","--porcelain=v1","--untracked-files=all","--",*durable_pathspec):
         raise ValueError("task worktree changed after the passing Review; obtain a fresh Reviewer PASS before integration")
     baseline=str(ws["baseline_branch"]); diff_base=baseline; rebased=False
     ancestor=run_cmd(["git","merge-base","--is-ancestor",baseline,reviewed_ref],wt,check=False)
@@ -735,7 +772,7 @@ def _command_integrate_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         # snapshot; otherwise it may encode pre-existing owner-dirty state and
         # reclassifying it as task work would be unsafe.
         parent=run_cmd(["git","rev-parse",f"{baseline}^"],wt,check=False)
-        baseline_dirty = parent.returncode==0 and run_cmd(["git","diff","--quiet",f"{baseline}^..{baseline}","--","."],wt,check=False).returncode!=0
+        baseline_dirty = parent.returncode==0 and run_cmd(["git","diff","--quiet",f"{baseline}^..{baseline}","--",*durable_pathspec],wt,check=False).returncode!=0
         if baseline_dirty:
             raise ValueError("task was rebased after its baseline captured pre-existing primary changes; refusing to infer task delta because owner-dirty state could be re-integrated. Route a bounded Analyst integration recovery/rebase instead")
         primary_head=git_text(primary,"rev-parse","HEAD")
@@ -745,8 +782,8 @@ def _command_integrate_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         diff_base=merge.stdout.decode(errors="replace").strip(); rebased=True
     elif ancestor.returncode!=0:
         raise ValueError("cannot determine whether the reviewed checkpoint descends from the task baseline")
-    integration_paths,added_paths=_review_delta_paths(wt,diff_base,reviewed_ref)
-    patch=run_cmd(["git","diff","--binary",f"{diff_base}..{reviewed_ref}","--","."],wt).stdout
+    integration_paths,added_paths=_review_delta_paths(wt,diff_base,reviewed_ref,fixture_prefixes=fixture_prefixes)
+    patch=run_cmd(["git","diff","--binary",f"{diff_base}..{reviewed_ref}","--",*durable_pathspec],wt).stdout
     patch_path=dsd_task.task_root(run,phase,tid)/"accepted.patch"; patch_path.write_bytes(patch)
     already_applied=False
     if patch:
@@ -890,15 +927,22 @@ def _prepare_review_pass_for_integration(args: argparse.Namespace) -> dict[str, 
 def command_integrate(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve()
     _prepare_review_pass_for_integration(args)
-    # Integration alone takes the exclusive workspace lock. Concurrent task
-    # snapshots use shared locks and therefore remain parallel with each other.
+    # Integration and retirement share one exclusive workspace boundary. Once Git has
+    # proved the exact reviewed patch is materialized in primary, the task worktree is
+    # no longer unique authority and should disappear immediately.
     with dsd_task.file_lock(run/".workspace.lock"):
         result=_command_integrate_unlocked(args)
         if result.get("status")=="integrated":
-            # Invalidate before releasing the integration lock so no later Analyst view
-            # can miss newly established provenance even when the exact patch was already
-            # present and integration changed no bytes.
             _invalidate_analysis_view_unlocked(run)
+            class C: pass
+            c=C(); c.run_root=run; c.phase_id=args.phase_id; c.task_id=args.task_id; c.force=False; c.reason=None
+            try:
+                cleaned=_command_cleanup_unlocked(c)
+                result["runtime_cleaned"]=bool(cleaned.get("cleaned"))
+            except (OSError,ValueError) as exc:
+                # Integration is already durable. Cleanup failure must never roll back or
+                # obscure that semantic success; normal reconcile will retry the reaper.
+                result["runtime_cleanup_deferred"]=str(exc)[:800]
     if result.get("status")=="integrated": gc_analysis_views(run)
     return result
 
@@ -909,48 +953,113 @@ def live_attempt_exists(task: dict[str,Any]) -> bool:
     return dsd_task.task_has_unresolved_attempt(task)
 
 
-def command_cleanup(args: argparse.Namespace) -> dict[str, Any]:
+def _owned_cleanup_targets(run: Path, phase: str, tid: str, ws: dict[str, Any]) -> tuple[Path,Path,Path,str,str]:
+    """Validate every destructive target against exact run-owned derivation."""
+    info=dsd_task.load_run(run); primary=Path(str(info["project_root"])).resolve(); runtime=Path(str(info["runtime_root"])).resolve()
+    if Path(str(ws.get("primary_root") or "")).resolve()!=primary:
+        raise ValueError("workspace primary_root no longer matches this run; refusing automatic cleanup")
+    expected_db=(runtime/"opencode-db"/safe_component(phase)/f"{safe_component(tid)}.sqlite").resolve()
+    db=Path(str(ws.get("db") or "")).resolve()
+    if db!=expected_db:
+        raise ValueError(f"workspace DB is outside its exact run-owned location; refusing cleanup: {db}")
+    ns="/".join(["dsd",safe_component(info["run_id"]),safe_component(phase),safe_component(tid)])
+    task_branch=ns; baseline_branch=ns+"-base"
+    mode=str(ws.get("mode") or "isolated-worktree")
+    wt=Path(str(ws.get("worktree") or "")).resolve()
+    if mode=="isolated-worktree":
+        expected_wt=(runtime/"worktrees"/safe_component(phase)/safe_component(tid)).resolve()
+        if wt!=expected_wt:
+            raise ValueError(f"workspace path is outside its exact run-owned location; refusing cleanup: {wt}")
+        if str(ws.get("task_branch") or "")!=task_branch or str(ws.get("baseline_branch") or "")!=baseline_branch:
+            raise ValueError("workspace branch identity does not match this run/task; refusing cleanup")
+    elif mode=="analysis-view":
+        try: wt.relative_to((runtime/"analysis-views").resolve())
+        except ValueError as exc: raise ValueError(f"analysis view escapes this run runtime; refusing cleanup: {wt}") from exc
+    return primary,wt,db,task_branch,baseline_branch
+
+
+def _command_cleanup_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
-    task=dsd_task.load_task(run,phase,tid); ws=load_workspace(run,phase,tid)
-    if live_attempt_exists(task): raise ValueError("task still has a live worker/monitor; refusing cleanup")
-    if task.get("status")=="superseded" and ws.get("mode","isolated-worktree")=="isolated-worktree":
-        # Carry-forward retention is an invariant, not a normal completion-state guard.
-        # --force may abandon ordinary unfinished work, but it must never destroy the
-        # only mutable predecessor delta while a recorded successor can still need it.
+    task=dsd_task.load_task(run,phase,tid)
+    ws_path=workspace_path(run,phase,tid)
+    if not ws_path.is_file() and task.get("workspace_cleaned_at"):
+        return {"task_id":tid,"cleaned":False,"already_cleaned":True,"reason":task.get("workspace_cleanup_reason")}
+    ws=load_workspace(run,phase,tid)
+    if live_attempt_exists(task): raise ValueError("task still has a live/unresolved worker attempt; refusing cleanup")
+    mode=str(ws.get("mode") or "isolated-worktree"); status=str(task.get("status") or "")
+    if mode=="analysis-view" and ws.get("released") and task.get("workspace_cleaned_at"):
+        return {"task_id":tid,"cleaned":False,"already_cleaned":True,"reason":task.get("workspace_cleanup_reason")}
+    force=bool(getattr(args,"force",False)); explicit_reason=str(getattr(args,"reason",None) or "").strip()
+
+    retention=None
+    if status=="superseded" and mode=="isolated-worktree":
         retention=dsd_task.superseded_workspace_retention(run,phase,task)
         if retention.get("retain"):
             raise ValueError(
-                "superseded workspace is still a carry-forward source; refusing cleanup until a recorded successor integrates "
-                "or explicitly captures carry_from. Do not destroy predecessor work before succession is durable. "
-                f"successors={retention.get('successors')} captured_by={retention.get('carry_captured_by')}"
+                "superseded workspace still contains an unintegrated delta with no durable disposition; refusing cleanup. "
+                f"reason={retention.get('reason')} changed_paths={retention.get('changed_paths',[])[:8]}"
             )
-    if task.get("requires_integration") and task.get("status") not in {"integrated","superseded"} and not args.force:
+    if force and not explicit_reason:
+        raise ValueError("--force cleanup requires --reason so discarded workspace authority is auditable")
+    if task.get("requires_integration") and status not in {"integrated","superseded"} and not force:
         raise ValueError("project-changing task is not integrated; refusing to delete the worktree needed for integration")
-    if task.get("status") not in {"integrated","accepted","superseded"} and not args.force:
-        raise ValueError(f"task status {task.get('status')!r} is not complete; use --force only for explicit abandonment/recovery")
-    primary=Path(ws["primary_root"]); wt=Path(ws["worktree"]); db=Path(ws["db"])
-    mode=str(ws.get("mode") or "isolated-worktree")
+    if status not in {"integrated","accepted","superseded"} and not force:
+        raise ValueError(f"task status {status!r} is not complete; use --force --reason only for explicit abandonment/recovery")
+
+    if force:
+        cleanup_reason=f"explicit-discard:{explicit_reason}"
+    elif status=="integrated":
+        cleanup_reason="reviewed-delta-integrated"
+    elif status=="accepted":
+        cleanup_reason="durable-nonintegrating-result"
+    elif retention is not None:
+        cleanup_reason=str(retention.get("reason") or "superseded-safe")
+    else:
+        cleanup_reason="superseded-no-runtime-authority"
+
+    primary,wt,db,task_branch,baseline_branch=_owned_cleanup_targets(run,phase,tid,ws)
     if mode=="isolated-worktree":
         run_cmd(["git","worktree","remove","--force",str(wt)],primary,check=False)
+        if wt.exists():
+            raise ValueError(f"Git worktree removal did not reclaim {wt}; refusing to delete branch authority underneath it")
         all_refs=git_text(primary,"for-each-ref","--format=%(refname:short)","refs/heads").splitlines()
         checkpoint_prefix="/".join(["dsd-checkpoint", safe_component(dsd_task.load_run(run)["run_id"]), safe_component(phase), safe_component(tid)])+"/"
         for ref in all_refs:
             if ref==ws["task_branch"] or ref.startswith(checkpoint_prefix):
                 run_cmd(["git","branch","-D",ref],primary,check=False)
-        run_cmd(["git","branch","-D",ws["baseline_branch"]],primary,check=False)
+        run_cmd(["git","branch","-D",task_branch],primary,check=False)
+        run_cmd(["git","branch","-D",baseline_branch],primary,check=False)
         workspace_path(run,phase,tid).unlink(missing_ok=True)
-        task_path=dsd_task.task_file(run,phase,tid)
-        with dsd_task.file_lock(task_path.with_suffix(".lock")):
-            current=dsd_task.load_json(task_path); current.pop("workspace",None); current["workspace_cleaned_at"]=now(); current["updated_at"]=now(); dsd_task.write_json(task_path,current)
     elif mode=="analysis-view":
-        ws["released"]=True; ws["released_at"]=now(); dsd_task.write_json(workspace_path(run,phase,tid),ws)
+        ws["released"]=True; ws["released_at"]=now(); ws["release_reason"]=cleanup_reason; dsd_task.write_json(workspace_path(run,phase,tid),ws)
     else:
         raise ValueError(f"unsupported workspace mode: {mode!r}")
-    for p in (db,Path(str(db)+"-wal"),Path(str(db)+"-shm")):
-        try: p.unlink()
-        except FileNotFoundError: pass
-    return {"task_id":tid,"cleaned":True,"mode":mode}
 
+    # Fixture snapshots and worker CLI DBs are launcher-owned derived state. Once the
+    # workspace disposition is durable they are not project authority and must not
+    # accumulate for hours/days.
+    fixture_root=Path(str(ws.get("fixture_snapshot_root") or "")) if ws.get("fixture_snapshot_root") else None
+    if fixture_root is not None:
+        try: fixture_root.resolve().relative_to(dsd_task.task_root(run,phase,tid).resolve())
+        except ValueError: raise ValueError(f"refusing to delete fixture snapshot outside task root: {fixture_root}")
+        if fixture_root.exists(): shutil.rmtree(fixture_root)
+    for candidate in (db,Path(str(db)+"-wal"),Path(str(db)+"-shm")):
+        candidate.unlink(missing_ok=True)
+
+    task_path=dsd_task.task_file(run,phase,tid)
+    with dsd_task.file_lock(task_path.with_suffix(".lock")):
+        current=dsd_task.load_json(task_path); current.pop("workspace",None)
+        current["workspace_cleaned_at"]=now(); current["workspace_cleanup_reason"]=cleanup_reason; current["updated_at"]=now()
+        if force:
+            current["workspace_disposition"]={"mode":"discarded","reason":explicit_reason,"recorded_at":current["workspace_cleaned_at"]}
+        dsd_task.write_json(task_path,current)
+    return {"task_id":tid,"cleaned":True,"mode":mode,"reason":cleanup_reason}
+
+
+def command_cleanup(args: argparse.Namespace) -> dict[str, Any]:
+    run=args.run_root.resolve()
+    with dsd_task.file_lock(run/".workspace.lock"):
+        return _command_cleanup_unlocked(args)
 
 
 
@@ -984,41 +1093,73 @@ def _reclaim_failed_setup_without_workspace(run: Path, phase: str, task: dict[st
         path.unlink(missing_ok=True)
     return removed
 
+def _gc_orphan_task_databases(run: Path) -> list[str]:
+    """Delete run-owned worker DBs that no live workspace still references."""
+    info=dsd_task.load_run(run); runtime=Path(info["runtime_root"]).resolve(); db_root=runtime/"opencode-db"
+    if not db_root.is_dir(): return []
+    referenced=set(); phases=run/"phases"
+    for ws_path in phases.glob("*/tasks/*/workspace.json") if phases.is_dir() else []:
+        try: ws=dsd_task.load_json(ws_path)
+        except Exception: continue
+        if ws.get("released"): continue
+        raw=ws.get("db")
+        if isinstance(raw,str) and raw: referenced.add(str(Path(raw).resolve()))
+    removed=[]
+    bases=set(db_root.rglob("*.sqlite"))
+    for sidecar in [*db_root.rglob("*.sqlite-wal"),*db_root.rglob("*.sqlite-shm")]:
+        name=sidecar.name[:-4]
+        bases.add(sidecar.with_name(name))
+    for base in sorted(bases):
+        if str(base.resolve()) in referenced: continue
+        for candidate in (base,Path(str(base)+"-wal"),Path(str(base)+"-shm")):
+            if candidate.exists(): candidate.unlink(missing_ok=True); removed.append(str(candidate))
+    return removed
+
+
+def _prune_empty_runtime_dirs(root: Path) -> None:
+    if not root.is_dir(): return
+    for path in sorted((p for p in root.rglob("*") if p.is_dir()),key=lambda p:len(p.parts),reverse=True):
+        try: path.rmdir()
+        except OSError: pass
+
+
+def reap_safe_runtime(run: Path, *, phase_id: str | None = None, drop_current_analysis: bool = False) -> dict[str, Any]:
+    """Reclaim every mechanically disposable run resource without parent bookkeeping."""
+    run=run.resolve(); info=dsd_task.load_run(run); primary=Path(info["project_root"]).resolve(); runtime=Path(info["runtime_root"]).resolve()
+    phases_root=run/"phases"
+    phases=[dsd_task.slug(phase_id)] if phase_id else sorted(p.name for p in phases_root.iterdir() if p.is_dir()) if phases_root.is_dir() else []
+    cleaned=[]; skipped=[]; orphan_setup=[]
+    for phase in phases:
+        tasks_dir=dsd_task.phase_root(run,phase)/"tasks"
+        for state_path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
+            task=dsd_task.load_json(state_path); tid=str(task.get("task_id") or state_path.parent.name)
+            ws_path=workspace_path(run,phase,tid)
+            if not ws_path.is_file():
+                removed=_reclaim_failed_setup_without_workspace(run,phase,task,primary,runtime)
+                orphan_setup.extend({"task_id":tid,"branch":ref} for ref in removed)
+                continue
+            if live_attempt_exists(task):
+                skipped.append({"phase_id":phase,"task_id":tid,"reason":"live-attempt"}); continue
+            status=str(task.get("status") or "")
+            complete=status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration"))
+            if not complete:
+                skipped.append({"phase_id":phase,"task_id":tid,"reason":f"status:{status}"}); continue
+            class A: pass
+            a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.force=False; a.reason=None
+            try:
+                command_cleanup(a); cleaned.append({"phase_id":phase,"task_id":tid})
+            except (OSError,ValueError) as exc:
+                skipped.append({"phase_id":phase,"task_id":tid,"reason":str(exc)[:500]})
+    removed_dbs=_gc_orphan_task_databases(run)
+    removed_views=gc_analysis_views(run,drop_current_if_unused=drop_current_analysis)
+    _prune_empty_runtime_dirs(runtime/"worktrees"); _prune_empty_runtime_dirs(runtime/"opencode-db")
+    return {"cleaned":cleaned,"skipped":skipped,"orphan_setup_branches_removed":orphan_setup,"orphan_databases_removed":removed_dbs,"analysis_views_removed":removed_views}
+
+
 def command_cleanup_phase(args: argparse.Namespace) -> dict[str, Any]:
-    run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); info=dsd_task.load_run(run)
-    tasks_dir=dsd_task.phase_root(run,phase)/"tasks"
-    primary=Path(info["project_root"]).resolve(); runtime=Path(info["runtime_root"]).resolve()
-    cleaned=[]; skipped=[]; orphan_setup_branches=[]
-    for state_path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
-        task=dsd_task.load_json(state_path); tid=str(task.get("task_id") or state_path.parent.name)
-        if not workspace_path(run,phase,tid).is_file():
-            removed=_reclaim_failed_setup_without_workspace(run,phase,task,primary,runtime)
-            if removed: orphan_setup_branches.extend({"task_id":tid,"branch":ref} for ref in removed)
-            else: skipped.append({"task_id":tid,"reason":"no-workspace"})
-            continue
-        if live_attempt_exists(task):
-            skipped.append({"task_id":tid,"reason":"live-attempt"}); continue
-        status=str(task.get("status") or "")
-        if status=="superseded":
-            retention=dsd_task.superseded_workspace_retention(run,phase,task)
-            if retention.get("retain"):
-                skipped.append({"task_id":tid,"reason":"superseded-carry-forward-not-durable","successors":retention.get("successors")}); continue
-        complete = status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration"))
-        if not complete:
-            skipped.append({"task_id":tid,"reason":f"status:{status}"}); continue
-        class A: pass
-        a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.force=False
-        command_cleanup(a); cleaned.append(tid)
-    db_dir=Path(info["runtime_root"])/"opencode-db"/safe_component(phase)
-    orphan_sidecars=[]
-    if db_dir.is_dir():
-        for sidecar in sorted([*db_dir.glob("*.sqlite-wal"), *db_dir.glob("*.sqlite-shm")]):
-            name=sidecar.name
-            parent_name=name[:-4] if name.endswith("-wal") else name[:-4] if name.endswith("-shm") else ""
-            if parent_name and not (sidecar.parent/parent_name).exists():
-                sidecar.unlink(missing_ok=True); orphan_sidecars.append(str(sidecar))
-    removed_views=gc_analysis_views(run,drop_current_if_unused=True)
-    return {"phase_id":phase,"cleaned":cleaned,"skipped":skipped,"orphan_setup_branches_removed":orphan_setup_branches,"orphan_sidecars_removed":orphan_sidecars,"analysis_views_removed":removed_views}
+    run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id)
+    result=reap_safe_runtime(run,phase_id=phase,drop_current_analysis=True)
+    return {"phase_id":phase,**result,"cleaned":[str(x.get("task_id")) for x in result.get("cleaned",[]) if x.get("task_id")]}
 
 
 def _purge_run_blockers(run: Path) -> list[dict[str, str]]:
@@ -1101,7 +1242,9 @@ def parser() -> argparse.ArgumentParser:
         p=sub.add_parser(name); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
         if name=="checkpoint": p.add_argument("--label",required=True)
         if name=="integrate": p.add_argument("--review-pass-report",type=Path,help="explicitly record this gated Reviewer report as PASS, accept, then integrate in one control call")
-        if name=="cleanup": p.add_argument("--force",action="store_true",help="override ordinary completion-state cleanup guards; never bypasses live-attempt or superseded carry-forward retention")
+        if name=="cleanup":
+            p.add_argument("--force",action="store_true",help="explicitly discard otherwise-protected non-live workspace state; never bypasses unresolved-attempt or superseded delta retention")
+            p.add_argument("--reason",help="required with --force; durable reason for discarding workspace authority")
     p=sub.add_parser("cleanup-phase"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True)
     p=sub.add_parser("purge-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--dry-run",action="store_true")
     p=sub.add_parser("gc-analysis-views"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--drop-current-if-unused",action="store_true")

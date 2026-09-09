@@ -89,11 +89,11 @@ The retained workspace is the durable implementation state. A missing process/re
 
 ## Cleanup
 
-Task DBs live outside project/run trees. Completed read-only tasks release DB/view bindings; reusable review conduits reacquire a current view per fresh attempt.
+Cleanup is automatic. Read-only results release DB/view bindings; integration retires its worktree, fixture snapshot, branches and CLI DB. `reconcile-run` reaps safe leftovers/orphan DBs; `completed` purges only owned runtime. Durable `PROJECT/TBag` state remains.
 
-Mutating worktrees remain until integrated/retired. **A superseded mutable workspace stays until every recorded successor integrates or one durably captures it with `carry_from`; cleanup refuses earlier destruction even with `--force`.** Isolated cleanup also retires its workspace binding. `cleanup-phase` handles phase hygiene; `gc-analysis-views --drop-current-if-unused` reclaims unused shared views.
+Supersession is **delta-aware**: release read-only/empty rooms, frozen `carry_from`, explicit `rederive_from_primary`, or a delta already present in primary; retain any unique undisposed delta. `--force` needs a reason and cannot bypass live/unresolved or undisposed-delta protection. Launcher fixtures are inputs: exclude them from evidence/integration, forbid write overlap, and delete snapshots on retirement.
 
-`~/.cache/t-bag` is a shared multi-project store; one run owns only its `run.json.runtime_root`. Never delete/move the shared root, `projects/`, or siblings. Reclaim a completed run with `purge-run --dry-run` then `purge-run`; durable `PROJECT/TBag` authority remains.
+`~/.cache/t-bag` is shared; one run owns only `run.json.runtime_root`. Never raw-delete shared state. `cleanup-phase`/`purge-run --dry-run` are diagnostics, not routine parent chores.
 
 `authority/decisions/` is tool-owned by `resolve-escalation`; keep parent notes elsewhere. Numbering skips collisions defensively.
 

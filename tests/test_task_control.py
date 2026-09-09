@@ -81,6 +81,13 @@ class TaskControlTests(unittest.TestCase):
                 {"task_id":"NEW-B","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[],"supersedes":["OLD-SPLIT"],"carry_from":"OLD-SPLIT"},
             ])
 
+    def test_explicit_disposition_header_recovers_verification_report_without_prose_inference(self):
+        report=self.run/"compat-verification.md"; report.write_text("## Result\nDisposition: PASS\nEvidence follows.\n")
+        self.assertEqual(dsd_task.declared_report_outcome(report,"verification",required=True),"pass")
+        report.write_text("## Result\nDisposition: PASS\nDisposition: BLOCKED\n")
+        with self.assertRaisesRegex(ValueError,"conflicting explicit Disposition"):
+            dsd_task.declared_report_outcome(report,"verification",required=True)
+
     def test_replacement_plan_cannot_both_carry_and_rederive_same_predecessor(self):
         self.write_plan([{"task_id":"OLD-DISPOSITION","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         self.plan_n += 1

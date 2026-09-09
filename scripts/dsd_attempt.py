@@ -460,7 +460,10 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     event=dsd_task.task_root(run,phase,tid)/"attempts"/label; event.mkdir(parents=True,exist_ok=False)
     baseline=event/"scope-baseline.json"; prompt=event/"launch-prompt.txt"; report=event/"report.md"; log=event/"worker.log"
     scripts=Path(__file__).resolve().parent
-    run_checked([sys.executable,str(scripts/"scope_snapshot.py"),"capture","--root",str(wt),"--baseline-ref",checkpoint,"--output",str(baseline)])
+    scope_cmd=[sys.executable,str(scripts/"scope_snapshot.py"),"capture","--root",str(wt),"--baseline-ref",checkpoint,"--output",str(baseline)]
+    for rel in ws.get("fixture_mirrors",[]) if isinstance(ws.get("fixture_mirrors"),list) else []:
+        scope_cmd += ["--exclude-prefix",str(rel)]
+    run_checked(scope_cmd)
     brief=Path(str(task["brief"])).resolve(); input_groups=task_input_groups(run,phase,task,role,args.input or [])
     if role=="phase-auditor":
         dossier=event/"phase-gate-dossier.md"

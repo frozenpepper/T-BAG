@@ -204,6 +204,70 @@ def declared_worker_skill_tags(text: str) -> list[str]:
         out.extend(_safe_skill_ids(text, heading))
     return list(dict.fromkeys(out))
 
+
+def generated_output_mappings(text: str) -> list[dict[str, str]]:
+    """Return exact source-prefix => generated-prefix derivations.
+
+    This is a mechanical relationship, not permission to hand-edit arbitrary outputs.
+    Evidence gating admits a generated path only when its declared source prefix also
+    changed inside the task's existing write authority.
+    """
+    heading="Generated output derivations"
+    section=markdown_section(text,heading)
+    if not section or section.strip().upper()=="NONE": return []
+
+    def one(raw: str) -> str:
+        value=raw.strip()
+        if value.startswith("`") or value.endswith("`"):
+            if len(value)<2 or not (value.startswith("`") and value.endswith("`")) or "`" in value[1:-1]:
+                raise ValueError(f"{heading} paths must be bare or whole backtick-wrapped: {raw}")
+            value=value[1:-1]
+        elif "`" in value or any(ch.isspace() for ch in value):
+            raise ValueError(f"{heading} paths must be bare or whole backtick-wrapped: {raw}")
+        value=value.replace("\\","/").rstrip("/")
+        if value.endswith("/**"): value=value[:-3].rstrip("/")
+        if not value or any(token in value for token in ("*","?","[")):
+            raise ValueError(f"unsafe {heading} path: {value}")
+        path=PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts or value in {".","./"}:
+            raise ValueError(f"unsafe {heading} path: {value}")
+        normalized=path.as_posix()
+        if normalized in {"TBag","AnalystAndGrunt"} or normalized.startswith("TBag/") or normalized.startswith("AnalystAndGrunt/"):
+            raise ValueError(f"{heading} cannot target T-BAG control trees: {normalized}")
+        return normalized
+
+    out=[]
+    for line in section.splitlines():
+        stripped=line.strip()
+        if not stripped: continue
+        if not stripped.startswith("-") or "=>" not in stripped:
+            raise ValueError(f"{heading} must contain only '- source => generated' bullets or NONE; offending line: {stripped[:120]}")
+        body=stripped[1:].strip(); left,right=body.split("=>",1)
+        source=one(left); generated=one(right)
+        if source==generated:
+            raise ValueError(f"{heading} source and generated prefixes must differ: {source}")
+        out.append({"source":source,"generated":generated})
+    return list({(x["source"],x["generated"]):(x) for x in out}.values())
+
+
+def validate_path_relationships(text: str) -> None:
+    """Reject control-path relationships that would hide worker-authored state.
+
+    Required worktree fixtures are launcher-owned inputs and are therefore excluded
+    from scope/integration evidence. They must never overlap a declared writable
+    prefix, otherwise a real worker edit could be hidden behind fixture semantics.
+    """
+    allowed=allowed_source_changes(text) if has_explicit_write_restriction(text) else []
+    fixtures=required_worktree_fixtures(text)
+    for fixture in fixtures:
+        for writable in allowed:
+            if fixture==writable or fixture.startswith(writable+"/") or writable.startswith(fixture+"/"):
+                raise ValueError(
+                    f"Required worktree fixture {fixture!r} overlaps Allowed source changes {writable!r}; "
+                    "launcher-owned fixture inputs cannot also be worker write authority"
+                )
+
+
 def role_writes_project(role: str, text: str) -> bool:
     """Whether this exact role+contract may mutate accepted project state."""
     role = role.lower().replace("_", "-")

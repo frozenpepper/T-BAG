@@ -131,7 +131,8 @@ raise SystemExit(0)
             implement_event, _implement_gate = launch("implementer", "grunt")
             task = json.loads((run_root / "phases" / "P" / "tasks" / "T1" / "task.json").read_text())
             self.assertEqual(task["status"], "awaiting-review")
-            worktree = Path(json.loads((run_root / "phases" / "P" / "tasks" / "T1" / "workspace.json").read_text())["worktree"])
+            workspace_before = json.loads((run_root / "phases" / "P" / "tasks" / "T1" / "workspace.json").read_text())
+            worktree = Path(workspace_before["worktree"]); db = Path(workspace_before["db"])
             self.assertEqual((worktree / "a.txt").read_text(), "after\n")
             self.assertEqual((project / "a.txt").read_text(), "before\n")
 
@@ -147,15 +148,12 @@ raise SystemExit(0)
             final_task = json.loads((run_root / "phases" / "P" / "tasks" / "T1" / "task.json").read_text())
             self.assertEqual(final_task["status"], "integrated")
             self.assertTrue((implement_event / "report.md").is_file())
-            workspace = json.loads((run_root / "phases" / "P" / "tasks" / "T1" / "workspace.json").read_text())
-            run([
-                sys.executable, str(SCRIPTS / "dsd_workspace.py"), "cleanup",
-                "--run-root", str(run_root.resolve()), "--phase-id", "P", "--task-id", "T1",
-            ])
-            self.assertFalse(Path(workspace["worktree"]).exists())
-            self.assertFalse(Path(workspace["db"]).exists())
-            self.assertFalse(Path(workspace["db"] + "-wal").exists())
-            self.assertFalse(Path(workspace["db"] + "-shm").exists())
+            self.assertFalse((run_root / "phases" / "P" / "tasks" / "T1" / "workspace.json").exists())
+            self.assertEqual(final_task.get("workspace_cleanup_reason"),"reviewed-delta-integrated")
+            self.assertFalse(worktree.exists())
+            self.assertFalse(db.exists())
+            self.assertFalse(Path(str(db) + "-wal").exists())
+            self.assertFalse(Path(str(db) + "-shm").exists())
 
 
 if __name__ == "__main__":

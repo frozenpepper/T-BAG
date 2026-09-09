@@ -411,7 +411,7 @@ class WorkspaceTests(unittest.TestCase):
         sup=A(); sup.run_root=self.run; sup.phase_id="P"; sup.task_id="OLD-RETAIN"; sup.by="NEW-RETAIN"
         dsd_task.command_supersede(sup)
         clean=A(); clean.run_root=self.run; clean.phase_id="P"; clean.task_id="OLD-RETAIN"; clean.force=False
-        with self.assertRaisesRegex(ValueError,"still a carry-forward source"):
+        with self.assertRaisesRegex(ValueError,"unintegrated delta with no durable disposition"):
             dsd_workspace.command_cleanup(clean)
         self.assertTrue(wt.exists())
         out=self.register_replacement("NEW-RETAIN","OLD-RETAIN")
@@ -427,13 +427,13 @@ class WorkspaceTests(unittest.TestCase):
         dsd_task.command_supersede(sup)
         for forced in (False, True):
             clean=A(); clean.run_root=self.run; clean.phase_id="P"; clean.task_id="OLD-REGISTERED-RETAIN"; clean.force=forced
-            with self.assertRaisesRegex(ValueError,"still a carry-forward source"):
+            with self.assertRaisesRegex(ValueError,"unintegrated delta with no durable disposition"):
                 dsd_workspace.command_cleanup(clean)
             self.assertTrue(wt.exists())
         phase=A(); phase.run_root=self.run; phase.phase_id="P"
         out=dsd_workspace.command_cleanup_phase(phase)
         skipped={row["task_id"]:row["reason"] for row in out["skipped"]}
-        self.assertEqual(skipped["OLD-REGISTERED-RETAIN"],"superseded-carry-forward-not-durable")
+        self.assertIn("unintegrated delta with no durable disposition",skipped["OLD-REGISTERED-RETAIN"])
         self.assertTrue(wt.exists())
 
     def test_force_cannot_destroy_superseded_workspace_before_carry_is_durable(self):
@@ -442,7 +442,7 @@ class WorkspaceTests(unittest.TestCase):
         sup=A(); sup.run_root=self.run; sup.phase_id="P"; sup.task_id="OLD-FORCE-RETAIN"; sup.by="NEW-FORCE-RETAIN"
         dsd_task.command_supersede(sup)
         clean=A(); clean.run_root=self.run; clean.phase_id="P"; clean.task_id="OLD-FORCE-RETAIN"; clean.force=True
-        with self.assertRaisesRegex(ValueError,"still a carry-forward source"):
+        with self.assertRaisesRegex(ValueError,"unintegrated delta with no durable disposition"):
             dsd_workspace.command_cleanup(clean)
         self.assertTrue(wt.exists())
 
@@ -462,12 +462,17 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(dsd_task.load_task(self.run,"P","OLD-OMITTED-CARRY")["status"],"planned")
         self.assertTrue(wt.exists())
 
-    def test_replacement_plan_may_explicitly_rederive_instead_of_carrying_delta(self):
+    def test_replacement_plan_may_explicitly_rederive_and_release_predecessor_delta_immediately(self):
         self.register("OLD-REDERIVE"); old=self.ws("OLD-REDERIVE"); wt=Path(old["worktree"]); (wt/"a.txt").write_text("intentionally discarded delta\n")
         out=self.register_replacement("NEW-REDERIVE","OLD-REDERIVE",carry=False,rederive=True)
         self.assertEqual(out.get("carry_forward"),{})
         self.assertEqual(dsd_task.load_task(self.run,"P","OLD-REDERIVE")["status"],"superseded")
         self.assertTrue(wt.exists())
+        class A: pass
+        clean=A(); clean.run_root=self.run; clean.phase_id="P"; clean.task_id="OLD-REDERIVE"; clean.force=False; clean.reason=None
+        result=dsd_workspace.command_cleanup(clean)
+        self.assertEqual(result["reason"],"analyst-explicit-rederive")
+        self.assertFalse(wt.exists())
 
     def test_carry_forward_respects_replacement_write_boundary(self):
         self.register("OLD-SCOPE"); wt=Path(self.ws("OLD-SCOPE")["worktree"]); (wt/"a.txt").write_text("outside scope\n")
@@ -655,7 +660,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_forced_cleanup_retires_workspace_binding_and_allows_clean_recreate(self):
         self.register("FORCE-RECREATE"); first=self.ws("FORCE-RECREATE"); old_wt=Path(first["worktree"]); self.assertTrue(old_wt.is_dir())
         class A: pass
-        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="FORCE-RECREATE"; a.force=True
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="FORCE-RECREATE"; a.force=True; a.reason="explicit test abandonment"
         dsd_workspace.command_cleanup(a)
         self.assertFalse(dsd_workspace.workspace_path(self.run,"P","FORCE-RECREATE").exists()); self.assertNotIn("workspace",dsd_task.load_task(self.run,"P","FORCE-RECREATE"))
         second=self.ws("FORCE-RECREATE"); self.assertTrue(Path(second["worktree"]).is_dir()); self.assertNotEqual(second["created_at"],first["created_at"])
@@ -684,8 +689,20 @@ class WorkspaceTests(unittest.TestCase):
         Path(self.run/"phases/P/tasks/T1/workspace.json").exists()
         class A:pass
         a=A();a.run_root=self.run;a.phase_id="P";a.task_id="T1";a.force=False;dsd_workspace.command_cleanup(a)
-        refs=git(self.project,"for-each-ref","--format=%(refname:short)","refs/heads")
+        refs=git(self.project,"for-each-ref","--format=%(refname:short)","refs/heads").splitlines()
         self.assertIn(ws10["task_branch"],refs)
+        self.assertNotIn("dsd/r1/P/T1",refs); self.assertNotIn("dsd/r1/P/T1-base",refs)
+
+    def test_automatic_cleanup_refuses_corrupted_out_of_run_targets(self):
+        self.register("OWNED",kind="analysis"); self.ws("OWNED")
+        state=dsd_task.load_task(self.run,"P","OWNED"); state["status"]="accepted"; dsd_task.write_json(dsd_task.task_file(self.run,"P","OWNED"),state)
+        ws_path=dsd_workspace.workspace_path(self.run,"P","OWNED"); ws=dsd_task.load_json(ws_path); victim=self.root/"victim.sqlite"; victim.write_text("keep")
+        ws["db"]=str(victim); dsd_task.write_json(ws_path,ws)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="OWNED"; a.force=False; a.reason=None
+        with self.assertRaisesRegex(ValueError,"outside its exact run-owned location"):
+            dsd_workspace.command_cleanup(a)
+        self.assertEqual(victim.read_text(),"keep")
 
     def test_cleanup_removes_task_db_and_sqlite_sidecars(self):
         self.register("T4", kind="analysis")
@@ -707,6 +724,51 @@ class WorkspaceTests(unittest.TestCase):
         self.register("T5", kind="analysis"); ws5=self.ws("T5"); db5=Path(ws5["db"])
         self.assertNotEqual(db4,db5)
         self.assertFalse(db5.exists())
+
+    def test_integrated_task_automatically_retires_worktree_fixture_snapshot_and_db(self):
+        (self.project/".gitignore").write_text("fixtures/\n"); git(self.project,"add",".gitignore"); git(self.project,"commit","-qm","ignore fixture")
+        fixture=self.project/"fixtures"/"deps"; fixture.mkdir(parents=True); (fixture/"cache.bin").write_text("input\n")
+        self.register("AUTO-CLEAN",text="# AUTO\n\n## Required worktree fixtures\n- `fixtures/deps`\n")
+        ws=self.ws("AUTO-CLEAN"); wt=Path(ws["worktree"]); db=Path(ws["db"]); snapshot=Path(ws["fixture_snapshot_root"]); db.write_text("db")
+        Path(str(db)+"-wal").write_text("wal"); Path(str(db)+"-shm").write_text("shm")
+        (wt/"a.txt").write_text("integrated\n"); self.accept("AUTO-CLEAN")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="AUTO-CLEAN"
+        out=dsd_workspace.command_integrate(a)
+        self.assertTrue(out.get("runtime_cleaned"),out); self.assertFalse(wt.exists()); self.assertFalse(snapshot.exists())
+        self.assertFalse(db.exists()); self.assertFalse(Path(str(db)+"-wal").exists()); self.assertFalse(Path(str(db)+"-shm").exists())
+        state=dsd_task.load_task(self.run,"P","AUTO-CLEAN"); self.assertEqual(state["workspace_cleanup_reason"],"reviewed-delta-integrated"); self.assertNotIn("workspace",state)
+
+    def test_superseded_readonly_fixture_room_releases_without_successor_integration(self):
+        (self.project/".gitignore").write_text("fixtures/\n"); git(self.project,"add",".gitignore"); git(self.project,"commit","-qm","ignore fixture")
+        fixture=self.project/"fixtures"/"analysis.bin"; fixture.parent.mkdir(); fixture.write_text("input\n")
+        self.register("READ-OLD",kind="analysis",text="# A\n\n## Required worktree fixtures\n- `fixtures/analysis.bin`\n")
+        ws=dsd_workspace.prepare_launch_workspace(self.run,"P","READ-OLD","discovery"); wt=Path(ws["worktree"]); self.assertEqual(ws["mode"],"isolated-worktree")
+        class A: pass
+        sup=A(); sup.run_root=self.run; sup.phase_id="P"; sup.task_id="READ-OLD"; sup.by="READ-NEW"; dsd_task.command_supersede(sup)
+        clean=A(); clean.run_root=self.run; clean.phase_id="P"; clean.task_id="READ-OLD"; clean.force=False; clean.reason=None
+        out=dsd_workspace.command_cleanup(clean)
+        self.assertEqual(out["reason"],"non-mutating-result-is-durable"); self.assertFalse(wt.exists())
+
+    def test_launcher_fixture_changes_are_excluded_from_scope_and_checkpoint(self):
+        (self.project/".gitignore").write_text("node_modules/\n"); git(self.project,"add",".gitignore"); git(self.project,"commit","-qm","ignore deps")
+        fixture=self.project/"node_modules"/"pkg"; fixture.mkdir(parents=True); (fixture/"index.js").write_text("input\n")
+        self.register("FIXTURE-SCOPE",text="# T\n\n## Required worktree fixtures\n- `node_modules`\n")
+        ws=self.ws("FIXTURE-SCOPE"); wt=Path(ws["worktree"]);
+        class A: pass
+        c=A(); c.run_root=self.run; c.phase_id="P"; c.task_id="FIXTURE-SCOPE"; c.label="impl"; ref=dsd_workspace.command_checkpoint(c)["checkpoint_ref"]
+        baseline=scope_snapshot.capture(wt,ref,["node_modules"]); (wt/"node_modules/pkg/index.js").write_text("worker-cache-change\n")
+        comp=scope_snapshot.compare(wt,baseline); self.assertEqual(comp["changed_since_attempt_baseline"],[])
+        c.label="review"; reviewed=dsd_workspace.command_checkpoint(c)["checkpoint_ref"]
+        self.assertEqual(git(wt,"diff","--name-only",f"{ref}..{reviewed}"),"")
+
+    def test_clean_room_refresh_detects_second_edit_to_already_dirty_primary_path(self):
+        (self.project/"a.txt").write_text("owner-dirty-v1\n")
+        self.register("DIRTY-REFRESH"); ws=self.ws("DIRTY-REFRESH"); wt=Path(ws["worktree"]); self.assertEqual((wt/"a.txt").read_text(),"owner-dirty-v1\n")
+        # Same porcelain status (' M a.txt'), different bytes. Old HEAD+status markers missed this.
+        (self.project/"a.txt").write_text("owner-dirty-v2\n")
+        out=dsd_workspace.refresh_clean_task_workspace(self.run,"P","DIRTY-REFRESH")
+        self.assertTrue(out["refreshed"],out); self.assertEqual((wt/"a.txt").read_text(),"owner-dirty-v2\n")
 
     def test_cleanup_phase_cli_does_not_require_task_id(self):
         cp=subprocess.run([sys.executable,str(SCRIPTS/"dsd_workspace.py"),"cleanup-phase","--run-root",str(self.run),"--phase-id","P"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
@@ -755,16 +817,13 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(preview["safe_to_purge"]); self.assertTrue(runtime.exists())
         self.assertTrue(any(x["reason"]=="run-not-completed:active" for x in preview["blockers"]))
 
-    def test_purge_run_is_scoped_to_completed_run_runtime_and_has_dry_run(self):
+    def test_completed_run_automatically_purges_only_its_owned_runtime(self):
         info=dsd_task.load_run(self.run); runtime=Path(info["runtime_root"]); sibling=self.root/"other-project-cache"; sibling.mkdir(); (sibling/"keep.txt").write_text("keep\n")
         (runtime/"junk.bin").write_text("cache\n")
         class A: pass
-        s=A(); s.run_root=self.run; s.status="completed"; s.reason=None; dsd_task.command_set_run_status(s)
-        p=A(); p.run_root=self.run; p.dry_run=True
-        preview=dsd_workspace.command_purge_run(p)
-        self.assertTrue(preview["safe_to_purge"]); self.assertTrue(runtime.exists()); self.assertTrue(sibling.exists())
-        p.dry_run=False; out=dsd_workspace.command_purge_run(p)
-        self.assertTrue(out["purged"]); self.assertFalse(runtime.exists()); self.assertEqual((sibling/"keep.txt").read_text(),"keep\n")
+        s=A(); s.run_root=self.run; s.status="completed"; s.reason=None; out=dsd_task.command_set_run_status(s)
+        self.assertTrue(out.get("runtime_purged"),out)
+        self.assertFalse(runtime.exists()); self.assertEqual((sibling/"keep.txt").read_text(),"keep\n")
         self.assertTrue((self.run/"run.json").is_file())
 
     def test_purge_run_refuses_unintegrated_workspace_and_owner_marker_mismatch(self):

@@ -100,20 +100,15 @@ On Human-blocked follow-up triage, `--route accept` cancels its findings and pre
 
 ## Cleanup / interrupted process
 
-```bash
-python3 <skill>/scripts/dsd_workspace.py cleanup --run-root ... --phase-id phase-1 --task-id T01
-```
-
-Cleanup never destroys live/unresolved protected work. Interrupted-process hygiene:
+Normal cleanup is automatic: integration retires task runtime; `reconcile-run` reaps safe leftovers; a cleanup-safe `completed` run purges its owned runtime. Manual commands are diagnostics/recovery only:
 
 ```bash
 python3 <skill>/scripts/dsd_workspace.py cleanup-phase --run-root ... --phase-id phase-1
 python3 <skill>/scripts/dsd_task.py sweep-stale --run-root ... --phase-id phase-1
 python3 <skill>/scripts/dsd_workspace.py purge-run --run-root ... --dry-run
-python3 <skill>/scripts/dsd_workspace.py purge-run --run-root ...
 ```
 
-`~/.cache/t-bag` is shared. Never raw-delete it or sibling runtimes; use guarded run-scoped `purge-run`.
+`cleanup --force --reason "..."` is explicit abandonment, never a way around an undisposed mutable delta. `~/.cache/t-bag` is shared; never raw-delete it or sibling runtimes.
 
 ## Same-session continuation
 
