@@ -1,0 +1,35 @@
+name: RC42 atomic publisher
+on:
+  push:
+    branches: [rc42-publisher]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply validated RC42 patch and publish candidate
+        shell: bash
+        env:
+          EXPECTED_BASE: 6fc26d73ef91081c83957827c487ae09ac9cd911
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc42-publisher:refs/remotes/origin/rc42-publisher
+          : > /tmp/rc42.patch.b64
+          for f in 00a 00b 01 02a 02b 03 04 05 06; do
+            git show "origin/rc42-publisher:publisher/rc42.patch.b64.$f" >> /tmp/rc42.patch.b64
+          done
+          test "$(wc -c < /tmp/rc42.patch.b64 | tr -d ' ')" = "36576"
+          base64 -d /tmp/rc42.patch.b64 | gzip -d > /tmp/rc42.patch
+          git apply --index --binary /tmp/rc42.patch
+          git diff --cached --check
+          test "$(git diff --cached --name-only | wc -l | tr -d ' ')" = "16"
+          git config user.name "T-BAG Publisher"
+          git config user.email "tbag-publisher@users.noreply.github.com"
+          git commit -m "RC42: make housekeeping lifecycle-owned and scope-safe"
+          git push origin HEAD:refs/heads/rc42-built --force
