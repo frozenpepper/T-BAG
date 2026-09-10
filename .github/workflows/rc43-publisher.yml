@@ -1,0 +1,52 @@
+name: RC43 candidate publisher
+on:
+  push:
+    branches: [rc43-publisher]
+    paths: ['.github/workflows/rc43-publisher.yml']
+permissions:
+  contents: write
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply exact RC43 delta
+        env:
+          EXPECTED_BASE: 8e90630255a4ed28002fb84ebcd20843049ab57c
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc43-publisher:refs/remotes/origin/rc43-publisher
+          : > /tmp/rc43.patch.gz.b64
+          for f in 00 01 02; do git show "origin/rc43-publisher:publisher/rc43.part.$f" >> /tmp/rc43.patch.gz.b64; done
+          test "$(wc -c < /tmp/rc43.patch.gz.b64 | tr -d ' ')" = "8973"
+          echo '19662540bae48df8cecaf97d6025b68c180e74b8e0846c41fa23205b7fb992e8  /tmp/rc43.patch.gz.b64' | sha256sum -c -
+          base64 -d /tmp/rc43.patch.gz.b64 | gzip -d > /tmp/rc43.patch
+          echo 'db1fcf1a5e96c3f375696edcac712d66cc9643776208064d89be7c24494023ae  /tmp/rc43.patch' | sha256sum -c -
+          git apply --index --binary /tmp/rc43.patch
+          git diff --cached --check
+          test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nscripts/run_worker.py\ntests/test_components.py'
+          test "$(git hash-object CHANGELOG.md)" = "89396400a8991c41a605dd219aec0a40f5d077f0"
+          test "$(git hash-object scripts/run_worker.py)" = "f9f9de6c487b7285f041a261d5df131b77fe4015"
+          test "$(git hash-object tests/test_components.py)" = "bfa20f5c7ca7e3605c0afc562e3b81915d0eb81f"
+      - name: Regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+          python3 -m compileall -q scripts tests
+      - name: Publish candidate commit
+        run: |
+          set -euo pipefail
+          git config user.name 'T-BAG Publisher'
+          git config user.email 'tbag-publisher@users.noreply.github.com'
+          git commit -m 'RC43: self-recover OpenCode bootstrap DB locks'
+          git push origin HEAD:refs/heads/rc43-built --force
