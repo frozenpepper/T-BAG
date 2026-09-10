@@ -259,7 +259,7 @@ class ComponentsTests(unittest.TestCase):
         class Proc:
             def poll(self): return None
         args=SimpleNamespace(driver='codex',resume_session=None)
-        self.assertEqual(run_worker.capture_live_session_id(args,{},'ignored',log,Proc(),attempts=1,delay_seconds=0),('live-thread',None))
+        self.assertEqual(run_worker.capture_live_session_id(args,log,Proc(),attempts=1,delay_seconds=0),('live-thread',None))
 
     def test_codex_jsonl_thread_id_and_command_are_lifecycle_wired(self):
         log=self.root/'codex.jsonl'; log.write_text('noise\n'+json.dumps({'type':'thread.started','thread_id':'thr-123'})+'\n')
@@ -604,6 +604,24 @@ class ComponentsTests(unittest.TestCase):
         finally:
             run_worker.shutil.which=old
 
+    def test_stable_opencode_uses_json_stream_for_session_capture_without_second_cli_probe(self):
+        event=self.root/'opencode-event'; event.mkdir(); prompt=self.root/'opencode-prompt.txt'; prompt.write_text('worker prompt')
+        task=self.root/'opencode-task.md'; task.write_text('# Task\n\nRead only.\n'); db=self.root/'opencode-db.sqlite'
+        p={"prompt":prompt,"task":task,"project_root":self.project,"event_dir":event,"db":db}
+        args=SimpleNamespace(driver='opencode',model='opencode-go/muse-spark-1.3',effort=None,resume_session=None,task_id='T1',role='discovery',attempt=1,force_read_only=True,title='tbag-opencode',auto_flag='--auto')
+        old=run_worker.shutil.which
+        try:
+            run_worker.shutil.which=lambda name: '/usr/local/bin/opencode' if name=='opencode' else old(name)
+            cmd,env,title,cwd=run_worker.worker_command(args,p,os.environ.copy())
+        finally:
+            run_worker.shutil.which=old
+        self.assertEqual(cmd[:2],['opencode','run']); self.assertIn('--format',cmd); self.assertEqual(cmd[cmd.index('--format')+1],'json')
+        self.assertEqual(env['OPENCODE_DB'],str(db)); self.assertEqual(title,'tbag-opencode'); self.assertEqual(cwd,self.project)
+        log=event/'worker.log'; log.write_text('{"type":"step_start","sessionID":"ses_direct","part":{"sessionID":"ses_direct"}}\n')
+        class Proc:
+            def poll(self): return None
+        self.assertEqual(run_worker.capture_live_session_id(args,log,Proc(),attempts=1,delay_seconds=0),('ses_direct',None))
+
     def test_opencode2_worker_adapter_is_standalone_isolated_json_and_resumable(self):
         event=self.root/'opencode2-event'; event.mkdir(); prompt=self.root/'opencode2-prompt.txt'; prompt.write_text('worker prompt')
         task=self.root/'opencode2-task.md'; task.write_text('# Task\n\nRead only.\n')
@@ -627,6 +645,83 @@ class ComponentsTests(unittest.TestCase):
         log=event/'worker.log'
         log.write_text('{"type":"step_start","sessionID":"ses_live","part":{"sessionID":"ses_live"}}\n{"type":"text","sessionID":"ses_live"}\n')
         self.assertEqual(run_worker.opencode_json_session_id(log),('ses_live',None))
+
+    def test_opencode_db_lock_retry_is_narrow_and_nonsemantic(self):
+        event=self.root/'lock-classifier'; event.mkdir(); report=event/'report.md'; report.write_text(run_worker.placeholder_text(event))
+        log=event/'worker.log'; log.write_text('SQLITE_BUSY: database is locked\n')
+        p={'project_root':self.project,'baseline':event/'baseline.json','report':report,'log':log}
+        args=SimpleNamespace(driver='opencode')
+        old_count=run_worker.current_scope_change_count
+        try:
+            run_worker.current_scope_change_count=lambda _: 0
+            self.assertEqual(run_worker.retryable_opencode_db_lock(args,p,exit_code=1,session_id=None,log_start=0,stderr_path=None,stderr_start=0),'opencode-database-locked')
+            self.assertIsNone(run_worker.retryable_opencode_db_lock(args,p,exit_code=1,session_id='ses-real',log_start=0,stderr_path=None,stderr_start=0))
+            report.write_text('PASS\nreal worker report\n')
+            self.assertIsNone(run_worker.retryable_opencode_db_lock(args,p,exit_code=1,session_id=None,log_start=0,stderr_path=None,stderr_start=0))
+            report.write_text(run_worker.placeholder_text(event)); run_worker.current_scope_change_count=lambda _: 1
+            self.assertIsNone(run_worker.retryable_opencode_db_lock(args,p,exit_code=1,session_id=None,log_start=0,stderr_path=None,stderr_start=0))
+        finally:
+            run_worker.current_scope_change_count=old_count
+
+    def test_opencode_db_lock_restarts_same_process_contract_and_same_db(self):
+        event=self.root/'lock-retry'; event.mkdir(); report=event/'report.md'; report.write_text(run_worker.placeholder_text(event))
+        prompt=event/'prompt.txt'; prompt.write_text('same prompt'); task=event/'task.md'; task.write_text('# Task\n'); db=self.root/'task.sqlite'; db.write_text('initialized-before-lock')
+        p={'project_root':self.project,'run_root':self.run,'prompt':prompt,'task':task,'rules':event/'rules','baseline':event/'baseline.json','report':report,'event_dir':event,'log':event/'worker.log','db':db}
+        args=SimpleNamespace(driver='opencode',task_id='T-LOCK',role='implementer',attempt=1,model='muse',title=None,force_read_only=False,resume_session=None,auto_flag='--auto',tier='grunt',launch_start_interval_seconds=0.0)
+        calls=[]; sleeps=[]
+        class Proc:
+            def __init__(self,pid,rc): self.pid=pid; self.rc=rc
+            def wait(self): return self.rc
+        def fake_popen(cmd,**kwargs):
+            calls.append((list(cmd),kwargs['env']['OPENCODE_DB'],kwargs['cwd']))
+            if len(calls)==1:
+                kwargs['stdout'].write(b'SQLITE_BUSY: database is locked\n'); return Proc(101,1)
+            kwargs['stdout'].write(b'worker started normally\n'); return Proc(102,0)
+        old_command=run_worker.worker_command; old_popen=run_worker.staggered_popen; old_capture=run_worker.capture_live_session_id
+        old_count=run_worker.current_scope_change_count; old_freeze=run_worker.freeze_scope; old_sleep=run_worker.time.sleep
+        try:
+            run_worker.worker_command=lambda _a,_p,_e: (['opencode','run','SAME_PROMPT'],{**_e,'OPENCODE_DB':str(db)},'same-title',self.project)
+            run_worker.staggered_popen=fake_popen
+            run_worker.capture_live_session_id=lambda *a,**k: (None,'no session')
+            run_worker.current_scope_change_count=lambda _: 0
+            run_worker.freeze_scope=lambda _: (None,None)
+            run_worker.time.sleep=lambda seconds: sleeps.append(seconds)
+            rc=run_worker.child(args,p,'reserved-now')
+        finally:
+            run_worker.worker_command=old_command; run_worker.staggered_popen=old_popen; run_worker.capture_live_session_id=old_capture
+            run_worker.current_scope_change_count=old_count; run_worker.freeze_scope=old_freeze; run_worker.time.sleep=old_sleep
+        self.assertEqual(rc,0); self.assertEqual(len(calls),2); self.assertEqual(calls[0],calls[1])
+        self.assertEqual(calls[0][1],str(db)); self.assertEqual(db.read_text(),'initialized-before-lock'); self.assertEqual(sleeps,[4.0])
+        attempt=json.loads((event/'attempt.json').read_text()); terminal=json.loads((event/'terminal.json').read_text())
+        self.assertEqual(attempt['worker_pid'],102); self.assertEqual(attempt['process_retries'][0]['reason'],'opencode-database-locked')
+        self.assertEqual(terminal['exit_code'],0); self.assertEqual(terminal['worker_pid'],102); self.assertEqual(terminal['process_retries'][0]['delay_seconds'],4.0)
+
+    def test_opencode_retry_does_not_reuse_an_old_lock_message_for_a_new_failure(self):
+        event=self.root/'lock-then-other'; event.mkdir(); report=event/'report.md'; report.write_text(run_worker.placeholder_text(event))
+        prompt=event/'prompt.txt'; prompt.write_text('same prompt'); task=event/'task.md'; task.write_text('# Task\n'); db=self.root/'task-other.sqlite'
+        p={'project_root':self.project,'run_root':self.run,'prompt':prompt,'task':task,'rules':event/'rules','baseline':event/'baseline.json','report':report,'event_dir':event,'log':event/'worker.log','db':db}
+        args=SimpleNamespace(driver='opencode',task_id='T-OTHER',role='implementer',attempt=1,model='muse',title=None,force_read_only=False,resume_session=None,auto_flag='--auto',tier='grunt',launch_start_interval_seconds=0.0)
+        calls=[]; sleeps=[]
+        class Proc:
+            def __init__(self,pid,rc): self.pid=pid; self.rc=rc
+            def wait(self): return self.rc
+        def fake_popen(cmd,**kwargs):
+            calls.append(list(cmd))
+            if len(calls)==1:
+                kwargs['stdout'].write(b'database is locked\n'); return Proc(201,1)
+            kwargs['stdout'].write(b'provider unavailable\n'); return Proc(202,1)
+        old_command=run_worker.worker_command; old_popen=run_worker.staggered_popen; old_capture=run_worker.capture_live_session_id
+        old_count=run_worker.current_scope_change_count; old_freeze=run_worker.freeze_scope; old_sleep=run_worker.time.sleep
+        try:
+            run_worker.worker_command=lambda _a,_p,_e: (['opencode','run','SAME_PROMPT'],{**_e,'OPENCODE_DB':str(db)},'same-title',self.project)
+            run_worker.staggered_popen=fake_popen; run_worker.capture_live_session_id=lambda *a,**k: (None,'no session')
+            run_worker.current_scope_change_count=lambda _: 0; run_worker.freeze_scope=lambda _: (None,None); run_worker.time.sleep=lambda seconds: sleeps.append(seconds)
+            rc=run_worker.child(args,p,'reserved-now')
+        finally:
+            run_worker.worker_command=old_command; run_worker.staggered_popen=old_popen; run_worker.capture_live_session_id=old_capture
+            run_worker.current_scope_change_count=old_count; run_worker.freeze_scope=old_freeze; run_worker.time.sleep=old_sleep
+        self.assertEqual(rc,1); self.assertEqual(len(calls),2); self.assertEqual(sleeps,[4.0])
+        terminal=json.loads((event/'terminal.json').read_text()); self.assertEqual(len(terminal['process_retries']),1)
 
     def test_launch_start_delay_respects_both_runs_and_ignores_stale_monotonic_clock(self):
         # A short-interval run cannot weaken the interval requested by the launch that

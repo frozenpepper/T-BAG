@@ -2,6 +2,12 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC43 — OpenCode bootstrap lock self-recovery
+
+- Removed T-BAG's own same-DB startup race for stable OpenCode workers. `opencode run` now uses `--format json`, whose raw events carry the root `sessionID`; live session capture reads that worker stream directly instead of spawning `opencode session list` against the same fresh task-local `OPENCODE_DB` while the worker is booting.
+- Added deterministic launcher-level recovery for the exact transient `database is locked` failure. When the child exited non-zero, no session was established, the worker report is still the launcher placeholder, and the task authored zero project delta, T-BAG waits 4 → 8 → 16 seconds and relaunches the identical OpenCode command against the **same DB, same worktree, same prompt and same T-BAG attempt**. The DB is never deleted/reinitialized by this recovery path.
+- Retry classification reads only output from the failed process incarnation, so an old lock line cannot make a later unrelated failure retryable. Internal retries are recorded in `attempt.json`/`terminal.json` for diagnosis without involving the parent or consuming another semantic worker cycle.
+
 ## v2.2.0 RC42 — lifecycle-owned housekeeping and scope-safe derived state
 
 - Made runtime cleanup automatic and proof-driven. Reviewed integration immediately retires its worktree, fixture snapshot, branches and task-local CLI database; `reconcile-run` reaps older mechanically disposable residue/orphan DBs; a cleanup-safe terminal `completed` run purges only its ownership-marked runtime subtree. Cleanup failure never rewrites a successful integration.

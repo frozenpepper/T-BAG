@@ -21,6 +21,7 @@ from _rules_snapshot import verify_snapshot
 
 PLACEHOLDER = "DSD_WORKER_REPORT_PLACEHOLDER_V2_1"
 DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
+OPENCODE_DB_LOCK_RETRY_DELAYS_SECONDS = (4.0, 8.0, 16.0)
 
 
 def classify_report_text(text: str) -> str:
@@ -134,27 +135,68 @@ def staggered_popen(cmd: list[str], *, interval_seconds: float, gate_root: Path 
             fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
 
 
-def parse_sessions(value: Any)->list[dict[str,Any]]:
-    if isinstance(value,list): return [x for x in value if isinstance(x,dict)]
-    if isinstance(value,dict):
-        for key in ("sessions","items","data"):
-            if isinstance(value.get(key),list): return [x for x in value[key] if isinstance(x,dict)]
-    return []
+def _read_process_slice(path: Path, start: int, *, max_bytes: int = 65536) -> str:
+    """Read only output emitted by one child-process incarnation.
 
-
-def lookup_session_id(env: dict[str,str], title: str, *, timeout_seconds: float = 30)->tuple[str|None,str|None]:
+    A T-BAG attempt may restart the OpenCode process after a transient bootstrap
+    lock. Offsets keep an older lock message from making a later unrelated exit
+    look retryable.
+    """
+    if not path.is_file(): return ""
     try:
-        cp=subprocess.run(["opencode","session","list","--format","json","--max-count","50"],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,timeout=timeout_seconds,check=False)
-    except Exception as exc: return None,f"session lookup failed: {exc}"
-    if cp.returncode!=0: return None,f"session list exit {cp.returncode}: {cp.stderr.strip()[:400]}"
-    try: data=json.loads(cp.stdout)
-    except json.JSONDecodeError as exc: return None,f"session list JSON parse failed: {exc}"
-    exact=[s for s in parse_sessions(data) if str(s.get("title",""))==title]
-    if len(exact)==1:
-        ident=exact[0].get("id") or exact[0].get("sessionID") or exact[0].get("session_id")
-        return (str(ident),None) if ident else (None,"matched session has no id")
-    if len(exact)>1: return None,f"multiple sessions match title {title!r}"
-    return None,f"no session matched title {title!r}"
+        size=path.stat().st_size
+        begin=max(start, size-max_bytes)
+        with path.open("rb") as handle:
+            handle.seek(begin)
+            return handle.read(max_bytes).decode("utf-8",errors="replace")
+    except OSError:
+        return ""
+
+
+def current_scope_change_count(p: dict[str,Path]) -> int | None:
+    """Return current task-authored project movement without writing terminal evidence."""
+    cp=subprocess.run(
+        [sys.executable,str(Path(__file__).resolve().parent/"scope_snapshot.py"),"compare",
+         "--root",str(p["project_root"]),"--baseline",str(p["baseline"])],
+        text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False,
+    )
+    if cp.returncode!=0: return None
+    try:
+        data=json.loads(cp.stdout)
+        return int(data.get("changed_count"))
+    except (json.JSONDecodeError,TypeError,ValueError):
+        return None
+
+
+def retryable_opencode_db_lock(
+    args: argparse.Namespace,
+    p: dict[str,Path],
+    *,
+    exit_code: int,
+    session_id: str | None,
+    log_start: int,
+    stderr_path: Path | None,
+    stderr_start: int,
+) -> str | None:
+    """Classify one narrow, non-semantic OpenCode bootstrap failure.
+
+    Retrying is legal only when the child exited unsuccessfully, emitted the exact
+    SQLite lock signature, never established a resumable session, left the worker
+    report untouched, and authored no project delta. The same DB/worktree/prompt are
+    then reused; this function never deletes runtime state.
+    """
+    if args.driver not in {"opencode","opencode2"} or exit_code==0 or session_id:
+        return None
+    if report_state(p["report"])!="launcher-placeholder":
+        return None
+    output=_read_process_slice(p["log"],log_start)
+    if stderr_path is not None:
+        output += "\n" + _read_process_slice(stderr_path,stderr_start)
+    if "database is locked" not in output.lower():
+        return None
+    if current_scope_change_count(p)!=0:
+        return None
+    return "opencode-database-locked"
 
 
 def opencode_json_session_id(log: Path)->tuple[str|None,str|None]:
@@ -178,7 +220,7 @@ def opencode_json_session_id(log: Path)->tuple[str|None,str|None]:
 
 
 
-def capture_live_session_id(args: argparse.Namespace, env: dict[str,str], title: str, log: Path, proc: subprocess.Popen, *, attempts: int = 4, delay_seconds: float = 0.5) -> tuple[str|None,str|None]:
+def capture_live_session_id(args: argparse.Namespace, log: Path, proc: subprocess.Popen, *, attempts: int = 4, delay_seconds: float = 0.5) -> tuple[str|None,str|None]:
     """Best-effort early session capture while the worker is still alive.
 
     A killed process may never write terminal.json. Persisting the host session ID in
@@ -189,8 +231,7 @@ def capture_live_session_id(args: argparse.Namespace, env: dict[str,str], title:
     last_error=None
     for index in range(max(1,attempts)):
         if index: time.sleep(delay_seconds)
-        if args.driver=="opencode": sid,error=lookup_session_id(env,title,timeout_seconds=5)
-        elif args.driver=="opencode2": sid,error=opencode_json_session_id(log)
+        if args.driver in {"opencode","opencode2"}: sid,error=opencode_json_session_id(log)
         elif args.driver=="claude": sid,error=claude_session_id(log)
         else: sid,error=codex_session_id(log)
         if sid: return sid,None
@@ -240,7 +281,7 @@ def worker_command(args: argparse.Namespace,p:dict[str,Path],env:dict[str,str])-
         if effort: raise ValueError("OpenCode worker effort has no provider-independent CLI contract; choose effort through the configured model/profile endpoint instead")
         if not shutil.which("opencode"): raise FileNotFoundError("opencode executable not found")
         p["db"].parent.mkdir(parents=True,exist_ok=True); env=dict(env); env["OPENCODE_DB"]=str(p["db"])
-        cmd=["opencode","run","--model",args.model]
+        cmd=["opencode","run","--format","json","--model",args.model]
         if args.auto_flag: cmd.append(args.auto_flag)
         cmd += ["--title",title,"--dir",str(p["project_root"])]
         if args.resume_session: cmd += ["--session",args.resume_session]
@@ -373,22 +414,54 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     attempt={"format":"dsd-worker-attempt-v2.2","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"effort":getattr(args,"effort",None),"attempt":args.attempt,"event_dir":str(p["event_dir"]),"project_root":str(p["project_root"]),"worker_pid":proc.pid,"launcher_pid":os.getpid(),"reserved_at":reserved_at,"started_at":started,"resume_session":args.resume_session,"launch_start_interval_seconds":getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)}
     if stderr_path is not None: attempt["stderr_log"]=str(stderr_path)
     atomic_json(p["event_dir"]/"attempt.json",attempt)
-    session_id,session_error=capture_live_session_id(args,env,title,p["log"],proc)
-    if session_id: attempt["session_id"]=session_id
-    if session_error: attempt["session_lookup_error"]=session_error
-    atomic_json(p["event_dir"]/"attempt.json",attempt)
-    try: rc=proc.wait()
-    finally:
-        out.close()
-        if err is not None: err.close()
+    process_retries=[]
+    retry_delays=iter(OPENCODE_DB_LOCK_RETRY_DELAYS_SECONDS)
+    log_start=0; stderr_start=0
+    while True:
+        session_id,session_error=capture_live_session_id(args,p["log"],proc)
+        if session_id: attempt["session_id"]=session_id
+        else: attempt.pop("session_id",None)
+        if session_error: attempt["session_lookup_error"]=session_error
+        else: attempt.pop("session_lookup_error",None)
+        atomic_json(p["event_dir"]/"attempt.json",attempt)
+        rc=proc.wait()
+        reason=retryable_opencode_db_lock(
+            args,p,exit_code=rc,session_id=session_id,log_start=log_start,
+            stderr_path=stderr_path,stderr_start=stderr_start,
+        )
+        if reason is None:
+            break
+        try:
+            delay=next(retry_delays)
+        except StopIteration:
+            break
+        retry={"reason":reason,"delay_seconds":delay,"failed_exit_code":rc,"failed_worker_pid":proc.pid,"recorded_at":now()}
+        process_retries.append(retry); attempt["process_retries"]=process_retries
+        atomic_json(p["event_dir"]/"attempt.json",attempt)
+        time.sleep(delay)
+        log_start=out.tell() if out is not None else 0
+        stderr_start=err.tell() if err is not None else 0
+        try:
+            proc=staggered_popen(
+                cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),
+                cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,
+            )
+        except Exception as exc:
+            out.close()
+            if err is not None: err.close()
+            return terminal_error(args,p,f"failed to relaunch {args.driver} after {reason}: {exc}",2,started)
+        attempt["worker_pid"]=proc.pid; attempt["last_restarted_at"]=now()
+        atomic_json(p["event_dir"]/"attempt.json",attempt)
+    out.close()
+    if err is not None: err.close()
     scope,scope_error=freeze_scope(p)
     if not session_id:
         if args.resume_session: session_id,session_error=args.resume_session,None
-        elif args.driver=="opencode": session_id,session_error=lookup_session_id(env,title)
-        elif args.driver=="opencode2": session_id,session_error=opencode_json_session_id(p["log"])
+        elif args.driver in {"opencode","opencode2"}: session_id,session_error=opencode_json_session_id(p["log"])
         elif args.driver=="claude": session_id,session_error=claude_session_id(p["log"])
         else: session_id,session_error=codex_session_id(p["log"])
     terminal={"format":"dsd-worker-terminal-v2.2","status":"process-exited","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"attempt":args.attempt,"exit_code":rc,"worker_pid":proc.pid,"launcher_pid":os.getpid(),"session_id":session_id,"session_lookup_error":session_error,"reserved_at":reserved_at,"started_at":started,"ended_at":now(),"report":str(p["report"]),"report_state":report_state(p["report"]),"scope_diff":scope,"scope_error":scope_error}
+    if process_retries: terminal["process_retries"]=process_retries
     if stderr_path is not None: terminal["stderr_log"]=str(stderr_path)
     atomic_json(p["event_dir"]/"terminal.json",terminal); return rc
 
