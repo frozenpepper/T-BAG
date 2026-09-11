@@ -1,0 +1,54 @@
+name: RC44 candidate publisher
+on:
+  push:
+    branches: [rc44-publisher]
+    paths: ['.github/workflows/rc44-publisher.yml']
+permissions:
+  contents: write
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply exact RC44 delta
+        env:
+          EXPECTED_BASE: ed80976e2b45aba39128a75593e649115678b2a4
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc44-publisher:refs/remotes/origin/rc44-publisher
+          : > /tmp/rc44.patch.gz.b64
+          for f in 00 01 02 03 04; do git show "origin/rc44-publisher:publisher/rc44.part.$f" >> /tmp/rc44.patch.gz.b64; done
+          test "$(wc -c < /tmp/rc44.patch.gz.b64 | tr -d ' ')" = "13136"
+          echo 'c4987ae3857a34d0901ebd9c3753e750a509374061b3a370373280d9be8059b3  /tmp/rc44.patch.gz.b64' | sha256sum -c -
+          base64 -d /tmp/rc44.patch.gz.b64 | gzip -d > /tmp/rc44.patch
+          echo '9c458ff1819dc5f58e155723c9346cecc654c55394640eea3678362b00ce5e50  /tmp/rc44.patch' | sha256sum -c -
+          git apply --check /tmp/rc44.patch
+          git apply --index /tmp/rc44.patch
+          git diff --cached --check
+          test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nWORKSPACE.md\nscripts/dsd_workspace.py\ntests/test_workspace.py'
+          test "$(wc -c < WORKSPACE.md | tr -d ' ')" -lt 10000
+      - name: Regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+          python3 -m compileall -q scripts tests
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+      - name: Publish candidate commit
+        run: |
+          set -euo pipefail
+          git config user.name 'T-BAG Publisher'
+          git config user.email 'tbag-publisher@users.noreply.github.com'
+          git commit -m 'RC44: share dependency fixtures without fat workrooms'
+          git push origin HEAD:refs/heads/rc44-built --force
