@@ -22,10 +22,10 @@ jobs:
           git fetch origin rc44-publisher:refs/remotes/origin/rc44-publisher
           : > /tmp/rc44.patch.gz.b64
           for f in 00 01 02 03 04; do git show "origin/rc44-publisher:publisher/rc44.part.$f" >> /tmp/rc44.patch.gz.b64; done
-          test "$(wc -c < /tmp/rc44.patch.gz.b64 | tr -d ' ')" = "13136"
-          echo 'c4987ae3857a34d0901ebd9c3753e750a509374061b3a370373280d9be8059b3  /tmp/rc44.patch.gz.b64' | sha256sum -c -
+          test "$(wc -c < /tmp/rc44.patch.gz.b64 | tr -d ' ')" = "13228"
+          echo '8090841868130d39bda65e52389a9c05b0fa75fc2751cb454af3885a9d9049f3  /tmp/rc44.patch.gz.b64' | sha256sum -c -
           base64 -d /tmp/rc44.patch.gz.b64 | gzip -d > /tmp/rc44.patch
-          echo '9c458ff1819dc5f58e155723c9346cecc654c55394640eea3678362b00ce5e50  /tmp/rc44.patch' | sha256sum -c -
+          echo '6c5539f8a8b7a1f97ba9cca1470e71e062e1c9354a4c4c1643c68c611e8d4bf4  /tmp/rc44.patch' | sha256sum -c -
           git apply --check /tmp/rc44.patch
           git apply --index /tmp/rc44.patch
           git diff --cached --check
