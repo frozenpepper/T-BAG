@@ -1,0 +1,7 @@
+#!/usr/bin/env python3
+from pathlib import Path
+p=Path('adapters/opencode/tbag.js'); text=p.read_text(encoding='utf-8')
+old='''  const key = followKey(sessionID, args)\n  const observed = validate ? validateAttempt(root, args) : { state: "unknown" }\n  const existing = follows.get(key)\n  if (existing && !existing.done && (existing.proc?.exitCode === null || existing.proc?.exitCode === undefined)) {\n    return { armed: true, already_armed: true, observer_healthy: true, observer_generation: existing.generation, task_id: args.task_id, event_dir: args.event_dir }\n  }\n  if (existing) follows.delete(key)\n  if (observed?.state === "terminal" || observed?.state === "dead-unresolved") {\n'''
+new='''  const key = followKey(sessionID, args)\n  const existing = follows.get(key)\n  if (existing && !existing.done && (existing.proc?.exitCode === null || existing.proc?.exitCode === undefined)) {\n    return { armed: true, already_armed: true, observer_healthy: true, observer_generation: existing.generation, task_id: args.task_id, event_dir: args.event_dir }\n  }\n  if (existing) follows.delete(key)\n  const observed = validate ? validateAttempt(root, args) : { state: "unknown" }\n  if (observed?.state === "terminal" || observed?.state === "dead-unresolved") {\n'''
+if text.count(old)!=1: raise SystemExit(f'observer refinement target count={text.count(old)}')
+p.write_text(text.replace(old,new),encoding='utf-8')
