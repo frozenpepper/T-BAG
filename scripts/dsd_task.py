@@ -105,6 +105,14 @@ def declared_report_outcome(report: Path, role: str, *, required: bool = False) 
     nonempty=[raw.strip() for raw in report.read_text(encoding="utf-8",errors="replace").splitlines() if raw.strip()]
     first=nonempty[0] if nonempty else ""
     outcome=allowed.get(first)
+    if outcome is None and first:
+        # Still deterministic: accept only an allowed token anchored at the start of
+        # the first line, optionally Markdown-bolded and followed by an explicit
+        # punctuation separator. Never infer PASS/FAIL from ordinary prose.
+        for token in sorted(allowed,key=len,reverse=True):
+            pattern=rf"^(?:\*\*)?{re.escape(token)}(?:\*\*)?(?:\s*(?:—|–|-|:)\s+.+)?$"
+            if re.fullmatch(pattern,first):
+                outcome=allowed[token]; break
     if outcome is not None:
         return outcome
     explicit=[]
@@ -147,10 +155,16 @@ def review_followup_items(report: Path) -> list[str]:
         stripped=raw.strip()
         if stripped.startswith("## "): break
         if not stripped: continue
-        if not stripped.startswith("- ") or not stripped[2:].strip():
-            raise ValueError(f"{FOLLOWUP_HEADING} must contain only concise single-line '- ...' bullets")
-        items.append(stripped[2:].strip())
-    if not items: raise ValueError(f"{FOLLOWUP_HEADING} is present but contains no obligations")
+        # Harness metadata and common trailing report prose are outside the dedicated
+        # obligations section even when a worker forgot to add another Markdown H2.
+        if stripped.startswith(("Attempt:","Baseline:","Next technical step:")): break
+        if stripped in {"None","None.","- None","- None."} and not items: return []
+        if stripped.startswith("- ") and stripped[2:].strip():
+            items.append(stripped[2:].strip()); continue
+        # Markdown-wrapped bullet continuations are structural when indented.
+        if items and (raw.startswith(" ") or raw.startswith("\t")):
+            items[-1]+=" "+stripped; continue
+        raise ValueError(f"{FOLLOWUP_HEADING} must contain only single-line '- ...' bullets; indent wrapped continuation lines")
     return items
 
 def iter_review_findings(task: dict[str, Any]):
@@ -1300,10 +1314,12 @@ def phase_gate_dossier_text(run: Path, phase: str, gate_task_id: str | None = No
 def _phase_task_success(run: Path, phase: str, task: dict[str, Any]) -> bool:
     if open_review_findings(task): return False
     status=str(task.get("status") or "")
-    if task.get("requires_integration"): return status=="integrated"
+    # Supersession preserves the obligation through its successors. Check it before
+    # requires_integration so an integrated successor can discharge an old mutable task.
     if status=="superseded":
         try: return dependency_satisfied(run,phase,str(task.get("task_id") or ""))
         except ValueError: return False
+    if task.get("requires_integration"): return status=="integrated"
     if status not in {"accepted","integrated"}: return False
     if task.get("kind")=="verification": return accepted_outcome(task)=="pass"
     return True

@@ -2,6 +2,14 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC45 — durable parent tick and bounded supervision
+
+- Added one canonical parent tick spanning reconcile, deterministic advance, live-attempt monitoring, owner-update cadence and explicit project-end classification. Adapter wakes are now optional fast hints rather than the only way long-lived orchestration makes progress.
+- OpenCode registers active runs for a low-frequency heartbeat, validates `already_armed` observer health, and wakes the parent into the tick. No task/model/semantic authority moved into the plugin.
+- Added lifecycle-owned attempt retirement. Final-report/no-terminal workers retire automatically after a short grace; confirmed silent anomalies are terminated through the recorded worker process group so retained state/session recovery can continue and spawned MCP children do not linger.
+- Owner updates are durable/acknowledged and periodic during long active work. Quiescent active runs surface `completion-candidate` instead of silently idling; explicit finish is mechanically refused while registered work remains.
+- Relaxed only the mechanical report envelope (anchored suffixed/bold verdict tokens, footer-safe/empty follow-up obligations), fixed superseded mutable-task phase-gate readiness, and documented replan-before-register ordering.
+
 ## v2.2.0 RC44 — shared dependency fixtures without fat workrooms
 
 - Replaced per-task `node_modules` fixture duplication with one run-owned immutable dependency generation keyed by the nearest package-manager lockfile authority (plus `package.json` / npm installation lock when present). Fixture provenance can originate only from primary or the run-owned fixture store, never another task room.

@@ -405,7 +405,7 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     try:
         out=p["log"].open("xb",buffering=0)
         if stderr_path is not None: err=stderr_path.open("xb",buffering=0)
-        proc=staggered_popen(cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT)
+        proc=staggered_popen(cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,start_new_session=True)
         started=now()
     except Exception as exc:
         if out is not None: out.close()
@@ -444,7 +444,7 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
         try:
             proc=staggered_popen(
                 cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),
-                cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,
+                cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,start_new_session=True,
             )
         except Exception as exc:
             out.close()

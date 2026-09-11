@@ -1,8 +1,12 @@
 import { tool } from "@opencode-ai/plugin"
+import { readFileSync } from "node:fs"
 
 // OpenCode owns wake delivery; T-BAG durable task/run files own orchestration truth.
 // This adapter keeps only disposable per-session/per-attempt transport state.
-const follows = new Set()
+const follows = new Map()
+const runHeartbeats = new Map()
+let observerGeneration = 0
+const HEARTBEAT_MS = Math.max(60_000, Number(process.env.TBAG_PARENT_HEARTBEAT_MS || 600_000))
 const busySessions = new Set()
 const pendingWakeSessions = new Set()
 const wakeInflightSessions = new Set()
@@ -37,7 +41,18 @@ function checkedSync(argv, label) {
 
 function validateAttempt(root, args) {
   // Read-only inspect proves this event belongs to the exact run/phase/task tuple.
-  checkedSync(attemptCli(root, args, "inspect"), "Refusing invalid T-BAG attempt target")
+  const text = checkedSync(attemptCli(root, args, "inspect"), "Refusing invalid T-BAG attempt target")
+  try { return JSON.parse(text) } catch (_) { return { state: "unknown" } }
+}
+
+function heartbeatKey(sessionID, runRoot) { return `${sessionID}\u0000${runRoot}` }
+function registerRunHeartbeat(sessionID, args) {
+  runHeartbeats.set(heartbeatKey(sessionID, args.run_root), {
+    sessionID, run_root: args.run_root, lastQueuedAt: Date.now(),
+  })
+}
+function runIsActive(runRoot) {
+  try { return JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8")).status === "active" } catch (_) { return false }
 }
 
 function spawnObserver(root, args) {
@@ -60,8 +75,8 @@ async function wakeParent(client, sessionID) {
         text: [
           "[T-BAG lifecycle wake]",
           "One or more per-attempt observers finished while you were yielded.",
-          "Run reconcile-run now, process only authorized lifecycle actions, refill free slots, and call tbag_follow for every live attempt before yielding again.",
-          "For each new attempt: run the normal detached core dsd_attempt.py launch, immediately call tbag_follow with the exact returned run_root/phase_id/task_id/event_dir, then yield when no immediate lifecycle action remains.",
+          "Run one parent_tick.py tick now. Treat its monitoring/actions/update/project-end packet as the canonical parent turn boundary.",
+          "For each new attempt: run the normal detached core dsd_attempt.py launch, immediately call tbag_follow with the exact returned tuple. A periodic transport heartbeat will request another tick even if an individual observer wake is lost.",
           "This message grants no semantic authority. Stay silent unless normal owner-communication rules require a reply.",
         ].join("\n"),
       }],
@@ -110,31 +125,36 @@ function queueWake(client, sessionID) {
 
 function armAttempt(client, sessionID, root, args, validate = true) {
   const key = followKey(sessionID, args)
-  if (follows.has(key)) {
-    return { armed: true, already_armed: true, task_id: args.task_id, event_dir: args.event_dir }
+  const existing = follows.get(key)
+  if (existing && !existing.done && (existing.proc?.exitCode === null || existing.proc?.exitCode === undefined)) {
+    return { armed: true, already_armed: true, observer_healthy: true, observer_generation: existing.generation, task_id: args.task_id, event_dir: args.event_dir }
   }
-  if (validate) validateAttempt(root, args)
+  if (existing) follows.delete(key)
+  const observed = validate ? validateAttempt(root, args) : { state: "unknown" }
+  if (observed?.state === "terminal" || observed?.state === "dead-unresolved") {
+    return { armed: false, already_armed: false, observer_healthy: false, attempt_state: observed.state, task_id: args.task_id, event_dir: args.event_dir }
+  }
 
   const proc = spawnObserver(root, args)
-  follows.add(key)
+  const entry = { proc, done: false, generation: ++observerGeneration, armedAt: Date.now() }
+  follows.set(key, entry)
   void (async () => {
     try {
       await proc.exited
     } catch (error) {
-      await logError(client, "T-BAG attempt observer failed; waking parent to reconcile", {
+      await logError(client, "T-BAG attempt observer failed; waking parent to tick", {
         task_id: args.task_id,
         event_dir: args.event_dir,
         error: String(error?.stack || error),
       })
     } finally {
-      // Delete before waking so a deadline/error wake can re-arm the same still-live
-      // attempt during the resumed parent turn.
-      follows.delete(key)
+      entry.done = true
+      if (follows.get(key) === entry) follows.delete(key)
       queueWake(client, sessionID)
     }
   })()
 
-  return { armed: true, already_armed: false, task_id: args.task_id, event_dir: args.event_dir }
+  return { armed: true, already_armed: false, observer_healthy: true, observer_generation: entry.generation, task_id: args.task_id, event_dir: args.event_dir }
 }
 
 function eventSessionID(event) {
@@ -157,6 +177,7 @@ function markSessionStatus(client, event) {
     busySessions.delete(sessionID)
     pendingWakeSessions.delete(sessionID)
     wakeInflightSessions.delete(sessionID)
+    for (const [key, item] of runHeartbeats) if (item.sessionID === sessionID) runHeartbeats.delete(key)
     return
   }
 
@@ -192,7 +213,19 @@ const followArgs = {
   event_dir: tool.schema.string().describe("Exact event_dir recorded for the live attempt"),
 }
 
-const TBagPlugin = async (ctx) => ({
+const TBagPlugin = async (ctx) => {
+  const heartbeatTimer = setInterval(() => {
+    for (const [key, item] of runHeartbeats) {
+      if (deletedSessions.has(item.sessionID) || !runIsActive(item.run_root)) {
+        runHeartbeats.delete(key); continue
+      }
+      if (Date.now() - item.lastQueuedAt < HEARTBEAT_MS) continue
+      item.lastQueuedAt = Date.now()
+      queueWake(ctx.client, item.sessionID)
+    }
+  }, HEARTBEAT_MS)
+  heartbeatTimer.unref?.()
+  return ({
   tool: {
     tbag_follow: tool({
       description: "OpenCode T-BAG wake-arm primitive. Validate and observe exactly one already-launched recorded attempt, return immediately, and wake this same parent session when the observer exits. After every detached core launch, call this immediately with the exact returned run_root, phase_id, task_id, and event_dir; call it again to re-arm live attempts after resume/deadline/plugin restart. Idempotent for an already-armed exact attempt.",
@@ -202,8 +235,9 @@ const TBagPlugin = async (ctx) => ({
         const root = context.worktree || context.directory || ctx.worktree || ctx.directory
         deletedSessions.delete(sessionID)
         busySessions.add(sessionID)
+        registerRunHeartbeat(sessionID, args)
         const observer = armAttempt(ctx.client, sessionID, root, args)
-        return JSON.stringify({ ...observer, semantics: "per-attempt wake observation only; durable T-BAG state remains authoritative" })
+        return JSON.stringify({ ...observer, heartbeat_registered: true, semantics: "wake transport only; parent tick and durable T-BAG state remain authoritative" })
       },
     }),
   },
@@ -241,6 +275,7 @@ const TBagPlugin = async (ctx) => ({
     if (!sessionID || !root) return
     deletedSessions.delete(sessionID)
     busySessions.add(sessionID)
+    registerRunHeartbeat(sessionID, launch)
     try {
       armAttempt(ctx.client, sessionID, root, launch)
     } catch (error) {
@@ -265,9 +300,10 @@ const TBagPlugin = async (ctx) => ({
       return
     }
     const text = decode(result.stdout)
-    output.context.push(`\n## T-BAG durable continuation\n${text}\nOpenCode invariant: for every new attempt run the normal detached core dsd_attempt.py launch, immediately call tbag_follow with the exact returned run_root/phase_id/task_id/event_dir, and use the same tbag_follow call to re-arm every live attempt after resume/wake. Never run core follow or wait/poll in the conversational turn. Once every live attempt is observed and no immediate lifecycle action remains, end the routine turn so lifecycle wakes can resume orchestration.\n`)
+    output.context.push(`\n## T-BAG durable continuation\n${text}\nOpenCode invariant: every resume/wake/heartbeat begins with one parent_tick.py tick. For every new attempt run the normal detached core dsd_attempt.py launch and immediately tbag_follow its exact tuple. Wakes are hints; tick owns monitoring, updates and project-end state. Never poll/wait in the conversational turn.\n`)
   },
-})
+  })
+}
 
 // Exactly one plugin export. OpenCode loads every function export from a legacy
 // plugin module, so exporting the same function under multiple names duplicates hooks.

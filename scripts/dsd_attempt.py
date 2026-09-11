@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -639,6 +640,46 @@ def _attempt_record_for_event(task:dict[str,Any],event:Path)->dict[str,Any]:
     raise ValueError("attempt is not recorded for this task")
 
 
+def command_retire(args:argparse.Namespace)->dict[str,Any]:
+    """Request bounded termination of one exact live worker attempt.
+
+    The launcher remains alive and owns terminal.json. New RC45 workers start in their
+    own process group, so SIGTERM also reaches worker-spawned MCP/child processes. For
+    older attempts without a dedicated group, fall back to signaling only worker_pid.
+    """
+    run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
+    task=dsd_task.load_task(run,phase,tid); event=resolve_event(run,phase,tid,args.event_dir)
+    _attempt_record_for_event(task,event)  # exact durable binding proof
+    class I: pass
+    i=I(); i.run_root=run; i.phase_id=phase; i.task_id=tid; i.event_dir=event; i.details=True; i.skip_duration_reference=True
+    observed=command_inspect(i)
+    if observed.get("state")!="running":
+        return {"task_id":tid,"event_dir":str(event),"retired":False,"state":observed.get("state"),"reason":"attempt-not-live"}
+    detail_path=event/"attempt.json"
+    if not detail_path.is_file(): raise ValueError("live attempt has no attempt.json; refusing raw process retirement")
+    detail=json.loads(detail_path.read_text(encoding="utf-8"))
+    worker_pid=detail.get("worker_pid"); launcher_pid=detail.get("launcher_pid")
+    if not isinstance(worker_pid,int) or worker_pid<=0 or not pid_alive(worker_pid):
+        raise ValueError("recorded worker_pid is not live; reconcile/sweep stale state instead")
+    request={
+        "format":"tbag-attempt-retirement-v1","requested_at":datetime.now(timezone.utc).isoformat(),
+        "task_id":tid,"phase_id":phase,"event_dir":str(event),"reason":str(args.reason),
+        "worker_pid":worker_pid,"launcher_pid":launcher_pid,"report_state":observed.get("report_state"),
+        "elapsed_seconds":observed.get("elapsed_seconds"),"log_age_seconds":observed.get("log_age_seconds"),
+    }
+    dsd_task.write_json(event/"retirement-request.json",request)
+    mode="worker-pid"
+    try:
+        pgid=os.getpgid(worker_pid)
+    except OSError:
+        pgid=None
+    if pgid==worker_pid:
+        os.killpg(worker_pid,signal.SIGTERM); mode="worker-process-group"
+    else:
+        os.kill(worker_pid,signal.SIGTERM)
+    return {**request,"retired":True,"signal":"SIGTERM","mode":mode}
+
+
 def command_inspect(args:argparse.Namespace)->dict[str,Any]:
     """Return a non-blocking lifecycle snapshot of a running or terminal attempt.
 
@@ -820,18 +861,19 @@ def parser()->argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
     p=sub.add_parser("launch"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--role",choices=sorted(ROLE_NAMES)); p.add_argument("--tier",choices=("analyst","grunt"),help=argparse.SUPPRESS); p.add_argument("--driver"); p.add_argument("--model"); p.add_argument("--runtime-profile"); p.add_argument("--worker-rules"); p.add_argument("--db"); p.add_argument("--attempt",type=int); p.add_argument("--authority-input",dest="input",action="append",default=[]); p.add_argument("--input",dest="input",action="append",help=argparse.SUPPRESS); p.add_argument("--resume-session"); p.add_argument("--resume-last",action="store_true"); p.add_argument("--auto-flag",default="--auto")
     p=sub.add_parser("gate"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",action="append",required=True); p.add_argument("--event-dir",type=Path)
-    for name in ("inspect","follow"):
+    for name in ("inspect","follow","retire"):
         p=sub.add_parser(name); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--event-dir",type=Path)
         if name=="inspect": p.add_argument("--details",action="store_true")
         if name=="follow":
             p.add_argument("--interval",type=float,default=15.0); p.add_argument("--timeout",type=float)
+        if name=="retire": p.add_argument("--reason",required=True)
     return ap
 
 
 def main()->int:
     args=parser().parse_args()
     try:
-        out=command_launch(args) if args.command=="launch" else command_gate(args) if args.command=="gate" else command_inspect(args) if args.command=="inspect" else command_follow(args)
+        out=command_launch(args) if args.command=="launch" else command_gate(args) if args.command=="gate" else command_inspect(args) if args.command=="inspect" else command_retire(args) if args.command=="retire" else command_follow(args)
         print(json.dumps(out,sort_keys=True,separators=(",",":"))); return 0
     except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
         print(json.dumps({"ok":False,"command":getattr(args,"command",None),"error":str(exc)},sort_keys=True,separators=(",",":")))

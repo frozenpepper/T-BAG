@@ -131,6 +131,8 @@ assert.ok(!spawnCalls[0].includes("--timeout"), "adapter must preserve core role
 const explicit = JSON.parse(await plugin.tool.tbag_follow.execute(first, context))
 assert.equal(explicit.armed, true)
 assert.equal(explicit.already_armed, true)
+assert.equal(explicit.observer_healthy, true)
+assert.equal(explicit.heartbeat_registered, true)
 assert.equal(spawnCalls.filter((x) => x[2] === "follow").length, 1)
 assert.equal(syncCalls.filter((x) => x[2] === "inspect").length, 1, "explicit follow should be cheap when exact attempt is already armed")
 
@@ -141,7 +143,7 @@ assert.equal(prompts.length, 0)
 await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses-main" } } })
 await tick()
 assert.equal(prompts.length, 1)
-assert.match(prompts[0].body.parts[0].text, /reconcile-run/)
+assert.match(prompts[0].body.parts[0].text, /parent_tick\.py tick/)
 assert.match(prompts[0].body.parts[0].text, /tbag_follow/)
 assert.doesNotMatch(prompts[0].body.parts[0].text, /tbag_launch/)
 

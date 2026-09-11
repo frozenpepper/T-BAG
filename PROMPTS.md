@@ -4,14 +4,13 @@ Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HA
 
 **OpenCode parent:** detached core launch → immediate `tbag_follow` with the exact tuple returned by `dsd_attempt.py launch`. Call even if auto-armed; it is idempotent/backward-compatible.
 
-## Resume / turn boundary
+## Parent tick / turn boundary
 
 ```bash
-python3 <skill>/scripts/dsd_task.py reconcile-run --run-root ... [--phase-id ...] [--details]
-python3 <skill>/scripts/dsd_task.py idle-check    --run-root ... [--phase-id ...]
+python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-After reconcile, `dsd_task.py advance --run-root ... [--phase-id ...]` collapses decided transitions until a launch/semantic boundary. It never waits or chooses a model.
+Run on owner turn/resume/wake/heartbeat. The packet owns reconcile, advance, monitoring, updates and end-state routing. After sending `owner_update`, acknowledge its token with `parent_tick.py ack-update`; on `completion-candidate`, replan or `parent_tick.py finish --reason "..."` after confirming plan exhaustion.
 
 ## Initialize runtime
 
@@ -48,18 +47,19 @@ python3 <skill>/scripts/dsd_task.py plan-review \
   --outcome pass|fail|escalate --report .../report.md
 ```
 
-FAIL resumes Planner then uses a **new** Plan Reviewer; PASS permits acceptance/rules creation.
+FAIL resumes Planner; review again fresh. PASS permits acceptance/rules creation.
 
 ## Register an Analyst graph
 
-Analyst preflights before handoff; registration repeats it:
+Analyst preflights before handoff; registration repeats it. For an amendment/replan, **record `analysis-result --outcome replan` first, then register the graph**:
 
 ```bash
+python3 <skill>/scripts/dsd_task.py analysis-result --run-root ... --phase-id phase-1 --task-id PLAN-X --outcome replan --report .../report.md
 python3 <skill>/scripts/dsd_task.py preflight-plan --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
 python3 <skill>/scripts/dsd_task.py register-plan  --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
 ```
 
-`register-plan` returns `ready_registered`; use `ready` only for an explicit inventory.
+`register-plan` returns `ready_registered`.
 
 ## Launch / inspect / observe
 
@@ -68,7 +68,7 @@ python3 <skill>/scripts/dsd_attempt.py launch  --run-root ... --phase-id phase-1
 python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1 --task-id T01
 ```
 
-`inspect`: elapsed/report age; running means **progress unknown**. Observation is harness-owned: OpenCode uses `OPENCODE.md`; other adapters use `HARNESS.md`. Core defaults are 2h for Grunts and 6h for Analysts.
+`inspect` remains a diagnostic surface. Routine monitoring belongs to `parent_tick.py tick`: final-report/no-terminal attempts are retired after a short grace; silent anomalies use the existing role-history detector plus a confirmation window before retirement. Active logs remain progress-unknown and are not killed merely for being long.
 
 ## Gate / Review / Fix
 
@@ -100,7 +100,7 @@ On Human-blocked follow-up triage, `--route accept` cancels its findings and pre
 
 ## Cleanup / interrupted process
 
-Normal cleanup is automatic: integration retires task runtime; `reconcile-run` reaps safe leftovers; a cleanup-safe `completed` run purges its owned runtime. Manual commands are diagnostics/recovery only:
+Cleanup is lifecycle-owned; these are diagnostics/recovery only:
 
 ```bash
 python3 <skill>/scripts/dsd_workspace.py cleanup-phase --run-root ... --phase-id phase-1
@@ -108,7 +108,7 @@ python3 <skill>/scripts/dsd_task.py sweep-stale --run-root ... --phase-id phase-
 python3 <skill>/scripts/dsd_workspace.py purge-run --run-root ... --dry-run
 ```
 
-`cleanup --force --reason "..."` is explicit abandonment, never a way around an undisposed mutable delta. `~/.cache/t-bag` is shared; never raw-delete it or sibling runtimes.
+`cleanup --force --reason "..."` is explicit abandonment; never raw-delete shared cache/runtime paths.
 
 ## Same-session continuation
 
@@ -120,10 +120,10 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 
 
 ## Owner-requested status
 
-Use `dsd_task.py owner-status --run-root ... [--phase-id ...]` for concise purpose-first owner context; use `reconcile-run --details` only for internal inventory. Never `cat`/tail raw artifacts. For legacy/non-gate reports only:
+Use `dsd_task.py owner-status --run-root ... [--phase-id ...]`; `reconcile-run --details` is internal inventory. For legacy/non-gate reports only:
 
 ```bash
 python3 <skill>/scripts/report_surface.py --report .../report.md --lines 8 --chars 1600
 ```
 
-If the bounded surface is insufficient, resume/clarify the worker; do not shadow-review the body.
+If insufficient, resume/clarify the worker; do not shadow-review.

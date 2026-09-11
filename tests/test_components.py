@@ -474,7 +474,7 @@ class ComponentsTests(unittest.TestCase):
         self.register_impl('T1','P1')
         cp=subprocess.run([sys.executable,str(SCRIPTS/'context_checkpoint.py'),'--project-root',str(self.project),'--run-root',str(self.run),'instruction'],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         self.assertEqual(cp.returncode,0,cp.stderr)
-        self.assertIn('reconcile-run',cp.stdout)
+        self.assertIn('parent_tick.py tick',cp.stdout)
         self.assertNotIn('ready --run-root',cp.stdout)
         self.assertFalse((self.run/'checkpoints').exists())
         help_text=subprocess.run([sys.executable,str(SCRIPTS/'context_checkpoint.py'),'--help'],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True).stdout
@@ -488,7 +488,7 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(cp.returncode,5); self.assertIn('AMBIGUOUS_RUN',cp.stderr); self.assertIn('TBAG_RUN_ROOT',cp.stderr)
         env=os.environ.copy(); env['TBAG_RUN_ROOT']=str(other)
         cp=subprocess.run([sys.executable,str(SCRIPTS/'context_checkpoint.py'),'--project-root',str(self.project),'instruction'],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env)
-        self.assertEqual(cp.returncode,0,cp.stderr); self.assertIn(str(other),cp.stdout); self.assertIn('reconcile-run',cp.stdout)
+        self.assertEqual(cp.returncode,0,cp.stderr); self.assertIn(str(other),cp.stdout); self.assertIn('parent_tick.py tick',cp.stdout)
 
     def test_all_parent_harness_adapters_install_without_legacy_control_plane(self):
         for harness in ('codex','claude-code','opencode','kilo'):
@@ -497,14 +497,14 @@ class ComponentsTests(unittest.TestCase):
                 cp=subprocess.run([sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness',harness,'--project-root',str(project),'--skill-root',str(ROOT)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                 self.assertEqual(cp.returncode,0,cp.stderr)
                 data=json.loads(cp.stdout)
-                helper=project/'TBag'/'tools'/'context_checkpoint.py'; task_helper=project/'TBag'/'tools'/'dsd_task.py'; attempt_helper=project/'TBag'/'tools'/'dsd_attempt.py'
-                self.assertTrue(helper.is_file()); self.assertTrue(task_helper.is_file()); self.assertTrue(attempt_helper.is_file())
+                helper=project/'TBag'/'tools'/'context_checkpoint.py'; task_helper=project/'TBag'/'tools'/'dsd_task.py'; attempt_helper=project/'TBag'/'tools'/'dsd_attempt.py'; tick_helper=project/'TBag'/'tools'/'parent_tick.py'
+                self.assertTrue(helper.is_file()); self.assertTrue(task_helper.is_file()); self.assertTrue(attempt_helper.is_file()); self.assertTrue(tick_helper.is_file())
                 self.assertFalse((project/'TBag'/'tools'/'dsd_state.py').exists())
                 self.assertIn(str((SCRIPTS/'context_checkpoint.py').resolve()),helper.read_text())
-                self.assertIn(str((SCRIPTS/'dsd_task.py').resolve()),task_helper.read_text()); self.assertIn(str((SCRIPTS/'dsd_attempt.py').resolve()),attempt_helper.read_text())
+                self.assertIn(str((SCRIPTS/'dsd_task.py').resolve()),task_helper.read_text()); self.assertIn(str((SCRIPTS/'dsd_attempt.py').resolve()),attempt_helper.read_text()); self.assertIn(str((SCRIPTS/'parent_tick.py').resolve()),tick_helper.read_text())
                 if harness=='opencode':
                     self.assertEqual(data['interactive_supervision'],'detached-core-launch-then-tbag-follow')
-                    self.assertEqual(data['autonomous_supervision'],'per-attempt-tbag-follow-wake')
+                    self.assertEqual(data['autonomous_supervision'],'per-attempt-wake-plus-parent-heartbeat')
                     self.assertEqual(data['required_live_tool'],'tbag_follow'); self.assertFalse(data['live_capability_verified'])
                     self.assertTrue(data['disk_matches_source']); self.assertEqual(data['source_sha256'],data['installed_sha256'])
                     plugin=project/'.opencode'/'plugins'/'tbag.js'; self.assertTrue(plugin.is_file())
@@ -532,7 +532,7 @@ class ComponentsTests(unittest.TestCase):
         cp=subprocess.run([sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','opencode','--project-root',str(project),'--skill-root',str(ROOT)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         self.assertEqual(cp.returncode,0,cp.stderr); data=json.loads(cp.stdout)
         self.assertEqual(data['interactive_supervision'],'detached-core-launch-then-tbag-follow')
-        self.assertEqual(data['autonomous_supervision'],'per-attempt-tbag-follow-wake')
+        self.assertEqual(data['autonomous_supervision'],'per-attempt-wake-plus-parent-heartbeat')
         self.assertEqual(data['required_live_tool'],'tbag_follow'); self.assertFalse(data['live_capability_verified'])
         self.assertTrue(data['changed']); self.assertTrue(data['disk_matches_source']); self.assertEqual(data['source_sha256'],data['installed_sha256'])
         self.assertTrue(Path(data['backup']).is_file())
@@ -574,7 +574,8 @@ class ComponentsTests(unittest.TestCase):
         self.assertNotIn('must use tbag_launch',text); self.assertNotIn('String(args.timeout ?? 21600)',text)
         self.assertNotIn('sessionRuntime',text); self.assertNotIn('sessionIsIdle',text); self.assertNotIn('runtime.model',text)
         self.assertNotIn('OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS',text); self.assertNotIn('promptAsync',text)
-        self.assertNotIn('setInterval(',text); self.assertNotIn('setTimeout(',text)
+        self.assertIn('runHeartbeats',text); self.assertIn('HEARTBEAT_MS',text); self.assertIn('setInterval(',text); self.assertIn('heartbeatTimer.unref',text)
+        self.assertNotIn('setTimeout(',text)
         self.assertEqual(text.count('export default TBagPlugin'),1); self.assertNotIn('export const TBagPlugin',text)
         node=shutil.which('node')
         if node:

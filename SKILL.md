@@ -16,15 +16,17 @@ Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs a
 
 ## Parent loop
 
-1. **Reconcile first.** On start/resume run `dsd_task.py reconcile-run`; when deterministic transitions are pending, `advance` may collapse them until the next launch or semantic boundary. Select/load exactly one parent harness adapter before the first worker launch. In OpenCode, refresh the project adapter once per parent start/resume and require stable `tbag_follow` before autonomous wakes. Launch READY work before housekeeping. If orientation requires technical archaeology, delegate Discovery instead of doing it as parent.
+Every owner turn, resume or harness wake starts with **`parent_tick.py tick`**. It reconciles, advances decided transitions, monitors live work and returns one continue/launch/yield/update/intervene/finish boundary. Wakes are hints, never supervision truth.
+
+1. **Tick first.** Load one harness adapter, consume the tick packet, and never reconstruct a parallel monitor loop. Launch READY work before housekeeping; delegate technical archaeology to Discovery.
    Resolve missing Analyst/Grunt runtime from supplied authority/config; if still unknown, ask the user **once**. Never invent it; `MISSING_RUNTIME_CONFIG` blocks launch.
 2. **Establish authority.** Substantial work needs an accepted plan. With only a goal: Goal Planner → fresh Plan Reviewer until PASS. Parent never authors or repairs technical plans.
 3. **Expose executable work only when needed.** Analyst findings may close as findings. When decomposition/replanning is actually needed, Planner/Discovery/Surveyor emits briefs + `plan/task-graph.json`; register that graph verbatim after mechanical preflight. Never invent a duplicate graph merely to satisfy a role label. Keep unresolved root cause/architecture with Analysts, not Grunts.
 4. **Schedule aggressively but safely.** Launch dependency-ready tasks up to budget. Mutating tasks use isolated worktrees; standalone read-only roles inspect a shared frozen project view. Dependencies that change project state integrate before dependents run.
 5. **Run the Grunt loop.** Implementer → fresh Reviewer. PASS → land; FAIL → Fixer resumes that Reviewer → fresh Review. Material out-of-brief obligations use Review `Follow-up obligations`; new phase launches pause until Analyst triage. ESCALATE → central escalation.
 6. **Escalate authority separately from runtime strength.** Grunt → Analyst → Human is the authority ladder. Optional stronger profiles stay cold until owner direction or exact `ESCALATE CAPABILITY`; stronger models never gain wider authority.
-7. **Continue from durable truth.** Evidence gating is not semantic PASS. Interrupted work that remains inside authority retries retained state. A very long/silent call is ambiguous: consider endpoint trouble, oversized task shape, insufficient capability, or legitimate long work; split oversized work before buying strength.
-8. **Gate phases; launch/arm/yield attempts.** Completed non-bootstrap phases require a fresh Phase Gate; its readable report lives in run `plan/`. Ordinary `launch` stays detached. Every live attempt must have the selected harness observer armed before the turn ends. **OpenCode:** `OPENCODE.md` is the sole protocol; use the normal detached core `launch`, immediately call `tbag_follow`, re-arm live attempts after wake/resume, then yield. File/log activity proves liveness, not semantic progress; never run core `follow`, sleep, poll, Python-wait or another watcher.
+7. **Continue from durable truth.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, confirmed silence and final-report/no-terminal hangs; lifecycle retirement preserves retained recovery state.
+8. **Gate phases; launch/arm/yield attempts.** Non-bootstrap phases require fresh Phase Gates. In OpenCode, `OPENCODE.md` is the sole protocol: normal detached core `launch`, immediately call `tbag_follow`, then yield. Observer wakes are fast hints; heartbeat ticks recover missed wakes. Never run core `follow` or model-authored wait/poll loops.
 
 ## Non-negotiable boundaries
 
@@ -39,9 +41,7 @@ Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs a
 
 ## Owner communication
 
-Normal transitions are silent. Speak for an explicit status/report request, a Human decision/blocker, material safety/recovery issue, or terminal/milestone state.
-
-Owner reports assume the user does not know task IDs or subsystem jargon. Use `owner-status`; explain **purpose before internals**, then IDs only as secondary references. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**. Phase-Gate outcomes are contextual milestones. Never sell task counts as progress.
+The tick decides when an owner update is due: decisions/recovery/end-state immediately, plus a periodic active-work heartbeat. Send its purpose-first digest, then acknowledge its token; never ack an unsent update. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**. Never sell task counts as progress. `completion-candidate` is an explicit end boundary: finish only after confirming accepted-plan obligations are exhausted; otherwise replan.
 
 ## Instruction architecture
 

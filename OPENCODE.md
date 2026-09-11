@@ -20,15 +20,15 @@ If `tbag_follow` is absent, do not improvise a foreground waiter or scheduler. S
 
 There is exactly one parent protocol, including across adapter upgrades:
 
-1. Run `reconcile-run` first and process authorized lifecycle actions.
-2. For each new task attempt, run the normal detached core `dsd_attempt.py launch` command. Its JSON result contains `run_root`, `phase_id`, `task_id`, and `event_dir`.
-3. **Immediately call `tbag_follow`** with those exact four values. Always make this call, even on a host with the newest adapter: it is idempotent and may simply return `already_armed:true` because the adapter safety hook armed the observer before Bash returned.
-4. For every attempt in `reconcile-run.live_attempts` after wake, resume, compaction, or plugin reload, call the same `tbag_follow` operation with its exact recorded tuple.
-5. Refill free worker slots. Before ending the routine turn, every live attempt must have an observer armed.
-6. When no immediate lifecycle action remains, **end the parent turn**. Do not keep OpenCode alive with Bash, Python, `sleep`, polling, or a blocking tool.
-7. Per-attempt observer completion wakes the same parent session. Return to step 1. Reconciliation is authoritative and idempotent, so duplicate/coalesced wakes are harmless.
+1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Do not separately reconstruct reconcile/advance/monitor/update state.
+2. Process the tick packet until it reaches a launch/semantic/owner boundary. If it says `actions-ready`, execute only those authorized actions and tick again.
+3. For each new attempt run normal detached `dsd_attempt.py launch`, then **immediately call `tbag_follow`** with its exact returned tuple. This also registers the run for the adapter's low-frequency heartbeat.
+4. `tbag_follow already_armed:true` is only returned for an observer entry whose process still appears live; it is not semantic progress. The next tick remains authoritative.
+5. If the tick says `owner_update.due`, send the bounded purpose-first update and then `parent_tick.py ack-update --token ...`.
+6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
+7. Do not keep the conversation alive with Bash/Python sleeps or polling. Per-attempt completion requests an early tick; a periodic transport heartbeat requests another tick even when a wake was lost.
 
-This is the field-proven Muse sequence made canonical. The model still chooses the authorized task; the adapter only observes a concrete already-launched attempt.
+The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth.
 
 ## Safety auto-arm (new adapter, not protocol authority)
 
@@ -49,9 +49,9 @@ Direct Bash/Python `dsd_attempt.py follow` remains forbidden because it can mono
 
 OpenCode session lifecycle events are used only as a thin transport interlock. If an observer finishes while the parent is still busy, the plugin coalesces one **in-memory wake bit** for that session and flushes it when OpenCode reports idle (or releases the busy turn on a terminal session error). A completion that races the wake-generated parent turn receives one final non-blocking flush when that turn releases.
 
-The wake bit is disposable. Durable T-BAG state remains authoritative: after plugin/server restart or a lost wake submission, the next owner turn begins with `reconcile-run`, which rediscovers terminal-but-ungated attempts and reports already-live attempts that need re-arming. Session deletion suppresses obsolete wake delivery; a successor parent simply reconciles and re-arms under its own session.
+Wake state is disposable. Per-attempt wakes are only fast hints; the run heartbeat requests another parent tick when one is lost. The tick re-derives live/terminal/action state from durable T-BAG files. Session deletion suppresses obsolete delivery; a successor session registers its own heartbeat on `tbag_follow`.
 
-The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists notification state.
+The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists semantic notification state.
 
 ## Forbidden substitutes
 
@@ -59,11 +59,11 @@ Do **not** use:
 
 - direct Bash/Python `dsd_attempt.py follow` from the OpenCode parent;
 - `sleep`, polling, repeated reconcile loops, or a long-running Python/tool call to stay active;
-- `tbag_supervise`, `wait-edge`, watcher daemons, sentinel files, run-wide supervisors, or background subagent relays;
+- model-authored polling/wait loops, sentinel-file schedulers, or background subagent relays. The built-in adapter heartbeat is allowed because it grants no task authority and only requests a deterministic parent tick;
 - a model-authored scheduler or a tool call kept open merely so the parent will be awakened later.
 
 Do not block merely because a newer optional adapter capability is absent. The stable contract is core detached launch + `tbag_follow`.
 
 ## Compaction
 
-The project plugin injects reconcile-first orientation plus the launch → follow → yield invariant into compaction context. It creates no parallel checkpoint stream.
+The project plugin injects tick-first orientation plus launch → follow → yield. It creates no parallel checkpoint stream.

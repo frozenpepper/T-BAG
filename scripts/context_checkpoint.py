@@ -68,7 +68,7 @@ def instruction(project: Path, run_arg: str | None) -> str:
     run = choose_run(project, run_arg)
     return "\n".join([
         f"Resume T-BAG run `{run}`.",
-        f"First run `python3 <skill>/scripts/dsd_task.py reconcile-run --run-root {run}` and follow returned lifecycle actions/READY work before housekeeping.",
+        f"First run `python3 <skill>/scripts/parent_tick.py tick --run-root {run}` and follow its continue/launch/update/intervene/finish boundary; do not reconstruct a separate monitor loop.",
         "Do not reconstruct technical history from chat or scan every report. Open only evidence needed for the next routing decision; ambiguous technical orientation belongs to Analyst Discovery.",
     ])
 
