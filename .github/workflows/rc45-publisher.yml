@@ -1,0 +1,61 @@
+name: RC45 candidate publisher
+on:
+  push:
+    branches: [rc45-publisher]
+    paths:
+      - 'publisher/**'
+      - '.github/workflows/rc45-publisher.yml'
+permissions:
+  contents: write
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply RC45 parent-control layer
+        env:
+          EXPECTED_BASE: abefa76333defa8c7a9c8fb5dc4297353fc42b85
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc45-publisher:refs/remotes/origin/rc45-publisher
+          mkdir -p /tmp/rc45
+          for f in parent_tick.py test_rc45_parent_tick.py patch_rc45.py patch_rc45_followup.py patch_rc45_install.py; do
+            git show "origin/rc45-publisher:publisher/$f" > "/tmp/rc45/$f"
+          done
+          cp /tmp/rc45/parent_tick.py scripts/parent_tick.py
+          cp /tmp/rc45/test_rc45_parent_tick.py tests/test_rc45_parent_tick.py
+          python3 /tmp/rc45/patch_rc45.py
+          python3 /tmp/rc45/patch_rc45_followup.py
+          python3 /tmp/rc45/patch_rc45_install.py
+          git add CHANGELOG.md SKILL.md OPENCODE.md PROMPTS.md adapters/opencode/tbag.js scripts/context_checkpoint.py scripts/dsd_attempt.py scripts/dsd_task.py scripts/install_harness_adapter.py scripts/parent_tick.py scripts/run_worker.py tests/test_rc45_parent_tick.py
+          git diff --cached --check
+          test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nOPENCODE.md\nPROMPTS.md\nSKILL.md\nadapters/opencode/tbag.js\nscripts/context_checkpoint.py\nscripts/dsd_attempt.py\nscripts/dsd_task.py\nscripts/install_harness_adapter.py\nscripts/parent_tick.py\nscripts/run_worker.py\ntests/test_rc45_parent_tick.py'
+      - name: Focused RC45 regressions
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc45_parent_tick -v
+          python3 -m compileall -q scripts tests
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+      - name: Full regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+      - name: Publish candidate commit
+        run: |
+          set -euo pipefail
+          git config user.name 'T-BAG Publisher'
+          git config user.email 'tbag-publisher@users.noreply.github.com'
+          git commit -m 'RC45: add durable parent tick and bounded supervision'
+          git push origin HEAD:refs/heads/rc45-built --force
