@@ -2,6 +2,13 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC44 — shared dependency fixtures without fat workrooms
+
+- Replaced per-task `node_modules` fixture duplication with one run-owned immutable dependency generation keyed by the nearest package-manager lockfile authority (plus `package.json` / npm installation lock when present). Fixture provenance can originate only from primary or the run-owned fixture store, never another task room.
+- Read-only tasks with a safe lockfile-backed dependency fixture now stay on reusable frozen analysis views and mount the immutable generation read-only instead of allocating a private worktree. Mutable tasks receive a private copy-on-write clone when the filesystem supports it, with ordinary copy as the portability fallback.
+- Dependency refresh is lockfile-aware: while the task lockfile still matches, the private fixture can be deterministically reset from the frozen generation; after the task changes its lockfile, T-BAG preserves that task-private dependency state rather than overwriting it with stale primary dependencies.
+- Runtime reconciliation garbage-collects fixture generations only after no live workspace or retained analysis view references them. Generic/non-shareable fixtures keep the conservative frozen-copy path.
+
 ## v2.2.0 RC43 — OpenCode bootstrap lock self-recovery
 
 - Removed T-BAG's own same-DB startup race for stable OpenCode workers. `opencode run` now uses `--format json`, whose raw events carry the root `sessionID`; live session capture reads that worker stream directly instead of spawning `opencode session list` against the same fresh task-local `OPENCODE_DB` while the worker is booting.

@@ -48,7 +48,7 @@ Allocation follows mutation needs:
 
 A successful integration invalidates the current analysis generation; existing readers keep it and later readers get a fresh one. Analysis-view index/cache drift self-heals on reuse; orphan derived views are reclaimed, while referenced ones stay frozen. Primary commits/detectable tracked dirty-state changes also rotate it. Ambient untracked changes do not. If an external tool changes only an already-dirty tracked path's contents, invalidate before new readers launch.
 
-**Ambient untracked/ignored files are not mirrored.** A reviewed non-tracked addition becomes later project state across phases; current primary bytes win. Other ignored inputs belong under `Required worktree fixtures`; files or directory trees such as `node_modules` are copied before launch and missing fixtures fail early. Presence is not freshness: rebuild derived ignored artifacts inside the isolated verification workspace. A commit is not a build; copied `dist` may be stale.
+**Ambient untracked/ignored files are not mirrored.** Reviewed additions become later project state; other ignored inputs require `Required worktree fixtures`. Lockfile-backed `node_modules` uses one run-owned immutable generation: read-only views borrow it, mutable rooms get private CoW clones (copy fallback), never from sibling rooms. Other fixtures keep frozen copies. Missing fixtures fail early; derived freshness remains task-owned.
 
 Before each attempt, mutable state is checkpointed; read-only work uses the frozen view baseline. Attempts record the checkpoint OID. A cold base-role retry refreshes to current primary only with **no task delta**; retained work is never silently rebased. Scope evidence answers what moved during that attempt, not whether the repository was globally clean.
 
@@ -91,7 +91,7 @@ The retained workspace is the durable implementation state. A missing process/re
 
 Cleanup is automatic. Read-only results release DB/view bindings; integration retires its worktree, fixture snapshot, branches and CLI DB. `reconcile-run` reaps safe leftovers/orphan DBs; `completed` purges only owned runtime. Durable `PROJECT/TBag` state remains.
 
-Supersession is **delta-aware**: release read-only/empty rooms, frozen `carry_from`, explicit `rederive_from_primary`, or a delta already present in primary; retain any unique undisposed delta. `--force` needs a reason and cannot bypass live/unresolved or undisposed-delta protection. Launcher fixtures are inputs: exclude them from evidence/integration, forbid write overlap, and delete snapshots on retirement.
+Supersession is **delta-aware**: release read-only/empty rooms, frozen `carry_from`, explicit `rederive_from_primary`, or a delta already present in primary; retain any unique undisposed delta. `--force` needs a reason and cannot bypass live/unresolved or undisposed-delta protection. Fixtures stay outside evidence/integration; private snapshots retire immediately, shared generations after their last binding.
 
 `~/.cache/t-bag` is shared; one run owns only `run.json.runtime_root`. Never raw-delete shared state. `cleanup-phase`/`purge-run --dry-run` are diagnostics, not routine parent chores.
 

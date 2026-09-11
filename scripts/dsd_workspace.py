@@ -156,6 +156,7 @@ def _make_tree_read_only(root: Path) -> None:
     # execute bits where they already exist so scripts remain inspectable/runnable.
     for path in sorted(root.rglob("*"), key=lambda x: len(x.parts), reverse=True):
         try:
+            if path.is_symlink(): continue
             mode=path.stat().st_mode
             if path.is_dir(): path.chmod(mode & ~0o222)
             else: path.chmod(mode & ~0o222)
@@ -168,6 +169,7 @@ def _make_tree_owner_writable(root: Path) -> None:
     if not root.exists(): return
     for path in [root,*root.rglob("*")]:
         try:
+            if path.is_symlink(): continue
             mode=path.stat().st_mode
             if path.is_dir(): path.chmod(mode | 0o700)
             else: path.chmod(mode | 0o600)
@@ -202,7 +204,8 @@ def gc_analysis_views(run: Path, *, drop_current_if_unused: bool = False) -> lis
             path=Path(str(item.get("path") or "")).resolve()
             stale=bool(item.get("stale"))
             unused_current = drop_current_if_unused and str(path)==current and str(path) not in refs
-            if (stale and str(path) not in refs) or unused_current:
+            unused_fixture_variant = bool(item.get("fixture_bindings")) and str(path)!=current and str(path) not in refs
+            if (stale and str(path) not in refs) or unused_current or unused_fixture_variant:
                 _make_tree_owner_writable(path)
                 run_cmd(["git","worktree","remove","--force",str(path)],primary,check=False)
                 if path.exists(): shutil.rmtree(path,ignore_errors=True)
@@ -215,9 +218,11 @@ def gc_analysis_views(run: Path, *, drop_current_if_unused: bool = False) -> lis
 
 
 def _invalidate_analysis_view_unlocked(run: Path) -> None:
-    index=_load_analysis_view_index(run); current=str(index.get("current") or "")
+    index=_load_analysis_view_index(run)
+    # More than one read-only view may coexist when their immutable fixture bindings
+    # differ. Integration changes the project snapshot authority for every variant.
     for item in index.get("views",[]):
-        if isinstance(item,dict) and str(Path(str(item.get("path") or "")).resolve())==current:
+        if isinstance(item,dict) and not item.get("stale"):
             item["stale"]=True; item["stale_at"]=now()
     index["current"]=None; _write_analysis_view_index(run,index)
 
@@ -258,28 +263,53 @@ def _view_matches_primary(item: dict[str, Any], run: Path, primary: Path) -> boo
     return item.get("primary_head")==head and item.get("primary_status")==status
 
 
-def acquire_analysis_view(run: Path) -> dict[str, Any]:
-    """Return the current shared frozen project view, creating one when needed."""
+def _fixture_binding_key(bindings: list[dict[str, Any]] | None) -> str:
+    canonical=[]
+    for item in bindings or []:
+        canonical.append({
+            "path":str(item.get("path") or ""),
+            "fingerprint":str(item.get("fingerprint") or ""),
+            "source_kind":str(item.get("source_kind") or ""),
+        })
+    return json.dumps(sorted(canonical,key=lambda x:(x["path"],x["fingerprint"])),sort_keys=True,separators=(",",":"))
+
+
+def _analysis_view_bindings_match(item: dict[str, Any], bindings: list[dict[str, Any]]) -> bool:
+    return str(item.get("fixture_binding_key") or _fixture_binding_key([]))==_fixture_binding_key(bindings)
+
+
+def _bind_read_only_fixtures(view: Path, bindings: list[dict[str, Any]]) -> None:
+    """Expose immutable fixture-store payloads inside one frozen analysis view."""
+    for binding in bindings:
+        rel=str(binding.get("path") or ""); source=Path(str(binding.get("store_payload") or "")).resolve(); dst=view/rel
+        if not rel or not source.exists(): raise ValueError(f"read-only fixture binding is unavailable: {rel}")
+        if dst.exists() or dst.is_symlink():
+            if dst.is_symlink() and dst.resolve()==source: continue
+            raise ValueError(f"analysis view fixture path collides with project state: {rel}")
+        dst.parent.mkdir(parents=True,exist_ok=True); dst.symlink_to(source,target_is_directory=source.is_dir())
+
+
+def acquire_analysis_view(run: Path, fixture_bindings: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Return a reusable frozen project view for one immutable fixture-binding set."""
+    requested=list(fixture_bindings or []); requested_key=_fixture_binding_key(requested)
     info=dsd_task.load_run(run); primary=Path(info["project_root"]).resolve()
     with dsd_task.file_lock(run/".workspace.lock", shared=True):
         index=_load_analysis_view_index(run); current=str(index.get("current") or "")
-        if current:
-            for item in index.get("views",[]):
-                if isinstance(item,dict) and not item.get("stale") and str(Path(str(item.get("path") or "")).resolve())==current and Path(current).is_dir() and _view_matches_primary(item,run,primary):
-                    return dict(item)
-    # Creation mutates Git worktree metadata, so serialize it against integration and
-    # other view creation. Recheck after taking the exclusive lock.
+        for item in reversed(index.get("views",[])):
+            path=Path(str(item.get("path") or "")) if isinstance(item,dict) else Path()
+            if not isinstance(item,dict) or str(path.resolve())!=current or item.get("stale") or not _analysis_view_bindings_match(item,requested): continue
+            if path.is_dir() and _view_matches_primary(item,run,primary): return dict(item)
+    # Creation/reselection mutates shared view metadata, so serialize it against
+    # integration and GC. Recheck after taking the exclusive lock.
     with dsd_task.file_lock(run/".workspace.lock"):
-        index=_heal_analysis_view_index_unlocked(run,primary,_load_analysis_view_index(run)); current=str(index.get("current") or "")
-        if current:
-            for item in index.get("views",[]):
-                if not isinstance(item,dict) or str(Path(str(item.get("path") or "")).resolve())!=current: continue
-                if not item.get("stale") and Path(current).is_dir() and _view_matches_primary(item,run,primary):
-                    return dict(item)
-                if not item.get("stale"):
-                    item["stale"]=True; item["stale_at"]=now(); item["stale_reason"]="primary-state-changed-outside-view"
-                index["current"]=None; _write_analysis_view_index(run,index); current=""
-                break
+        index=_heal_analysis_view_index_unlocked(run,primary,_load_analysis_view_index(run))
+        for item in reversed(index.get("views",[])):
+            if not isinstance(item,dict) or item.get("stale") or not _analysis_view_bindings_match(item,requested): continue
+            path=Path(str(item.get("path") or ""))
+            if path.is_dir() and _view_matches_primary(item,run,primary):
+                index["current"]=str(path.resolve()); _write_analysis_view_index(run,index); return dict(item)
+            if not item.get("stale"):
+                item["stale"]=True; item["stale_at"]=now(); item["stale_reason"]="primary-state-changed-outside-view"
         root=analysis_views_root(run); root.mkdir(parents=True,exist_ok=True)
         generation=int(index.get("next_generation") or 1); path=root/f"v{generation:04d}"
         if path.exists(): raise ValueError(f"analysis-view path already exists: {path}")
@@ -294,9 +324,10 @@ def acquire_analysis_view(run: Path) -> dict[str, Any]:
             if integrated_paths: run_cmd(["git","add","-f","--",*integrated_paths],path)
             run_cmd(internal_git(run,"-c","user.name=TBag","-c","user.email=analyst-grunt@local","commit","--allow-empty","-m",f"T-BAG shared analysis view {generation}"),path)
             baseline=git_text(path,"rev-parse","HEAD")
+            _bind_read_only_fixtures(path,requested)
             _make_tree_read_only(path)
             primary_head,primary_status=_primary_view_marker(primary)
-            item={"format":ANALYSIS_VIEW_FORMAT,"generation":generation,"path":str(path.resolve()),"baseline_ref":baseline,"primary_head":primary_head,"primary_status":primary_status,"integrated_primary_inputs":integrated_inputs,"created_at":now(),"stale":False}
+            item={"format":ANALYSIS_VIEW_FORMAT,"generation":generation,"path":str(path.resolve()),"baseline_ref":baseline,"primary_head":primary_head,"primary_status":primary_status,"integrated_primary_inputs":integrated_inputs,"fixture_binding_key":requested_key,"fixture_bindings":requested,"created_at":now(),"stale":False}
             index["views"].append(item); index["current"]=str(path.resolve()); index["next_generation"]=generation+1; _write_analysis_view_index(run,index)
             return dict(item)
         except Exception:
@@ -306,12 +337,15 @@ def acquire_analysis_view(run: Path) -> dict[str, Any]:
             raise
 
 
-def task_can_use_analysis_view(task: dict[str, Any], role: str, task_text: str) -> bool:
+def task_can_use_analysis_view(task: dict[str, Any], role: str, task_text: str, primary: Path | None = None) -> bool:
     if task.get("requires_integration"): return False
     if role not in ALWAYS_READ_ONLY_ROLES: return False
-    if required_worktree_fixtures(task_text): return False
-    return True
-
+    fixtures=required_worktree_fixtures(task_text)
+    if not fixtures: return True
+    if primary is None: return False
+    # Only dependency fixtures with a deterministic lockfile identity are safe to
+    # share. Unknown/private fixtures retain the older isolated-copy path.
+    return all(dependency_fixture_identity(primary,rel) is not None for rel in fixtures)
 
 def prepare_launch_workspace(run: Path, phase: str, task_id: str, role: str) -> dict[str, Any]:
     """Resolve a stable project view for launch without over-allocating worktrees.
@@ -329,12 +363,18 @@ def prepare_launch_workspace(run: Path, phase: str, task_id: str, role: str) -> 
         # their task record but release runtime state between fresh attempts.
         existing.unlink()
     task=dsd_task.load_task(run,phase,tid); brief=Path(str(task.get("brief") or "")).read_text(encoding="utf-8",errors="replace")
-    if not task_can_use_analysis_view(task,role,brief):
+    info=dsd_task.load_run(run); primary=Path(info["project_root"]).resolve()
+    if not task_can_use_analysis_view(task,role,brief,primary):
         class A: pass
         a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid
         return command_create(a)
-    view=acquire_analysis_view(run); info=dsd_task.load_run(run); runtime=Path(info["runtime_root"]).resolve(); db=runtime/"opencode-db"/safe_component(phase)/f"{safe_component(tid)}.sqlite"; db.parent.mkdir(parents=True,exist_ok=True)
-    data={"format":FORMAT,"mode":"analysis-view","phase_id":phase,"task_id":tid,"primary_root":str(Path(info["project_root"]).resolve()),"worktree":view["path"],"baseline_ref":view["baseline_ref"],"analysis_view_generation":view["generation"],"db":str(db),"created_at":now(),"released":False}
+    fixture_bindings=[]
+    for rel in required_worktree_fixtures(brief):
+        binding=ensure_dependency_fixture_store(run,primary,rel)
+        if binding is None: raise ValueError(f"read-only fixture cannot be safely shared: {rel}")
+        fixture_bindings.append(binding)
+    view=acquire_analysis_view(run,fixture_bindings); runtime=Path(info["runtime_root"]).resolve(); db=runtime/"opencode-db"/safe_component(phase)/f"{safe_component(tid)}.sqlite"; db.parent.mkdir(parents=True,exist_ok=True)
+    data={"format":FORMAT,"mode":"analysis-view","phase_id":phase,"task_id":tid,"primary_root":str(primary),"worktree":view["path"],"baseline_ref":view["baseline_ref"],"analysis_view_generation":view["generation"],"db":str(db),"fixture_mirrors":required_worktree_fixtures(brief),"fixture_bindings":fixture_bindings,"created_at":now(),"released":False}
     dsd_task.write_json(existing,data)
     task_path=dsd_task.task_file(run,phase,tid)
     with dsd_task.file_lock(task_path.with_suffix(".lock")):
@@ -427,49 +467,208 @@ def _known_untracked_producers(run: Path, phase: str, paths: list[str]) -> dict[
     return {path:ids for path,ids in out.items() if ids}
 
 
-def copy_required_fixtures(primary: Path, worktree: Path, task_text: str) -> list[str]:
-    """Copy only explicitly declared worktree fixtures from the primary checkout.
 
-    We intentionally do not mirror all ignored state: it may contain secrets, huge
-    dependency trees or disposable databases. The brief must name the exact
-    project-relative inputs its validation requires.
+DEPENDENCY_LOCKFILES=("package-lock.json","npm-shrinkwrap.json","pnpm-lock.yaml","yarn.lock","bun.lock","bun.lockb")
+
+
+def _validate_fixture_source(primary: Path, rel: str) -> Path:
+    src=primary/rel
+    if not src.exists() and not src.is_symlink():
+        raise ValueError(f"required worktree fixture missing from primary checkout: {rel}")
+    resolved=src.resolve()
+    try: resolved.relative_to(primary.resolve())
+    except ValueError as exc: raise ValueError(f"required worktree fixture symlink escapes primary checkout: {rel}") from exc
+    if src.is_dir():
+        for link in src.rglob("*"):
+            if not link.is_symlink(): continue
+            try: link.resolve().relative_to(primary.resolve())
+            except ValueError as exc: raise ValueError(f"required worktree fixture contains symlink escaping primary checkout: {link.relative_to(primary)}") from exc
+    return src
+
+
+def _fixture_tree_is_self_contained(src: Path) -> bool:
+    """Whether preserving symlinks keeps every dependency edge inside this fixture."""
+    root=src.resolve()
+    if src.is_symlink(): return False
+    if not src.is_dir(): return True
+    for link in src.rglob("*"):
+        if not link.is_symlink(): continue
+        try: link.resolve().relative_to(root)
+        except ValueError: return False
+    return True
+
+
+def dependency_fixture_identity(primary: Path, rel: str) -> dict[str, Any] | None:
+    """Return a deterministic identity for a shareable installed dependency tree.
+
+    Today the optimized class is ``node_modules`` because package-manager lockfiles
+    provide a cheap semantic identity without hashing gigabytes of dependencies. Other
+    fixtures keep the conservative task-local copy behavior.
     """
+    rel=rel.replace("\\","/").strip("/")
+    if Path(rel).name!="node_modules": return None
+    src=_validate_fixture_source(primary,rel)
+    if not src.is_dir() or not _fixture_tree_is_self_contained(src): return None
+    project_root=primary.resolve(); cursor=(primary/rel).parent.resolve(); lock_dir=None; lockfiles=[]
+    while cursor==project_root or project_root in cursor.parents:
+        found=[cursor/name for name in DEPENDENCY_LOCKFILES if (cursor/name).is_file()]
+        if found:
+            lock_dir=cursor; lockfiles=found; break
+        if cursor==project_root: break
+        cursor=cursor.parent
+    if lock_dir is None: return None
+    inputs=[]; descriptor=["tbag-dependency-fixture-v1",rel]
+    for path in sorted(lockfiles,key=lambda x:x.name):
+        rel_input=path.relative_to(project_root).as_posix(); oid=git_text(project_root,"hash-object","--no-filters",str(path))
+        descriptor.extend([rel_input,oid]); inputs.append(rel_input)
+    manifest=lock_dir/"package.json"
+    if manifest.is_file():
+        rel_input=manifest.relative_to(project_root).as_posix(); oid=git_text(project_root,"hash-object","--no-filters",str(manifest))
+        descriptor.extend([rel_input,oid]); inputs.append(rel_input)
+    # npm's hidden installation lock gives a stronger identity for the actual installed
+    # tree when available, while other package managers still use their authoritative lock.
+    installed=src/".package-lock.json"
+    if installed.is_file():
+        rel_input=f"{rel}/.package-lock.json"; oid=git_text(project_root,"hash-object","--no-filters",str(installed))
+        descriptor.extend([rel_input,oid]); inputs.append(rel_input)
+    payload="\0".join(descriptor).encode("utf-8")
+    fingerprint=run_cmd(["git","hash-object","--stdin"],project_root,input_bytes=payload).stdout.decode("ascii",errors="replace").strip()
+    if not fingerprint: raise ValueError(f"cannot derive Git identity for dependency fixture: {rel}")
+    return {"path":rel,"fingerprint":fingerprint,"identity_inputs":inputs,"source_kind":"dependency-store"}
+
+
+def fixture_store_root(run: Path) -> Path:
+    runtime=Path(dsd_task.load_run(run)["runtime_root"]).resolve()
+    return runtime/"fixture-store"
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file(): path.unlink(missing_ok=True)
+    elif path.is_dir():
+        _make_tree_owner_writable(path)
+        shutil.rmtree(path)
+
+
+def _clone_path(src: Path, dst: Path, *, writable: bool) -> str:
+    """Clone with copy-on-write when supported; otherwise make one ordinary copy."""
+    _remove_path(dst); dst.parent.mkdir(parents=True,exist_ok=True)
+    mode="copy"
+    cp=shutil.which("cp")
+    commands=[]
+    if cp and sys.platform=="darwin": commands=[[cp,"-cR",str(src),str(dst)]]
+    elif cp and sys.platform.startswith("linux"): commands=[[cp,"-a","--reflink=always",str(src),str(dst)]]
+    for cmd in commands:
+        probe=subprocess.run(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+        if probe.returncode==0:
+            mode="cow"; break
+        _remove_path(dst)
+    if not dst.exists() and not dst.is_symlink():
+        if src.is_dir(): shutil.copytree(src,dst,symlinks=True)
+        else: shutil.copy2(src,dst,follow_symlinks=False)
+    if writable: _make_tree_owner_writable(dst)
+    else: _make_tree_read_only(dst) if dst.is_dir() else dst.chmod(dst.stat().st_mode & ~0o222)
+    return mode
+
+
+def ensure_dependency_fixture_store(run: Path, primary: Path, rel: str) -> dict[str, Any] | None:
+    identity=dependency_fixture_identity(primary,rel)
+    if identity is None: return None
+    root=fixture_store_root(run); entry=root/identity["fingerprint"]; payload=entry/"payload"; manifest=entry/"manifest.json"
+    with dsd_task.file_lock(run/".fixture.lock"):
+        if payload.exists() and manifest.is_file():
+            data=dsd_task.load_json(manifest)
+            if data.get("fingerprint")==identity["fingerprint"] and data.get("path")==identity["path"]:
+                return {**identity,"store_payload":str(payload.resolve()),"materialization":data.get("materialization")}
+            raise ValueError(f"fixture-store identity collision: {entry}")
+        root.mkdir(parents=True,exist_ok=True)
+        tmp=Path(tempfile.mkdtemp(prefix=".fixture-build-",dir=root))
+        try:
+            built=tmp/"payload"; mode=_clone_path(_validate_fixture_source(primary,rel),built,writable=False)
+            dsd_task.write_json(tmp/"manifest.json",{**identity,"materialization":mode,"created_at":now(),"source_primary":str(primary.resolve())})
+            tmp.replace(entry)
+        except Exception:
+            if tmp.exists(): shutil.rmtree(tmp,ignore_errors=True)
+            raise
+    return {**identity,"store_payload":str(payload.resolve()),"materialization":mode}
+
+
+def _copy_one_required_fixture(primary: Path, worktree: Path, rel: str) -> None:
+    src=_validate_fixture_source(primary,rel); dst=worktree/rel
+    _remove_path(dst); dst.parent.mkdir(parents=True,exist_ok=True)
+    if src.is_symlink():
+        resolved=src.resolve()
+        if resolved.is_dir(): shutil.copytree(resolved,dst,symlinks=False)
+        else: shutil.copy2(resolved,dst)
+    elif src.is_dir(): shutil.copytree(src,dst,symlinks=False)
+    else: shutil.copy2(src,dst)
+
+
+def _materialize_mutable_fixture(binding: dict[str, Any], worktree: Path) -> str:
+    rel=str(binding["path"]); source=Path(str(binding["store_payload"])).resolve(); dst=worktree/rel
+    return _clone_path(source,dst,writable=True)
+
+
+def gc_fixture_store(run: Path) -> list[str]:
+    """Delete immutable fixture generations that no live room/view can still reach."""
+    root=fixture_store_root(run)
+    if not root.is_dir(): return []
+    referenced=set(); phases=run/"phases"
+    for ws_path in phases.glob("*/tasks/*/workspace.json") if phases.is_dir() else []:
+        try: ws=dsd_task.load_json(ws_path)
+        except Exception: continue
+        if ws.get("released"): continue
+        for item in ws.get("fixture_bindings",[]) if isinstance(ws.get("fixture_bindings"),list) else []:
+            if isinstance(item,dict) and item.get("fingerprint"): referenced.add(str(item["fingerprint"]))
+    try: index=_load_analysis_view_index(run)
+    except Exception: index={"views":[]}
+    for item in index.get("views",[]):
+        if not isinstance(item,dict): continue
+        path=Path(str(item.get("path") or ""))
+        if not path.exists(): continue
+        for binding in item.get("fixture_bindings",[]) if isinstance(item.get("fixture_bindings"),list) else []:
+            if isinstance(binding,dict) and binding.get("fingerprint"): referenced.add(str(binding["fingerprint"]))
+    removed=[]
+    with dsd_task.file_lock(run/".fixture.lock"):
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir() or entry.name.startswith(".fixture-build-") or entry.name in referenced: continue
+            _make_tree_owner_writable(entry)
+            shutil.rmtree(entry); removed.append(str(entry))
+    return removed
+
+
+def copy_required_fixtures(primary: Path, worktree: Path, task_text: str) -> list[str]:
+    """Conservatively copy explicitly declared fixtures from one trusted source."""
     copied=[]
     for rel in required_worktree_fixtures(task_text):
-        src=primary/rel; dst=worktree/rel
-        if not src.exists() and not src.is_symlink():
-            raise ValueError(f"required worktree fixture missing from primary checkout: {rel}")
-        if dst.exists() or dst.is_symlink():
-            if dst.is_dir() and not dst.is_symlink(): shutil.rmtree(dst)
-            else: dst.unlink()
-        dst.parent.mkdir(parents=True,exist_ok=True)
-        if src.is_symlink():
-            resolved=src.resolve()
-            try: resolved.relative_to(primary)
-            except ValueError as exc: raise ValueError(f"required worktree fixture symlink escapes primary checkout: {rel}") from exc
-            if resolved.is_dir(): shutil.copytree(resolved,dst,symlinks=False)
-            else: shutil.copy2(resolved,dst)
-        elif src.is_dir():
-            for link in src.rglob("*"):
-                if not link.is_symlink(): continue
-                try: link.resolve().relative_to(primary)
-                except ValueError as exc: raise ValueError(f"required worktree fixture contains symlink escaping primary checkout: {link.relative_to(primary)}") from exc
-            shutil.copytree(src,dst,symlinks=False)
-        else:
-            shutil.copy2(src,dst)
-        copied.append(rel)
+        _copy_one_required_fixture(primary,worktree,rel); copied.append(rel)
     return copied
 
 
 
 def refresh_task_fixtures(run: Path, phase: str, task: str) -> list[str]:
-    """Restore declared ignored fixture inputs from the task's frozen fixture snapshot."""
+    """Restore launcher-owned fixtures without destroying a task's new dependency state.
+
+    Dependency-store bindings are reset only while the task lockfile identity still
+    matches the frozen binding. If the worker changed its lockfile, its private
+    dependency tree is left alone for the next worker/reviewer to inspect.
+    """
     with dsd_task.file_lock(run/".workspace.lock", shared=True):
         ws=load_workspace(run,phase,task)
-        if ws.get("mode","isolated-worktree")!="isolated-worktree": raise ValueError("shared analysis views do not carry task-specific ignored fixtures")
+        if ws.get("mode","isolated-worktree")!="isolated-worktree": return []
         state=dsd_task.load_task(run,phase,task); brief=Path(str(state.get("brief") or "")).read_text(encoding="utf-8",errors="replace")
-        source=Path(str(ws.get("fixture_snapshot_root") or ws["primary_root"])).resolve()
-        return copy_required_fixtures(source,Path(ws["worktree"]).resolve(),brief)
+        wt=Path(ws["worktree"]).resolve(); refreshed=[]
+        bindings={str(x.get("path") or ""):x for x in ws.get("fixture_bindings",[]) if isinstance(x,dict)} if isinstance(ws.get("fixture_bindings"),list) else {}
+        snapshot=Path(str(ws.get("fixture_snapshot_root") or "")).resolve() if ws.get("fixture_snapshot_root") else None
+        for rel in required_worktree_fixtures(brief):
+            binding=bindings.get(rel)
+            if binding and binding.get("source_kind")=="dependency-store":
+                current=dependency_fixture_identity(wt,rel)
+                if current is None or current.get("fingerprint")!=binding.get("fingerprint"):
+                    continue
+                _materialize_mutable_fixture(binding,wt); refreshed.append(rel); continue
+            if snapshot is None: raise ValueError(f"fixture snapshot missing for non-shareable fixture: {rel}")
+            _copy_one_required_fixture(snapshot,wt,rel); refreshed.append(rel)
+        return refreshed
 
 def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
@@ -512,8 +711,13 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         task_text=Path(str(task.get("brief") or "")).read_text(encoding="utf-8",errors="replace")
         integrated_primary=copy_integrated_primary_inputs(primary,worktree,integrated_primary_untracked_inputs(run,primary))
         fixture_snapshot=dsd_task.task_root(run,phase,tid)/"fixture-snapshot"
-        fixture_mirrors=copy_required_fixtures(primary,fixture_snapshot,task_text)
-        copy_required_fixtures(fixture_snapshot,worktree,task_text)
+        fixture_mirrors=required_worktree_fixtures(task_text); fixture_bindings=[]; snapshot_used=False
+        for rel in fixture_mirrors:
+            binding=ensure_dependency_fixture_store(run,primary,rel)
+            if binding is not None:
+                _materialize_mutable_fixture(binding,worktree); fixture_bindings.append(binding)
+            else:
+                _copy_one_required_fixture(primary,fixture_snapshot,rel); _copy_one_required_fixture(fixture_snapshot,worktree,rel); snapshot_used=True
         _stage_durable_project_state(worktree,fixture_prefixes=fixture_mirrors)
         # T-BAG-integrated non-tracked additions are reviewed project state, not ambient
         # ignored input. Force them into the task-local baseline so .gitignore cannot
@@ -552,9 +756,9 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         primary_head,primary_status=_primary_view_marker(primary)
         data={
             "format":FORMAT,"mode":"isolated-worktree","phase_id":phase,"task_id":tid,"primary_root":str(primary),"worktree":str(worktree),
-            "baseline_branch":base_branch,"task_branch":task_branch,"db":str(db),"fixture_mirrors":fixture_mirrors,
+            "baseline_branch":base_branch,"task_branch":task_branch,"db":str(db),"fixture_mirrors":fixture_mirrors,"fixture_bindings":fixture_bindings,
             "integrated_primary_inputs":integrated_primary,
-            "fixture_snapshot_root":str(fixture_snapshot.resolve()),"primary_head":primary_head,"primary_status":primary_status,"created_at":now(),
+            "fixture_snapshot_root":str(fixture_snapshot.resolve()) if snapshot_used else None,"primary_head":primary_head,"primary_status":primary_status,"created_at":now(),
         }
         if carry_from:
             data["carry_from"]=carry_from; data["carry_forward_patch"]=str(carry_patch.resolve())
@@ -1152,6 +1356,7 @@ def reap_safe_runtime(run: Path, *, phase_id: str | None = None, drop_current_an
                 skipped.append({"phase_id":phase,"task_id":tid,"reason":str(exc)[:500]})
     removed_dbs=_gc_orphan_task_databases(run)
     removed_views=gc_analysis_views(run,drop_current_if_unused=drop_current_analysis)
+    gc_fixture_store(run)
     _prune_empty_runtime_dirs(runtime/"worktrees"); _prune_empty_runtime_dirs(runtime/"opencode-db")
     return {"cleaned":cleaned,"skipped":skipped,"orphan_setup_branches_removed":orphan_setup,"orphan_databases_removed":removed_dbs,"analysis_views_removed":removed_views}
 

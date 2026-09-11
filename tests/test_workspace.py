@@ -223,6 +223,35 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn("node_modules",ws["fixture_mirrors"])
         self.assertNotIn("node_modules",git(wt,"status","--porcelain"))
 
+    def test_dependency_fixture_uses_shared_store_and_private_mutable_clone(self):
+        (self.project/".gitignore").write_text("node_modules/\n"); (self.project/"package-lock.json").write_text('{"lockfileVersion":3,"packages":{}}\n')
+        git(self.project,"add",".gitignore","package-lock.json"); git(self.project,"commit","-qm","dependency authority")
+        pkg=self.project/"node_modules"/"pkg"; pkg.mkdir(parents=True); (pkg/"index.js").write_text("module.exports=1\n")
+        (self.project/"node_modules"/".package-lock.json").write_text('{"lockfileVersion":3}\n')
+        text="# T\n\n## Required worktree fixtures\n- `node_modules`\n"
+        self.register("T-DEPS-STORE",text=text); ws=self.ws("T-DEPS-STORE"); wt=Path(ws["worktree"])
+        self.assertEqual(len(ws["fixture_bindings"]),1); binding=ws["fixture_bindings"][0]
+        store=Path(binding["store_payload"]); self.assertTrue(store.is_dir()); self.assertIn("fixture-store",store.parts)
+        self.assertFalse((wt/"node_modules").is_symlink()); self.assertNotEqual((wt/"node_modules").resolve(),store.resolve())
+        self.assertEqual((wt/"node_modules"/"pkg"/"index.js").read_text(),"module.exports=1\n")
+        self.assertIsNone(ws.get("fixture_snapshot_root")); self.assertEqual((store/"pkg"/"index.js").read_text(),"module.exports=1\n")
+        (wt/"node_modules"/"pkg"/"index.js").write_text("mutated\n")
+        self.assertEqual((store/"pkg"/"index.js").read_text(),"module.exports=1\n")
+        dsd_workspace.refresh_task_fixtures(self.run,"P","T-DEPS-STORE")
+        self.assertEqual((wt/"node_modules"/"pkg"/"index.js").read_text(),"module.exports=1\n")
+
+    def test_dependency_fixture_lockfile_divergence_preserves_private_task_install(self):
+        (self.project/".gitignore").write_text("node_modules/\n"); (self.project/"package-lock.json").write_text('{"lockfileVersion":3,"packages":{}}\n')
+        git(self.project,"add",".gitignore","package-lock.json"); git(self.project,"commit","-qm","dependency authority")
+        pkg=self.project/"node_modules"/"pkg"; pkg.mkdir(parents=True); (pkg/"index.js").write_text("base\n")
+        text="# T\n\n## Required worktree fixtures\n- `node_modules`\n"
+        self.register("T-DEPS-DIVERGE",text=text); ws=self.ws("T-DEPS-DIVERGE"); wt=Path(ws["worktree"])
+        (wt/"package-lock.json").write_text('{"lockfileVersion":3,"packages":{"new":{}}}\n')
+        (wt/"node_modules"/"pkg"/"index.js").write_text("task-install\n")
+        refreshed=dsd_workspace.refresh_task_fixtures(self.run,"P","T-DEPS-DIVERGE")
+        self.assertNotIn("node_modules",refreshed)
+        self.assertEqual((wt/"node_modules"/"pkg"/"index.js").read_text(),"task-install\n")
+
     def test_required_fixture_must_be_git_ignored(self):
         fixture=self.project/"visible-fixture.txt"; fixture.write_text("input\n")
         with self.assertRaisesRegex(ValueError,"not ignored"):
@@ -319,6 +348,43 @@ class WorkspaceTests(unittest.TestCase):
         self.register("T1"); impl=dsd_workspace.prepare_launch_workspace(self.run,"P","T1","implementer")
         diag=dsd_workspace.prepare_launch_workspace(self.run,"P","T1","discovery")
         self.assertEqual(impl["mode"],"isolated-worktree"); self.assertEqual(diag["worktree"],impl["worktree"])
+
+    def test_read_only_dependency_fixture_reuses_shared_view_without_fat_task_room(self):
+        (self.project/".gitignore").write_text("node_modules/\n"); (self.project/"package-lock.json").write_text('{"lockfileVersion":3,"packages":{}}\n')
+        git(self.project,"add",".gitignore","package-lock.json"); git(self.project,"commit","-qm","dependency authority")
+        pkg=self.project/"node_modules"/"pkg"; pkg.mkdir(parents=True); (pkg/"index.js").write_text("shared\n")
+        (self.project/"node_modules"/".package-lock.json").write_text('{"lockfileVersion":3}\n')
+        text="# A\n\n## Required worktree fixtures\n- `node_modules`\n"
+        self.register("A-DEPS-1",kind="analysis",text=text); self.register("A-DEPS-2",kind="analysis",text=text)
+        one=dsd_workspace.prepare_launch_workspace(self.run,"P","A-DEPS-1","discovery")
+        two=dsd_workspace.prepare_launch_workspace(self.run,"P","A-DEPS-2","discovery")
+        self.assertEqual(one["mode"],"analysis-view"); self.assertEqual(two["mode"],"analysis-view"); self.assertEqual(one["worktree"],two["worktree"])
+        view=Path(one["worktree"]); link=view/"node_modules"; self.assertTrue(link.is_symlink())
+        target=link.resolve(); self.assertIn("fixture-store",target.parts); self.assertNotEqual(target,self.project/"node_modules")
+        self.assertEqual((link/"pkg"/"index.js").read_text(),"shared\n")
+        self.assertFalse((dsd_task.task_root(self.run,"P","A-DEPS-1")/"fixture-snapshot").exists())
+        self.assertFalse((dsd_task.task_root(self.run,"P","A-DEPS-2")/"fixture-snapshot").exists())
+        self.assertTrue(dsd_task.release_read_only_runtime(self.run,"P","A-DEPS-1")); self.assertTrue(link.exists())
+        self.assertTrue(dsd_task.release_read_only_runtime(self.run,"P","A-DEPS-2"))
+        self.register("A-PLAIN",kind="analysis"); plain=dsd_workspace.prepare_launch_workspace(self.run,"P","A-PLAIN","discovery")
+        self.assertNotEqual(plain["worktree"],one["worktree"])
+        removed_views=dsd_workspace.gc_analysis_views(self.run); self.assertIn(str(view.resolve()),removed_views)
+        removed=dsd_workspace.gc_fixture_store(self.run); self.assertTrue(removed); self.assertFalse(target.exists())
+
+    def test_dependency_fixture_store_never_uses_a_sibling_task_room_as_source(self):
+        (self.project/".gitignore").write_text("node_modules/\n"); (self.project/"package-lock.json").write_text('{"lockfileVersion":3,"packages":{}}\n')
+        git(self.project,"add",".gitignore","package-lock.json"); git(self.project,"commit","-qm","dependency authority")
+        pkg=self.project/"node_modules"/"pkg"; pkg.mkdir(parents=True); (pkg/"index.js").write_text("primary\n")
+        text="# T\n\n## Required worktree fixtures\n- `node_modules`\n"
+        self.register("T-DEPS-A",text=text); self.register("T-DEPS-B",text=text)
+        a=self.ws("T-DEPS-A"); b=self.ws("T-DEPS-B"); aw=Path(a["worktree"]); bw=Path(b["worktree"])
+        self.assertFalse((aw/"node_modules").is_symlink()); self.assertFalse((bw/"node_modules").is_symlink())
+        self.assertNotEqual((aw/"node_modules").resolve(),(bw/"node_modules").resolve())
+        for ws in (a,b):
+            source=Path(ws["fixture_bindings"][0]["store_payload"]).resolve()
+            self.assertIn("fixture-store",source.parts); self.assertNotIn("worktrees",source.parts)
+        (aw/"node_modules"/"pkg"/"index.js").write_text("task-a\n")
+        self.assertEqual((bw/"node_modules"/"pkg"/"index.js").read_text(),"primary\n")
 
     def test_analysis_task_with_private_ignored_fixture_falls_back_to_isolated_worktree(self):
         (self.project/".gitignore").write_text("fixtures/\n"); git(self.project,"add",".gitignore"); git(self.project,"commit","-qm","ignore fixtures")
