@@ -1,3 +1,4 @@
+# transport retry 3: exact tail blob repaired
 name: RC44 candidate publisher
 on:
   push:
