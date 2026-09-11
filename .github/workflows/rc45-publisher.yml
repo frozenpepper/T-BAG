@@ -28,9 +28,24 @@ jobs:
           done
           cp /tmp/rc45/parent_tick.py scripts/parent_tick.py
           cp /tmp/rc45/test_rc45_parent_tick.py tests/test_rc45_parent_tick.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/rc45/patch_rc45.py'); text=p.read_text()
+          marker='# Changelog top entry.\n'
+          if text.count(marker)!=1: raise SystemExit('RC45 patch changelog marker drift')
+          p.write_text(text.split(marker,1)[0])
+          PY
           python3 /tmp/rc45/patch_rc45.py
           python3 /tmp/rc45/patch_rc45_followup.py
           python3 /tmp/rc45/patch_rc45_install.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('CHANGELOG.md'); text=p.read_text()
+          anchor='This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.\n\n'
+          if text.count(anchor)!=1: raise SystemExit('CHANGELOG intro anchor drift')
+          entry='''## v2.2.0 RC45 — durable parent tick and bounded supervision\n\n- Added one canonical parent tick spanning reconcile, deterministic advance, live-attempt monitoring, owner-update cadence and explicit project-end classification. Adapter wakes are now optional fast hints rather than the only way long-lived orchestration makes progress.\n- OpenCode registers active runs for a low-frequency heartbeat, validates `already_armed` observer health, and wakes the parent into the tick. No task/model/semantic authority moved into the plugin.\n- Added lifecycle-owned attempt retirement. Final-report/no-terminal workers retire automatically after a short grace; confirmed silent anomalies are terminated through the recorded worker process group so retained state/session recovery can continue and spawned MCP children do not linger.\n- Owner updates are durable/acknowledged and periodic during long active work. Quiescent active runs surface `completion-candidate` instead of silently idling; explicit finish is mechanically refused while registered work remains.\n- Relaxed only the mechanical report envelope (anchored suffixed/bold verdict tokens, footer-safe/empty follow-up obligations), fixed superseded mutable-task phase-gate readiness, and documented replan-before-register ordering.\n\n'''
+          p.write_text(text.replace(anchor,anchor+entry))
+          PY
           git add CHANGELOG.md SKILL.md OPENCODE.md PROMPTS.md adapters/opencode/tbag.js scripts/context_checkpoint.py scripts/dsd_attempt.py scripts/dsd_task.py scripts/install_harness_adapter.py scripts/parent_tick.py scripts/run_worker.py tests/test_rc45_parent_tick.py
           git diff --cached --check
           test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nOPENCODE.md\nPROMPTS.md\nSKILL.md\nadapters/opencode/tbag.js\nscripts/context_checkpoint.py\nscripts/dsd_attempt.py\nscripts/dsd_task.py\nscripts/install_harness_adapter.py\nscripts/parent_tick.py\nscripts/run_worker.py\ntests/test_rc45_parent_tick.py'
