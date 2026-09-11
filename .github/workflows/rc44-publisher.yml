@@ -1,4 +1,4 @@
-# transport retry 3: exact tail blob repaired
+# RC44 guarded publisher: verified payload + Linux run-owned fixture cleanup fix
 name: RC44 candidate publisher
 on:
   push:
@@ -29,6 +29,22 @@ jobs:
           echo '6c5539f8a8b7a1f97ba9cca1470e71e062e1c9354a4c4c1643c68c611e8d4bf4  /tmp/rc44.patch' | sha256sum -c -
           git apply --check /tmp/rc44.patch
           git apply --index /tmp/rc44.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          path=Path('scripts/dsd_workspace.py')
+          text=path.read_text()
+          old='''def _remove_path(path: Path) -> None:\n    if path.is_symlink() or path.is_file(): path.unlink(missing_ok=True)\n    elif path.is_dir(): shutil.rmtree(path)\n'''
+          new='''def _remove_path(path: Path) -> None:\n    if path.is_symlink() or path.is_file(): path.unlink(missing_ok=True)\n    elif path.is_dir():\n        _make_tree_owner_writable(path)\n        shutil.rmtree(path)\n'''
+          if text.count(old)!=1:
+              raise SystemExit('expected exactly one _remove_path fixture cleanup block')
+          text=text.replace(old,new)
+          old='''        for entry in sorted(root.iterdir()):\n            if not entry.is_dir() or entry.name.startswith(".fixture-build-") or entry.name in referenced: continue\n            shutil.rmtree(entry); removed.append(str(entry))\n'''
+          new='''        for entry in sorted(root.iterdir()):\n            if not entry.is_dir() or entry.name.startswith(".fixture-build-") or entry.name in referenced: continue\n            _make_tree_owner_writable(entry)\n            shutil.rmtree(entry); removed.append(str(entry))\n'''
+          if text.count(old)!=1:
+              raise SystemExit('expected exactly one fixture-store GC deletion block')
+          path.write_text(text.replace(old,new))
+          PY
+          git add scripts/dsd_workspace.py
           git diff --cached --check
           test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nWORKSPACE.md\nscripts/dsd_workspace.py\ntests/test_workspace.py'
           test "$(wc -c < WORKSPACE.md | tr -d ' ')" -lt 10000
