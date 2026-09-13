@@ -16,7 +16,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git diff --check main...HEAD
+          git diff --check origin/main...HEAD
           test "$(wc -c < README.md)" -le 5000
           test "$(wc -c < HARNESS.md)" -le 2200
           python3 -m unittest tests.test_docs -v
