@@ -131,45 +131,80 @@ def install_helper(skill_root: Path, project_root: Path) -> dict[str, Path]:
     dsd_attempt = tools / "dsd_attempt.py"
     parent_tick = tools / "parent_tick.py"
     tbag_status = tools / "tbag_status.py"
+    tbag_render = tools / "tbag_render.py"
     write_skill_shim(target, skill_root / "scripts" / "context_checkpoint.py")
     write_skill_shim(dsd_task, skill_root / "scripts" / "dsd_task.py")
     write_skill_shim(dsd_attempt, skill_root / "scripts" / "dsd_attempt.py")
     write_skill_shim(parent_tick, skill_root / "scripts" / "parent_tick.py")
     write_skill_shim(tbag_status, skill_root / "scripts" / "tbag_status.py")
+    write_skill_shim(tbag_render, skill_root / "scripts" / "tbag_render.py")
     # Remove legacy copied control-plane modules. Immutable run evidence remains in runs/;
     # project hooks need only the stable shim above.
     for name in ("check_state.py", "dsd_state.py", "_contract.py", "_rules_snapshot.py", "_roles.py"):
         (tools / name).unlink(missing_ok=True)
-    return {"context_checkpoint": target, "dsd_task": dsd_task, "dsd_attempt": dsd_attempt, "parent_tick": parent_tick, "tbag_status": tbag_status}
+    return {"context_checkpoint": target, "dsd_task": dsd_task, "dsd_attempt": dsd_attempt, "parent_tick": parent_tick, "tbag_status": tbag_status, "tbag_render": tbag_render}
 
 
 def install_codex(project_root: Path, skill_root: Path) -> dict[str, Any]:
     path = project_root / ".codex" / "hooks.json"
     changed, backup_path = install_hook_fragment(path, skill_root / "adapters" / "codex" / "hooks.json")
+    render = project_root / "TBag" / "tools" / "tbag_render.py"
+    status_command = f'python3 "{render}" status --project-root "{project_root}"'
+    watch_command = f'python3 "{render}" watch --project-root "{project_root}"'
     return {
         "harness": "codex",
         "config": str(path),
         "changed": changed,
         "backup": str(backup_path) if backup_path else None,
-        "manual_step": "Open /hooks in Codex and trust the project-local hooks before relying on them.",
+        "status_surface": "companion-terminal",
+        "status_command": status_command,
+        "watch_command": watch_command,
+        "manual_step": "Open /hooks in Codex and trust the project-local hooks. Codex's stock status line currently accepts only built-in items; for live T-BAG visibility run the reported watch_command in an adjacent terminal/tmux/zellij pane. The display is read-only.",
     }
 
 
 def install_claude(project_root: Path, skill_root: Path) -> dict[str, Any]:
     path = project_root / ".claude" / "settings.json"
-    changed, backup_path = install_hook_fragment(path, skill_root / "adapters" / "claude" / "settings.fragment.json")
+    fragment_path = skill_root / "adapters" / "claude" / "settings.fragment.json"
+    existed_before = path.exists()
+    changed, backup_path = install_hook_fragment(path, fragment_path)
+    fragment = load_json(fragment_path)
+    desired = fragment.get("statusLine") if isinstance(fragment.get("statusLine"), dict) else None
+    data = load_json(path)
+    existing = data.get("statusLine")
+    existing_command = str(existing.get("command") or "") if isinstance(existing, dict) else ""
+    tbag_owned = bool(existing_command and "TBag/tools/tbag_render.py" in existing_command)
+    status_line_changed = False
+    status_line_conflict = False
+    if desired is not None and (existing is None or tbag_owned):
+        if existing != desired:
+            if backup_path is None and existed_before:
+                backup_path = backup(path)
+            data["statusLine"] = desired
+            write_json(path, data)
+            status_line_changed = True
+    elif desired is not None and existing != desired:
+        status_line_conflict = True
     legacy_rewake = project_root / "TBag" / "tools" / "claude_worker_rewake.py"
     legacy_removed = legacy_rewake.exists()
     legacy_rewake.unlink(missing_ok=True)
+    manual = (
+        "Claude Code reloads project settings automatically. T-BAG's native status line refreshes every 5 seconds and is read-only; keep using a native background Bash follow task per live attempt for wake delivery."
+        if not status_line_conflict
+        else "An existing non-T-BAG Claude statusLine was preserved. Use TBag/tools/tbag_render.py status/watch manually or compose your existing status command with the T-BAG renderer; T-BAG will not overwrite custom presentation."
+    )
     return {
         "harness": "claude-code",
         "config": str(path),
-        "changed": changed or legacy_removed,
+        "changed": changed or status_line_changed or legacy_removed,
         "backup": str(backup_path) if backup_path else None,
         "interactive_supervision": "native-background-follow",
         "autonomous_supervision": "background-follow-completion",
+        "status_surface": "native-status-line" if not status_line_conflict else "custom-status-line-preserved",
+        "status_line_installed": bool(desired is not None and not status_line_conflict),
+        "status_line_conflict": status_line_conflict,
         "legacy_rewake_removed": legacy_removed,
-        "manual_step": "After each detached launch, run TBag/tools/dsd_attempt.py follow for that exact event_dir as a Claude Code background Bash task. The task chip is the display; its completion wakes the parent. Do not add a second polling/re-wake hook.",
+        "manual_step": manual,
     }
 
 

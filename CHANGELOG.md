@@ -2,6 +2,12 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC47 — shared harness status surfaces
+
+- Added one host-neutral `tbag_render.py` presentation layer over the existing read-only `tbag_status.py` snapshot. It renders registered-plan/phase progress, active Analyst and Grunt sessions, task purpose, model/session/process/observer/deadline state, gates and attention without gaining lifecycle authority.
+- Claude Code now installs a native multi-line command-backed `statusLine` that refreshes every five seconds, including while the parent is idle. Existing non-T-BAG custom status lines are preserved and reported as a conflict rather than overwritten.
+- Codex keeps its stock TUI untouched because its status line accepts only built-in items today. The installer instead exposes the same dashboard through one-shot `status` and live `watch` terminal commands suitable for an adjacent pane.
+
 ## v2.2.0 RC46 — durable supervision state and OpenCode status UI
 
 - Made worker supervision attempt-relative instead of observer-relative: default Grunt/Analyst deadlines survive parent succession, bounded `inspect` exposes actual worker/launcher process state plus CPU/cumulative time, and silent-worker retirement waits when CPU is still materially changing.
