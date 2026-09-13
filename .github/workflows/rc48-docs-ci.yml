@@ -1,0 +1,35 @@
+name: RC48 documentation CI
+
+on:
+  push:
+    branches: [rc48-docs-ci]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rc48-docs
+          fetch-depth: 0
+      - name: Validate documentation and regression matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check main...HEAD
+          test "$(wc -c < README.md)" -le 5000
+          test "$(wc -c < HARNESS.md)" -le 2200
+          python3 -m unittest tests.test_docs -v
+          python3 -m unittest tests.test_rc46_supervision -q
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+          python3 -m compileall -q scripts tests
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+          node tests/opencode_transport_registry_runtime.mjs adapters/opencode/tbag.js
