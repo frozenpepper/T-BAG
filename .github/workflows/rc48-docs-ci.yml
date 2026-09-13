@@ -33,3 +33,4 @@ jobs:
           node --check adapters/opencode/tbag.js
           node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
           node tests/opencode_transport_registry_runtime.mjs adapters/opencode/tbag.js
+          echo "RC48 docs validated"
