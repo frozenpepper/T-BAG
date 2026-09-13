@@ -28,6 +28,7 @@ jobs:
           git show origin/rc49-publisher:publisher/rc49/test_rc49_role_command_coherence.py > tests/test_rc49_role_command_coherence.py
           python3 /tmp/apply_rc49.py
           git diff --check
+          wc -c SKILL.md PROMPTS.md CONTEXT.md worker/COMMON.md worker/QUALITY.md worker/PLAN-AUTHORING.md worker/roles/*/SKILL.md
           test "$(wc -c < SKILL.md)" -le 6500
           test "$(wc -c < PROMPTS.md)" -le 6500
           test "$(wc -c < CONTEXT.md)" -le 5500
