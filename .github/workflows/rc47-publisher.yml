@@ -1,0 +1,65 @@
+name: RC47 harness status publisher
+on:
+  push:
+    branches: [rc47-publisher]
+    paths:
+      - 'publisher/rc47/**'
+      - '.github/workflows/rc47-publisher.yml'
+permissions:
+  contents: write
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply RC47 candidate
+        env:
+          EXPECTED_BASE: 6b574eac5328bcb51815dd8ab530663210a43217
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc47-publisher:refs/remotes/origin/rc47-publisher
+          mkdir -p scripts tests adapters/claude
+          git show origin/rc47-publisher:publisher/rc47/tbag_render.py > scripts/tbag_render.py
+          git show origin/rc47-publisher:publisher/rc47/test_rc47_harness_status.py > tests/test_rc47_harness_status.py
+          git show origin/rc47-publisher:publisher/rc47/claude-settings.fragment.json > adapters/claude/settings.fragment.json
+          git show origin/rc47-publisher:publisher/rc47/CLAUDE.md > CLAUDE.md
+          git show origin/rc47-publisher:publisher/rc47/CODEX.md > CODEX.md
+          git show origin/rc47-publisher:publisher/rc47/HARNESS.md > HARNESS.md
+          git show origin/rc47-publisher:publisher/rc47/apply_rc47.py > /tmp/apply_rc47.py
+          python3 /tmp/apply_rc47.py
+          chmod +x scripts/tbag_render.py
+          git diff --check
+          python3 -m json.tool adapters/claude/settings.fragment.json >/dev/null
+          git add CHANGELOG.md CLAUDE.md CODEX.md HARNESS.md adapters/claude/settings.fragment.json scripts/install_harness_adapter.py scripts/tbag_render.py tests/test_rc47_harness_status.py
+          test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nCLAUDE.md\nCODEX.md\nHARNESS.md\nadapters/claude/settings.fragment.json\nscripts/install_harness_adapter.py\nscripts/tbag_render.py\ntests/test_rc47_harness_status.py'
+      - name: Focused RC47 regressions
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc47_harness_status -v
+          python3 -m compileall -q scripts tests
+      - name: Full regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc46_supervision -q
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+          node tests/opencode_transport_registry_runtime.mjs adapters/opencode/tbag.js
+      - name: Publish candidate commit
+        run: |
+          set -euo pipefail
+          git config user.name 'T-BAG Publisher'
+          git config user.email 'tbag-publisher@users.noreply.github.com'
+          git commit -m 'RC47: add Claude and Codex status surfaces'
+          git push origin HEAD:refs/heads/rc47-built --force
