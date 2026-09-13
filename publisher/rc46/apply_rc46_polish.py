@@ -8,10 +8,15 @@ def replace_once(path: str, old: str, new: str) -> None:
         raise SystemExit(f'{path}: expected one polish anchor, found {count}: {old[:160]!r}')
     p.write_text(text.replace(old,new),encoding='utf-8')
 
-# Keep the hot operator cookbook under its existing size budget.
+# Keep the hot operator cookbook unchanged; the OpenCode parent protocol owns this
+# recovery-routing explanation.
 replace_once('PROMPTS.md',
 '''A Human `resolve-escalation --route analysis` opens the Analyst lane; it is not approval of a technical graph. The Analyst still records `analysis-result --outcome replan` before that graph can be registered.\n''',
-'''Human `--route analysis` opens the Analyst lane; the Analyst still records `replan` before graph registration.\n''')
+''' ''')
+replace_once('PROMPTS.md','''## Register an Analyst graph\n \n''','''## Register an Analyst graph\n''')
+replace_once('OPENCODE.md',
+'''The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth.\n''',
+'''The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth. A Human `--route analysis` opens Analyst authority only; the Analyst's later `replan` is the separate technical graph decision.\n''')
 
 # A terminal session identity is finalized evidence; for a live attempt, attempt.json
 # is fresher than the task-level binding. This removes the launch-vs-gate contradiction.
