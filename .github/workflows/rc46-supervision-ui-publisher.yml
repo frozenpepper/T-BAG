@@ -29,6 +29,8 @@ jobs:
           git show origin/rc46-supervision-ui-publisher:publisher/rc46/test_rc46_supervision.py > tests/test_rc46_supervision.py
           git show origin/rc46-supervision-ui-publisher:publisher/rc46/opencode_transport_registry_runtime.mjs > tests/opencode_transport_registry_runtime.mjs
           git show origin/rc46-supervision-ui-publisher:publisher/rc46/apply_rc46.py > /tmp/apply_rc46.py
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/rebase_patch.py > /tmp/rebase_patch.py
+          python3 /tmp/rebase_patch.py
           python3 /tmp/apply_rc46.py
           git diff --check
           git add CHANGELOG.md OPENCODE.md PROMPTS.md scripts/dsd_attempt.py scripts/dsd_task.py scripts/run_worker.py scripts/parent_tick.py scripts/tbag_status.py scripts/install_harness_adapter.py adapters/opencode/tbag.js adapters/opencode/tbag-ui/index.ts adapters/opencode/tbag-ui/tui.tsx tests/test_rc46_supervision.py tests/opencode_transport_registry_runtime.mjs
