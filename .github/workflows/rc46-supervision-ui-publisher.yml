@@ -1,0 +1,64 @@
+name: RC46 supervision and UI publisher
+on:
+  push:
+    branches: [rc46-supervision-ui-publisher]
+    paths:
+      - 'publisher/rc46/**'
+      - '.github/workflows/rc46-supervision-ui-publisher.yml'
+permissions:
+  contents: write
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Apply RC46 candidate
+        env:
+          EXPECTED_BASE: 96d56eb32383f8e29a4f1cae4137ab54b009477a
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc46-supervision-ui-publisher:refs/remotes/origin/rc46-supervision-ui-publisher
+          mkdir -p scripts adapters/opencode/tbag-ui tests
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/tbag_status.py > scripts/tbag_status.py
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/ui-index.ts > adapters/opencode/tbag-ui/index.ts
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/tui.tsx > adapters/opencode/tbag-ui/tui.tsx
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/test_rc46_supervision.py > tests/test_rc46_supervision.py
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/opencode_transport_registry_runtime.mjs > tests/opencode_transport_registry_runtime.mjs
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/apply_rc46.py > /tmp/apply_rc46.py
+          python3 /tmp/apply_rc46.py
+          git diff --check
+          git add CHANGELOG.md OPENCODE.md PROMPTS.md scripts/dsd_attempt.py scripts/dsd_task.py scripts/run_worker.py scripts/parent_tick.py scripts/tbag_status.py scripts/install_harness_adapter.py adapters/opencode/tbag.js adapters/opencode/tbag-ui/index.ts adapters/opencode/tbag-ui/tui.tsx tests/test_rc46_supervision.py tests/opencode_transport_registry_runtime.mjs
+          test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nOPENCODE.md\nPROMPTS.md\nadapters/opencode/tbag-ui/index.ts\nadapters/opencode/tbag-ui/tui.tsx\nadapters/opencode/tbag.js\nscripts/dsd_attempt.py\nscripts/dsd_task.py\nscripts/install_harness_adapter.py\nscripts/parent_tick.py\nscripts/run_worker.py\nscripts/tbag_status.py\ntests/opencode_transport_registry_runtime.mjs\ntests/test_rc46_supervision.py'
+      - name: Focused RC46 regressions
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc46_supervision -v
+          python3 -m compileall -q scripts tests
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+          node tests/opencode_transport_registry_runtime.mjs adapters/opencode/tbag.js
+          grep -q '@opencode/plugin/tui' adapters/opencode/tbag-ui/tui.tsx
+          grep -q 'prompt.footer.status' adapters/opencode/tbag-ui/tui.tsx
+          grep -q 'session.panel' adapters/opencode/tbag-ui/tui.tsx
+      - name: Full regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+      - name: Publish candidate commit
+        run: |
+          set -euo pipefail
+          git config user.name 'T-BAG Publisher'
+          git config user.email 'tbag-publisher@users.noreply.github.com'
+          git commit -m 'RC46: add durable supervision state and OpenCode status UI'
+          git push origin HEAD:refs/heads/rc46-built --force
