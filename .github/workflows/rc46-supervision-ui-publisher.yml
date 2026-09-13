@@ -33,10 +33,12 @@ jobs:
           git show origin/rc46-supervision-ui-publisher:publisher/rc46/rebase_patch.py > /tmp/rebase_patch.py
           git show origin/rc46-supervision-ui-publisher:publisher/rc46/apply_rc46_tail.py > /tmp/apply_rc46_tail.py
           git show origin/rc46-supervision-ui-publisher:publisher/rc46/apply_rc46_polish.py > /tmp/apply_rc46_polish.py
+          git show origin/rc46-supervision-ui-publisher:publisher/rc46/apply_rc46_evidence.py > /tmp/apply_rc46_evidence.py
           python3 /tmp/rebase_patch.py
           python3 /tmp/apply_rc46.py
           python3 /tmp/apply_rc46_tail.py
           python3 /tmp/apply_rc46_polish.py
+          python3 /tmp/apply_rc46_evidence.py
           git diff --check
           git add CHANGELOG.md OPENCODE.md PROMPTS.md scripts/dsd_attempt.py scripts/dsd_task.py scripts/run_worker.py scripts/parent_tick.py scripts/tbag_status.py scripts/install_harness_adapter.py adapters/opencode/tbag.js adapters/opencode/tbag-ui/index.ts adapters/opencode/tbag-ui/tui.ts adapters/opencode/tbag-ui/tui.tsx tests/test_rc46_supervision.py tests/opencode_transport_registry_runtime.mjs
           test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nOPENCODE.md\nPROMPTS.md\nadapters/opencode/tbag-ui/index.ts\nadapters/opencode/tbag-ui/tui.ts\nadapters/opencode/tbag-ui/tui.tsx\nadapters/opencode/tbag.js\nscripts/dsd_attempt.py\nscripts/dsd_task.py\nscripts/install_harness_adapter.py\nscripts/parent_tick.py\nscripts/run_worker.py\nscripts/tbag_status.py\ntests/opencode_transport_registry_runtime.mjs\ntests/test_rc46_supervision.py'
@@ -68,5 +70,5 @@ jobs:
           set -euo pipefail
           git config user.name 'T-BAG Publisher'
           git config user.email 'tbag-publisher@users.noreply.github.com'
-          git commit -m 'RC46: add durable supervision state and OpenCode status UI'
+          git commit -m 'RC46: add durable supervision state and semantic evidence lanes'
           git push origin HEAD:refs/heads/rc46-built --force
