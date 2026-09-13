@@ -23,6 +23,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
           git fetch origin rc45-field-publisher:refs/remotes/origin/rc45-field-publisher
           git show origin/rc45-field-publisher:publisher/patch_field_feedback_v2.py > /tmp/patch_field_feedback_v2.py
+          sed -i 's/Direct bash\/python/Direct Bash\/Python/g' /tmp/patch_field_feedback_v2.py
           python3 /tmp/patch_field_feedback_v2.py
           git diff --check
           git add CHANGELOG.md OPENCODE.md scripts/dsd_task.py scripts/parent_tick.py tests/test_rc45_parent_tick.py
