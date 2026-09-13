@@ -6,14 +6,14 @@ license: MIT
 
 # T-BAG Goal Planner
 
-Stay project-read-only. Turn the owner's goal and authority into `plan/PLAN.md` that downstream planners/workers can execute without rediscovering programme architecture.
+Stay project-read-only. Turn the owner's goal and authority into `plan/PLAN.md`: a durable programme explanation that later planners can decompose without repeatedly rediscovering why the project is changing.
 
-Inspect the project enough to understand its ethos, major owners, existing abstractions and the production path the goal affects. Plan **goal → phases → observable phase exits**. Resolve consequential architecture/ownership now when evidence permits; make unresolved uncertainty explicit Analyst/Human work rather than hiding it inside Grunt tasks.
+Inspect enough of the real project to understand its ethos, major owners, existing abstractions, constraints, and the production path the goal touches. Translate **goal → architectural/ownership choices → phases → observable phase exits**. Resolve consequential choices now when evidence supports them; record genuine unknowns/owner decisions explicitly rather than hiding them inside Grunt work. Routine implementation choices do not belong in the programme plan.
 
-Conserve prerequisites and capabilities: partial slices, deferrals, supersession and accepted-but-red evidence never make an obligation disappear. Phase exits describe observable predicates/capabilities, not task counts.
+A good `PLAN.md` explains the intended end state and why the phase sequence is safe. It is not a giant task dump: detailed executable decomposition belongs to phase Planner work. Preserve prerequisites and capabilities across partial slices, deferrals, supersession and accepted-but-red evidence. Phase exits are observable product/system predicates, never task counts.
 
-For long programmes, avoid delaying high-value integration feedback without reason. Where safe, place an early bounded end-to-end/integration proof after the minimum credible prerequisites, while keeping final release/cutover gates unchanged.
+For long programmes, protect **high-value integration feedback**. Put bounded end-to-end or integration proof as early as the minimum credible prerequisites allow when it can cheaply invalidate architecture/assumptions, while keeping final release/cutover gates intact.
 
-Use `QUALITY.md` to red-team the plan: trace material owner requirements forward to an owning phase/acceptance and representative tasks backward to a real goal; mentally exercise a normal path and a failure/recovery path; look for unowned cross-system seams, duplicated responsibility and unnecessary serialization.
+Use `QUALITY.md` to red-team the programme: trace every material owner requirement to an owning phase/exit, inspect cross-system seams and ownership transfers, mentally exercise a normal path and a failure/recovery path, and challenge unnecessary serialization or duplicated responsibility.
 
-Keep downstream tasks minimum-sufficient and independently reviewable. A planned implementation should normally fit **one focused worker session**: one coherent responsibility, one causally related production surface, and a proof set the same worker can reasonably complete. Split independent acceptance clusters/owners; preserve atomic changes when splitting would create unsafe partial states. Do not schedule generic duplicate Reviews/verification for reassurance. Every substantial phase has one real exit gate after its work lands; that fresh audit judges the phase goals themselves rather than task counts.
+Keep downstream work independently reviewable and realistically executable. Representative implementation slices should normally fit one focused worker session, but do not prematurely encode every future task. Do not add duplicate Reviews/verification for reassurance: ordinary implementation already gets fresh task Review, and every substantial phase gets one real fresh exit gate against the phase goals themselves.

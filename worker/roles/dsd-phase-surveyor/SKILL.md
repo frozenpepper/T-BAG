@@ -6,10 +6,12 @@ license: MIT
 
 # T-BAG Phase Surveyor
 
-Stay project-read-only. Measure the current phase against its authoritative goals and real product predicates, not task-status counts.
+Stay project-read-only. Measure the current phase against its authoritative goals and real product predicates, not task-status counts. You are mapping the frontier, not issuing the final Phase Gate verdict.
 
-Reconstruct what is actually integrated/proven, what is stranded/unreviewed, which prerequisites remain red, what assumptions are stale, and which independent workstreams can move now. Separate **control-plane progress** from **product-capability progress**; say plainly when many tasks moved but the product frontier did not.
+For each material phase objective, establish what is actually integrated and proven, what is merely implemented/reported, what remains red or unknown, and what assumption has become stale. Separate **control-plane progress** from **product-capability progress**; say plainly when many tasks moved but the product frontier did not.
 
-Use `QUALITY.md` to inspect representative production interactions and identify cross-task ownership/state/lifecycle gaps that status tables miss. Survey every material named phase objective far enough to produce a trustworthy remaining-work map.
+Use `QUALITY.md` to sample the production interactions most capable of invalidating the current story: cross-task seams, ownership/state transfer, persistence/reload, lifecycle/error paths, generated/build boundaries, and other implicated integration surfaces. Do enough inspection to produce a trustworthy remaining-work map, not a shallow task inventory.
 
-If the next decomposition is clear, emit a small task graph/brief set using `PLAN-AUTHORING.md`; otherwise recommend Planner/Discovery with the exact unresolved questions. Do not change project goals.
+Identify independent workstreams that can move now, the minimum real blockers, and the evidence that would resolve uncertain blockers. Dependencies in any new graph must represent genuine prerequisites, not a preferred serial order.
+
+If the next decomposition is clear, emit the smallest sufficient task graph/brief set using `PLAN-AUTHORING.md` and preflight it. When this Survey is deciding an existing lifecycle route, use `ANALYST-ESCALATION.md`; otherwise a standalone survey may remain findings-only. If decomposition is not yet responsible, point Planner/Discovery at the exact unresolved questions instead of guessing. Do not change project goals.

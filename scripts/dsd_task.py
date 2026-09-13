@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from _roles import DEFAULT_TIER, ESCALATION_LADDER, ROLE_NAMES
+from _roles import ANALYST_DISPOSITION_ROLES, DEFAULT_TIER, ESCALATION_LADDER, ROLE_NAMES
 from _contract import allowed_source_changes, declared_worker_skill_tags, generated_output_mappings, has_explicit_write_restriction, required_worktree_fixtures, role_writes_project, validate_path_relationships
 from _rules_snapshot import rules_revisions, verify_snapshot
 
@@ -55,6 +55,10 @@ REPORT_OUTCOMES_BY_ROLE = {
     "verification": {"PASS": "pass", "BLOCKED": "blocked", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
     "evidence-clerk": {"PASS": "pass", "BLOCKED": "blocked", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
     "phase-auditor": {"PASS": "pass", "BLOCKED": "blocked", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "planner": {"RESUME": "resume", "REPLAN": "replan", "REPLAN+RESUME": "replan-resume", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "discovery": {"RESUME": "resume", "REPLAN": "replan", "REPLAN+RESUME": "replan-resume", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "phase-surveyor": {"RESUME": "resume", "REPLAN": "replan", "REPLAN+RESUME": "replan-resume", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
+    "recovery": {"RESUME": "resume", "REPLAN": "replan", "REPLAN+RESUME": "replan-resume", "ESCALATE": "escalate", "ESCALATE CAPABILITY": "capability"},
 }
 BASE_ROLES_BY_KIND = {
     "analysis": {"goal-planner", "plan-reviewer", "context-reviewer", "planner", "discovery", "phase-surveyor", "recovery", "phase-auditor"},
@@ -234,10 +238,15 @@ def triage_review_findings(run: Path, phase: str, source_task_id: str, finding_i
         source["updated_at"]=stamp; write_json(source_path,source)
 
 def report_requests_capability(report: Path) -> bool:
+    """Recognize the explicit capability token through the same Markdown envelope as other routing."""
     if not report.is_file(): return False
-    for raw in report.read_text(encoding="utf-8",errors="replace").splitlines():
-        if raw.strip(): return raw.strip()=="ESCALATE CAPABILITY"
-    return False
+    allowed={"ESCALATE CAPABILITY":"capability"}
+    nonempty=[raw.strip() for raw in report.read_text(encoding="utf-8",errors="replace").splitlines() if raw.strip()]
+    if not nonempty: return False
+    index=0; skipped=0
+    while index < len(nonempty) and skipped < 2 and _decorative_routing_heading(nonempty[index],allowed):
+        index+=1; skipped+=1
+    return bool(index < len(nonempty) and _routing_line_outcome(nonempty[index],allowed)=="capability")
 
 
 def accepted_outcome(task: dict[str, Any]) -> str | None:
@@ -460,7 +469,7 @@ def validate_analyst_plan_source(run: Path, phase: str, graph_path: Path) -> dic
     analysis = source.get("last_analysis") if isinstance(source.get("last_analysis"), dict) else {}
     approved_replan = analysis.get("outcome") in {"replan","replan-resume"} and str(analysis.get("report") or "") == report_resolved
     if not (accepted or approved_replan):
-        raise ValueError("Analyst task graph is mechanically gated but has not been approved: accept the Analyst result, or record analysis-result --outcome replan/replan-resume for a replacement plan")
+        raise ValueError("Analyst task graph is mechanically gated but has not been approved: accept standalone findings, or record the Analyst report's REPLAN/REPLAN+RESUME disposition before registering its replacement plan")
     return {"source_task_id": source_id, "source_attempt": str(event), "source_report": report_resolved}
 
 
@@ -1660,8 +1669,8 @@ def command_prepare_followup_triage(args: argparse.Namespace) -> dict[str, Any]:
                 *[f"- [{x['finding_id']}] {x['text']}" for x in findings],
                 "",
                 "## Required disposition",
-                "- If the current frozen plan already genuinely covers every obligation, explain why and use `analysis-result --outcome resume`.",
-                "- If any brief/task/dependency must change, emit a replacement/amending task graph and use `analysis-result --outcome replan`. T-BAG already knows which findings this triage owns; do not repeat IDs as graph ceremony.",
+                "- If the current frozen plan already genuinely covers every obligation, explain why and open the report with `RESUME`.",
+                "- If any brief/task/dependency must change, emit a replacement/amending task graph and open the report with `REPLAN`. T-BAG already knows which findings this triage owns; do not repeat IDs as graph ceremony.",
                 "- If neither route is responsibly justified, escalate. Do not silently defer, waive, or relabel an obligation.",
                 "",
                 "## Planning discipline",
@@ -1729,8 +1738,10 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
             return {**base,"action":"record-phase-gate","report":str(event/"report.md")}
         if task.get("kind")=="verification" and role in BASE_ROLES_BY_KIND["verification"]:
             return {**base,"action":"record-verification-result","report":str(event/"report.md")}
-        if role in {"discovery","planner","phase-surveyor","recovery"} and task.get("kind") in {"implementation","verification"}:
-            return {**base,"action":"record-analyst-disposition","report":str(event/"report.md")}
+        if role in ANALYST_DISPOSITION_ROLES:
+            declared=declared_report_outcome(event/"report.md",role,required=False)
+            if task.get("followup_triage_for") or task.get("kind") in {"implementation","verification"} or declared in {"resume","replan","replan-resume","escalate"}:
+                return {**base,"action":"record-analyst-disposition","report":str(event/"report.md")}
         if task.get("kind") in {"analysis","verification"}: return {**base,"action":"accept-specialist-result","report":str(event/"report.md")}
     return None
 
@@ -2053,6 +2064,10 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"]))
                 result=command_phase_gate(a)
+            elif name=="record-analyst-disposition":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"])); a.outcome=None
+                result=command_analysis_result(a)
             elif name=="accept-reviewed-task":
                 task=load_task(run,phase,tid)
                 if task.get("role")=="goal-planner":
@@ -2413,13 +2428,18 @@ def require_context_review(task: dict[str, Any], attempt: dict[str, Any], *, rea
 
 def command_review(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
-    outcome=args.outcome
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path); report=args.report.resolve()
         if not report.is_file(): raise ValueError(f"review report missing: {report}")
-        declared=declared_report_outcome(report,"reviewer",required=False)
+        declared=declared_report_outcome(report,"reviewer",required=False); fallback=getattr(args,"outcome",None)
         if declared=="capability": raise ValueError("Reviewer requested ESCALATE CAPABILITY; route capability escalation instead of recording a Review verdict")
-        if declared is not None and declared!=outcome: raise ValueError(f"Reviewer declared {declared!r} but --outcome was {outcome!r}; do not make the parent reinterpret the report")
+        if declared is None:
+            if fallback is None: raise ValueError("Reviewer report has no explicit routing token; only legacy/tokenless reports require --outcome")
+            outcome=fallback
+        else:
+            if fallback is not None and declared!=fallback: raise ValueError(f"Reviewer declared {declared!r} but --outcome was {fallback!r}; do not make the parent reinterpret the report")
+            outcome=declared
+        if outcome not in {"pass","fail","escalate"}: raise ValueError(f"unsupported Reviewer outcome: {outcome!r}")
         attempt=matching_gated_attempt(task,"reviewer",report)
         if attempt is None: raise ValueError("review outcome must refer to a gated Reviewer attempt for this task")
         require_current_review_attempt(task,attempt,reason="review outcome")
@@ -2476,12 +2496,16 @@ def _record_review_conduit(task: dict[str, Any], recorded: dict[str, Any], *, hi
 
 def command_plan_review(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
-    outcome=args.outcome
     with file_lock(path.with_suffix(".lock")):
-        report=args.report.resolve()
-        declared=declared_report_outcome(report,"plan-reviewer",required=False)
+        report=args.report.resolve(); declared=declared_report_outcome(report,"plan-reviewer",required=False); fallback=getattr(args,"outcome",None)
         if declared=="capability": raise ValueError("Plan Reviewer requested ESCALATE CAPABILITY; route capability escalation instead")
-        if declared is not None and declared!=outcome: raise ValueError(f"Plan Reviewer declared {declared!r} but --outcome was {outcome!r}")
+        if declared is None:
+            if fallback is None: raise ValueError("Plan Reviewer report has no explicit routing token; only legacy/tokenless reports require --outcome")
+            outcome=fallback
+        else:
+            if fallback is not None and declared!=fallback: raise ValueError(f"Plan Reviewer declared {declared!r} but --outcome was {fallback!r}")
+            outcome=declared
+        if outcome not in {"pass","fail","escalate"}: raise ValueError(f"unsupported Plan Reviewer outcome: {outcome!r}")
         review_task,attempt,target,target_id=_review_conduit_start(
             path,role="plan-reviewer",report=report,target_key="plan_review_target",label="plan-review"
         )
@@ -2522,12 +2546,17 @@ def command_plan_review(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_context_review(args: argparse.Namespace) -> dict[str, Any]:
-    run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid); outcome=args.outcome
+    run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
-        report=args.report.resolve()
-        declared=declared_report_outcome(report,"context-reviewer",required=False)
+        report=args.report.resolve(); declared=declared_report_outcome(report,"context-reviewer",required=False); fallback=getattr(args,"outcome",None)
         if declared=="capability": raise ValueError("Context Reviewer requested ESCALATE CAPABILITY; route capability escalation instead")
-        if declared is not None and declared!=outcome: raise ValueError(f"Context Reviewer declared {declared!r} but --outcome was {outcome!r}")
+        if declared is None:
+            if fallback is None: raise ValueError("Context Reviewer report has no explicit routing token; only legacy/tokenless reports require --outcome")
+            outcome=fallback
+        else:
+            if fallback is not None and declared!=fallback: raise ValueError(f"Context Reviewer declared {declared!r} but --outcome was {fallback!r}")
+            outcome=declared
+        if outcome not in {"pass","fail","escalate"}: raise ValueError(f"unsupported Context Reviewer outcome: {outcome!r}")
         review_task,attempt,target,target_id=_review_conduit_start(
             path,role="context-reviewer",report=report,target_key="context_review_target",label="context-review"
         )
@@ -2569,10 +2598,19 @@ def command_analysis_result(args: argparse.Namespace) -> dict[str, Any]:
         task=load_json(path); report=args.report.resolve()
         if task.get("status") in {"accepted","integrated","superseded"}: raise ValueError(f"cannot record a new analysis result for completed task status {task.get('status')!r}")
         if not report.is_file(): raise ValueError(f"Analyst report missing: {report}")
-        attempt=matching_gated_attempt(task,{"discovery","planner","phase-surveyor","recovery"},report)
-        if attempt is None or attempt_tier(attempt)!="analyst": raise ValueError("analysis result must refer to a gated Analyst attempt for this task")
+        attempt=matching_gated_attempt(task,set(ANALYST_DISPOSITION_ROLES),report)
+        if attempt is None or attempt_tier(attempt)!="analyst": raise ValueError("analysis result must refer to a gated disposition-owning Analyst attempt for this task")
         require_current_attempt(task,attempt,reason="analysis result")
-        outcome=args.outcome; task["last_analysis"]={"outcome":outcome,"report":str(report),"attempt":str(attempt.get("event_dir")),"recorded_at":now()}
+        role=str(attempt.get("role") or ""); declared=declared_report_outcome(report,role,required=False); fallback=getattr(args,"outcome",None)
+        if declared=="capability": raise ValueError(f"{role} requested ESCALATE CAPABILITY; route capability escalation instead of recording an Analyst disposition")
+        if declared is None:
+            if fallback is None: raise ValueError("Analyst report has no explicit lifecycle disposition; standalone findings use accept --report, while legacy/tokenless lifecycle reports require --outcome")
+            outcome=fallback
+        else:
+            if fallback is not None and declared!=fallback: raise ValueError(f"Analyst declared {declared!r} but --outcome was {fallback!r}; do not make the parent reinterpret the report")
+            outcome=declared
+        if outcome not in {"resume","replan","replan-resume","escalate"}: raise ValueError(f"unsupported Analyst disposition: {outcome!r}")
+        task["last_analysis"]={"outcome":outcome,"report":str(report),"attempt":str(attempt.get("event_dir")),"recorded_at":now()}
         if outcome=="resume":
             if task.get("followup_triage_for") and task.get("kind")=="analysis":
                 ids=[str(x) for x in task.get("followup_finding_ids",[]) if str(x)]
@@ -2607,7 +2645,7 @@ def command_escalate(args: argparse.Namespace) -> dict[str, Any]:
         if attempt is None:
             raise ValueError(
                 "escalate must reference a gated worker report for this task; do not author a parent escalation report. "
-                "Analyst specialists use analysis-result --outcome escalate; Reviewer/Plan-Reviewer/Context-Reviewer "
+                "Analyst specialists use their ESCALATE report through analysis-result (legacy form: analysis-result --outcome escalate); Reviewer/Plan-Reviewer/Context-Reviewer "
                 "use their own semantic outcome command"
             )
         role=str(attempt.get("role") or "")
@@ -2848,11 +2886,11 @@ def parser() -> argparse.ArgumentParser:
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
         if name=="record-attempt": p.add_argument("--attempt-json",type=Path,required=True)
         elif name=="update-attempt": p.add_argument("--event-dir",type=Path,required=True); p.add_argument("--status",choices=sorted(ATTEMPT_STATUSES)); p.add_argument("--gate",type=Path); p.add_argument("--session-id")
-        elif name=="review": p.add_argument("--outcome",choices=("pass","fail","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
-        elif name=="plan-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
-        elif name=="context-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
+        elif name=="review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
+        elif name=="plan-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
+        elif name=="context-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="verification-result": p.add_argument("--report",type=Path,required=True)
-        elif name=="analysis-result": p.add_argument("--outcome",choices=("resume","replan","replan-resume","escalate"),required=True); p.add_argument("--report",type=Path,required=True)
+        elif name=="analysis-result": p.add_argument("--outcome",choices=("resume","replan","replan-resume","escalate"),help="legacy/tokenless report fallback; Analyst disposition token is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="escalate": p.add_argument("--report",type=Path,required=True)
         elif name=="resolve-escalation": p.add_argument("--decision",type=Path,required=True); p.add_argument("--route",choices=("resume","analysis","accept"),default="resume")
         elif name=="accept": p.add_argument("--report",type=Path)

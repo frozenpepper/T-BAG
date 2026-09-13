@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from _contract import worker_skill_tags
-from _roles import ANALYST_ROLES, ROLE_SKILLS, TECHNICAL_QUALITY_ROLES
+from _roles import ANALYST_DISPOSITION_ROLES, ANALYST_ROLES, ROLE_SKILLS, TECHNICAL_QUALITY_ROLES
 from _rules_snapshot import verify_snapshot
 
 INPUT_FLAGS = {
@@ -49,9 +49,9 @@ def main() -> int:
     quality = quality_candidate if args.role in TECHNICAL_QUALITY_ROLES and quality_candidate.is_file() else None
     graph_author = args.role in {"planner", "discovery", "phase-surveyor", "recovery"}
     plan_authoring = protocol / "PLAN-AUTHORING.md" if graph_author else None
-    # COMMON defines generic ESCALATE. The extra adjudication guidance is only
-    # useful when an Analyst is actually receiving a lower-tier escalation.
-    analyst_escalation = protocol / "ANALYST-ESCALATION.md" if args.role in ANALYST_ROLES and args.escalation_context else None
+    # Planner/Discovery/Surveyor/Recovery may own a lifecycle disposition even
+    # without a lower-tier escalation packet. Keep that tiny protocol shared.
+    analyst_escalation = protocol / "ANALYST-ESCALATION.md" if args.role in ANALYST_DISPOSITION_ROLES else None
     catalog_role = args.role in {"goal-planner", "plan-reviewer", "context-reviewer", "planner", "discovery", "phase-surveyor", "recovery"}
     skill_catalog = Path(snapshot["worker_skill_catalog"]) if catalog_role else None
     project_protocol = Path(snapshot["project_protocol"]) if snapshot.get("project_protocol") else None

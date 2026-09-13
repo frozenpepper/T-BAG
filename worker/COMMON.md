@@ -32,4 +32,4 @@ Do the full work your role owns, but do not turn task-local evidence into an uns
 
 Create the attempt report immediately. Keep the launcher placeholder while work is in progress and append concise status after meaningful steps; remove the marker only when the final report is complete.
 
-The final report is self-contained and opens with the role's required disposition/status plus the one or two findings that change routing. Then give decisive work/evidence, verification actually performed, remaining uncertainty/defects, and the next technical step. The parent should be able to route from the opening without redoing your analysis.
+The final report is self-contained. **Routing roles put their exact disposition first. Non-routing roles must not self-award `PASS`; start with a concise result/status instead.** Then give the one or two findings that change routing, decisive work/evidence, verification actually performed, remaining uncertainty/defects, and the next technical step. The parent should be able to route from the opening without redoing your analysis.
