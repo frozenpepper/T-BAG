@@ -1,0 +1,54 @@
+name: RC45 field-fix publisher
+on:
+  push:
+    branches: [rc45-field-publisher]
+    paths:
+      - 'publisher/**'
+      - '.github/workflows/rc45-field-publisher.yml'
+permissions:
+  contents: write
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rc45-built
+          fetch-depth: 0
+      - name: Apply SQR8V2 field fixes
+        env:
+          EXPECTED_BASE: b46b8665d3d5da9ca86d6ecf412c1c7dfb21b5b3
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          git fetch origin rc45-field-publisher:refs/remotes/origin/rc45-field-publisher
+          git show origin/rc45-field-publisher:publisher/patch_field_feedback_v2.py > /tmp/patch_field_feedback_v2.py
+          python3 /tmp/patch_field_feedback_v2.py
+          git diff --check
+          git add CHANGELOG.md OPENCODE.md scripts/dsd_task.py scripts/parent_tick.py tests/test_rc45_parent_tick.py
+          test "$(git diff --cached --name-only)" = $'CHANGELOG.md\nOPENCODE.md\nscripts/dsd_task.py\nscripts/parent_tick.py\ntests/test_rc45_parent_tick.py'
+      - name: Focused field regressions
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc45_parent_tick -v
+          python3 -m compileall -q scripts tests
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+      - name: Full regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+      - name: Publish candidate commit
+        run: |
+          set -euo pipefail
+          git config user.name 'T-BAG Publisher'
+          git config user.email 'tbag-publisher@users.noreply.github.com'
+          git commit -m 'RC45: normalize routing syntax and isolate control errors'
+          git push origin HEAD:refs/heads/rc45-field-built --force
