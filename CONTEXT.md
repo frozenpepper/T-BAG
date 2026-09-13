@@ -32,8 +32,8 @@ Before `prepare_worker_rules.py --adopt-context-from <attempt-dir>` may adopt pr
 
 1. the source Analyst attempt is gated;
 2. a **fresh Analyst Context Reviewer** bound to that source task receives a frozen independent copy of the exact proposed context plus the source brief/report/authority inputs;
-3. `dsd_task.py context-review --outcome pass ...` records PASS for that exact source attempt/snapshot;
-4. the source technical result is independently accepted or routed through `analysis-result resume|replan` as appropriate;
+3. `dsd_task.py context-review --report ...` records the Reviewer's own PASS token for that exact source attempt/snapshot;
+4. the source technical result is independently accepted or routed through its own Analyst disposition when required;
 5. promotion rechecks that the live proposal still exactly matches the reviewed snapshot.
 
 On Context Review FAIL, revise via a later Analyst attempt or abandon the proposed reusable context. Do not promote it by paraphrasing it in the parent.
@@ -48,12 +48,13 @@ A new session normally gets, in order:
 2. universal `COMMON.md`;
 3. shared `QUALITY.md` for roles that own technical engineering conclusions (not Context Reviewer or Evidence Clerk);
 4. one role skill;
-5. `PLAN-AUTHORING.md` only for roles allowed to write task graphs;
-6. metadata-only worker-skill catalog only for planning/review roles that need discovery;
-7. optional Project Protocol;
-8. only role-applicable task-selected skills;
-9. the Analyst-authored task brief;
-10. typed exact paths: governing authority, owner decisions, accepted Analyst/dependency findings, current escalation packets, current Review findings, prior worker claims, recovery evidence, and proposals under review as applicable.
+5. shared Analyst routing guidance for Planner/Discovery/Phase Surveyor/Recovery;
+6. `PLAN-AUTHORING.md` only for roles allowed to write task graphs;
+7. metadata-only worker-skill catalog only for planning/review roles that need discovery;
+8. optional Project Protocol;
+9. only role-applicable task-selected skills;
+10. the Analyst-authored task brief;
+11. typed exact paths: governing authority, owner decisions, accepted Analyst/dependency findings, current escalation packets, current Review findings, prior worker claims, recovery evidence, and proposals under review as applicable.
 
 Phase Planner, Phase Surveyor and Phase Auditor receive the frozen authoritative plan directly as typed governing authority. Ordinary Grunts do not receive the full plan unless their task explicitly requires it.
 
