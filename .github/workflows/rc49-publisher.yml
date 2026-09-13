@@ -1,0 +1,72 @@
+name: RC49 role and command coherence publisher
+
+on:
+  push:
+    branches: [rc49-publisher]
+
+permissions:
+  contents: write
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_BASE: 7311c1ee705315ef0a2170a57f2b79cf23d9db7c
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rc49-role-command-coherence
+          fetch-depth: 0
+      - name: Apply guarded RC49 control-plane patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main rc49-publisher
+          test "$(git rev-parse origin/main)" = "$EXPECTED_BASE"
+          test "$(git merge-base HEAD origin/main)" = "$EXPECTED_BASE"
+          git show origin/rc49-publisher:publisher/rc49/apply_rc49.py > /tmp/apply_rc49.py
+          git show origin/rc49-publisher:publisher/rc49/test_rc49_role_command_coherence.py > tests/test_rc49_role_command_coherence.py
+          python3 /tmp/apply_rc49.py
+          git diff --check
+          test "$(wc -c < SKILL.md)" -le 6500
+          test "$(wc -c < PROMPTS.md)" -le 6500
+          test "$(wc -c < CONTEXT.md)" -le 5500
+          test "$(wc -c < worker/COMMON.md)" -le 4000
+          test "$(wc -c < worker/QUALITY.md)" -le 3500
+          test "$(wc -c < worker/PLAN-AUTHORING.md)" -le 4000
+          for f in worker/roles/*/SKILL.md; do test "$(wc -c < "$f")" -le 3000; done
+      - name: Focused RC49 regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc49_role_command_coherence -v
+          python3 -m unittest tests.test_docs -q
+          python3 -m compileall -q scripts tests
+      - name: Full regression matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc46_supervision -q
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+          node tests/opencode_transport_registry_runtime.mjs adapters/opencode/tbag.js
+      - name: Publish candidate commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "T-BAG Publisher"
+          git config user.email "tbag-publisher@users.noreply.github.com"
+          git checkout -B rc49-built
+          git add CONTEXT.md PROMPTS.md scripts/_roles.py scripts/dsd_task.py scripts/prepare_worker_rules.py scripts/render_worker_prompt.py tests/test_rc49_role_command_coherence.py worker/ANALYST-ESCALATION.md worker/COMMON.md worker/PLAN-AUTHORING.md worker/roles/dsd-implementer/SKILL.md worker/roles/dsd-fixer/SKILL.md worker/roles/dsd-reviewer/SKILL.md worker/roles/dsd-discovery/SKILL.md worker/roles/dsd-planner/SKILL.md worker/roles/dsd-recovery/SKILL.md worker/roles/dsd-phase-surveyor/SKILL.md worker/roles/dsd-verification/SKILL.md worker/roles/dsd-evidence-clerk/SKILL.md worker/roles/dsd-goal-planner/SKILL.md worker/roles/dsd-plan-reviewer/SKILL.md worker/roles/dsd-phase-auditor/SKILL.md
+          git diff --cached --check
+          git commit -m "RC49: unify worker-owned routing and role contracts"
+          test "$(git merge-base HEAD origin/main)" = "$EXPECTED_BASE"
+          git push --force-with-lease origin rc49-built
