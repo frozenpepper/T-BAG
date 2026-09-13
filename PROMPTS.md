@@ -65,7 +65,7 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 
 python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1 --task-id T01
 ```
 
-`inspect` is diagnostic. Routine monitoring belongs to `parent_tick.py tick`.
+`inspect` is diagnostic. Routine monitoring belongs to `parent_tick.py tick`; it handles final-report/no-terminal completion recovery without treating long runtime alone as failure.
 
 ## Gate / Review / Fix
 
