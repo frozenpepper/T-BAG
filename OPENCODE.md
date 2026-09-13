@@ -43,6 +43,8 @@ It does not replace step 3. The parent still calls `tbag_follow` immediately. Th
 
 Direct Bash/Python `dsd_attempt.py follow` remains forbidden because it can monopolize the conversational turn. The project-local `tbag_follow` tool backgrounds the same core observer and returns immediately.
 
+Credential/config rotation is not assumed to hot-reload inside an already-running worker. If a worker stops making progress after rotation, use lifecycle retirement plus retained-session resume/retry; never make the parent inventory sibling processes or issue raw `ps`/`kill`.
+
 ## Wake transport boundary
 
 `tbag_follow` validates the exact recorded attempt and backgrounds the core `dsd_attempt.py follow` observer. The core role-aware deadline remains authoritative: 2h for Grunts and 6h for Analysts unless explicitly overridden.

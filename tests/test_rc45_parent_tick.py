@@ -12,14 +12,15 @@ class Rc45ProtocolTests(unittest.TestCase):
     def test_explicit_routing_token_accepts_bounded_decoration_not_prose(self):
         with tempfile.TemporaryDirectory() as td:
             report=Path(td)/"report.md"
-            for text in ("PASS — all checks green\n", "**PASS**\n", "ESCALATE CAPABILITY: provider exhausted\n"):
+            for text in ("PASS — all checks green\n", "**PASS**\n", "**PASS** — reviewer summary\n", "# PASS\n", "* PASS\n", "`PASS`\n", "# T-BAG Phase Auditor report\nPASS\n", "## Phase gate\n**PASS** — all predicates green\n", "ESCALATE CAPABILITY: provider exhausted\n"):
                 report.write_text(text)
                 role="verification" if not text.startswith("ESCALATE") else "reviewer"
                 expected="pass" if role=="verification" else "capability"
                 self.assertEqual(dsd_task.declared_report_outcome(report,role,required=True),expected)
-            report.write_text("The evidence looks like PASS to me.\n")
-            with self.assertRaisesRegex(ValueError,"must begin"):
-                dsd_task.declared_report_outcome(report,"verification",required=True)
+            for invalid in ("The evidence looks like PASS to me.\n", "# Verdict: PASS\n", "# Phase gate\nNarrative first.\nPASS\n"):
+                report.write_text(invalid)
+                with self.assertRaisesRegex(ValueError,"must begin"):
+                    dsd_task.declared_report_outcome(report,"verification",required=True)
 
     def test_followup_parser_handles_none_footer_and_wrapped_bullet(self):
         with tempfile.TemporaryDirectory() as td:
@@ -34,6 +35,21 @@ class Rc45ProtocolTests(unittest.TestCase):
         with mock.patch.object(dsd_task,"open_review_findings",return_value=[]), mock.patch.object(dsd_task,"dependency_satisfied",return_value=True) as dep:
             self.assertTrue(dsd_task._phase_task_success(Path('/run'),'P',task))
             dep.assert_called_once()
+
+    def test_advance_quarantines_bad_action_and_continues_unrelated_work(self):
+        args=SimpleNamespace(run_root=Path('/run'),phase_id=None,max_steps=6)
+        bad={"action":"record-verification-result","phase_id":"P","task_id":"BAD","report":"/tmp/bad.md"}
+        good={"action":"record-phase-gate","phase_id":"P","task_id":"GOOD","report":"/tmp/good.md"}
+        states=[{"first_useful_actions":[bad,good]},{"first_useful_actions":[bad,good]},{"first_useful_actions":[bad]}]
+        with mock.patch.object(dsd_task,"command_reconcile_run",side_effect=states), \
+             mock.patch.object(dsd_task,"command_verification_result",side_effect=ValueError("bad report")), \
+             mock.patch.object(dsd_task,"command_phase_gate",return_value={"recorded":True}) as phase_gate:
+            out=dsd_task.command_advance(args)
+        phase_gate.assert_called_once()
+        self.assertEqual(out["stopped"],"control-error")
+        self.assertEqual(len(out["blocked_actions"]),1)
+        self.assertEqual(out["blocked_actions"][0]["task_id"],"BAD")
+        self.assertEqual(out["applied"][0]["task_id"],"GOOD")
 
 
 class Rc45ParentTickTests(unittest.TestCase):
@@ -90,6 +106,20 @@ class Rc45ParentTickTests(unittest.TestCase):
             out=parent_tick.command_tick(self.args)
         _retire.assert_called_once()
         self.assertTrue(out["monitoring"][0]["retirement_requested"]["retired"])
+
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    def test_tick_filters_quarantined_action_but_exposes_other_work(self,_load,_owner):
+        bad={"action":"record-verification-result","phase_id":"P","task_id":"BAD","report":"/tmp/bad.md"}
+        good={"action":"launch-worker","phase_id":"P","task_id":"GOOD"}
+        blocked={"key":parent_tick.action_key(bad),"action":bad["action"],"phase_id":"P","task_id":"BAD","error":"bad report"}
+        with mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","blocked_actions":[blocked]}), \
+             mock.patch.object(parent_tick,"reconcile",return_value=self.base_state(first_useful_actions=[bad,good],backlog_count=2)):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"actions-ready")
+        self.assertEqual(out["actions"],[good])
+        self.assertEqual(out["blocked_actions"][0]["task_id"],"BAD")
 
     @mock.patch.object(parent_tick.dsd_task,"command_set_run_status",return_value={"status":"completed"})
     def test_finish_refuses_nonquiescent_and_accepts_completion_candidate(self,set_status):

@@ -88,6 +88,31 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _routing_line_outcome(raw: str, allowed: dict[str, str]) -> str | None:
+    """Parse one explicit routing line after harmless Markdown decoration."""
+    text=raw.strip()
+    text=re.sub(r"^#{1,6}\s+", "", text)
+    text=re.sub(r"^[*+-]\s+", "", text)
+    for token in sorted(allowed,key=len,reverse=True):
+        escaped=re.escape(token)
+        forms=(escaped,rf"\*\*{escaped}\*\*",rf"__{escaped}__",rf"\*{escaped}\*",rf"`{escaped}`")
+        if re.fullmatch(rf"(?:{'|'.join(forms)})(?:\s*(?:—|–|-|:)\s+.+)?",text):
+            return allowed[token]
+    return None
+
+
+def _decorative_routing_heading(raw: str, allowed: dict[str, str]) -> bool:
+    """A pure Markdown title may precede the routing line; a verdict-bearing title may not."""
+    text=raw.strip()
+    if not re.match(r"^#{1,6}\s+\S",text):
+        return False
+    upper=text.upper()
+    for token in sorted(allowed,key=len,reverse=True):
+        if re.search(rf"(?<![A-Z0-9_]){re.escape(token)}(?![A-Z0-9_])",upper):
+            return False
+    return True
+
+
 def declared_report_outcome(report: Path, role: str, *, required: bool = False) -> str | None:
     """Read an explicit worker routing disposition without interpreting prose.
 
@@ -104,15 +129,15 @@ def declared_report_outcome(report: Path, role: str, *, required: bool = False) 
         return None
     nonempty=[raw.strip() for raw in report.read_text(encoding="utf-8",errors="replace").splitlines() if raw.strip()]
     first=nonempty[0] if nonempty else ""
-    outcome=allowed.get(first)
-    if outcome is None and first:
-        # Still deterministic: accept only an allowed token anchored at the start of
-        # the first line, optionally Markdown-bolded and followed by an explicit
-        # punctuation separator. Never infer PASS/FAIL from ordinary prose.
-        for token in sorted(allowed,key=len,reverse=True):
-            pattern=rf"^(?:\*\*)?{re.escape(token)}(?:\*\*)?(?:\s*(?:—|–|-|:)\s+.+)?$"
-            if re.fullmatch(pattern,first):
-                outcome=allowed[token]; break
+    outcome=_routing_line_outcome(first,allowed) if first else None
+    if outcome is None and first and _decorative_routing_heading(first,allowed):
+        # At most two pure Markdown title headings are presentation, not content.
+        # A title that itself mentions a routing token is never skipped.
+        index=1; skipped=1
+        while index < len(nonempty) and skipped < 2 and _decorative_routing_heading(nonempty[index],allowed):
+            index+=1; skipped+=1
+        if index < len(nonempty):
+            outcome=_routing_line_outcome(nonempty[index],allowed)
     if outcome is not None:
         return outcome
     explicit=[]
@@ -1896,14 +1921,21 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
     launches workers. It only removes parent turns that would otherwise be a switch
     statement over durable state and exact worker routing tokens.
     """
-    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]
+    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]; blocked_actions=[]; blocked_keys=set()
+    def action_key(item: dict[str, Any]) -> str:
+        return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
     for index in range(max_steps):
         class R: pass
         r=R(); r.run_root=run; r.phase_id=getattr(args,"phase_id",None); r.no_sweep=index>0; r.details=False
         state=command_reconcile_run(r); actions=list(state.get("first_useful_actions") or [])
         if not actions:
-            return {"applied":applied,"stopped":"quiescent","state":state}
-        action=actions[0]; name=str(action.get("action") or ""); phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
+            result={"applied":applied,"stopped":"quiescent","state":state}
+            if blocked_actions: result["blocked_actions"]=blocked_actions
+            return result
+        action=next((item for item in actions if action_key(item) not in blocked_keys),None)
+        if action is None:
+            return {"applied":applied,"stopped":"control-error","blocked_actions":blocked_actions,"state":state}
+        name=str(action.get("action") or ""); phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
         try:
             if name=="gate-finished-attempt":
                 scripts=Path(__file__).resolve().parent
@@ -1915,7 +1947,9 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             elif name=="record-review-outcome":
                 report=Path(str(action["report"])); declared=declared_report_outcome(report,"reviewer",required=False)
                 if declared is None:
-                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                    result={"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                    if blocked_actions: result["blocked_actions"]=blocked_actions
+                    return result
                 if declared not in {"pass","fail","escalate"}: break
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=report; a.outcome=declared
@@ -1923,7 +1957,9 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             elif name=="record-plan-review-outcome":
                 report=Path(str(action["report"])); declared=declared_report_outcome(report,"plan-reviewer",required=False)
                 if declared is None:
-                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                    result={"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                    if blocked_actions: result["blocked_actions"]=blocked_actions
+                    return result
                 if declared not in {"pass","fail","escalate"}: break
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=report; a.outcome=declared
@@ -1931,7 +1967,9 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             elif name=="record-context-review-outcome":
                 report=Path(str(action["report"])); declared=declared_report_outcome(report,"context-reviewer",required=False)
                 if declared is None:
-                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                    result={"applied":applied,"stopped":"semantic-boundary","next_action":action,"reason":"legacy report needs explicit outcome command","state":state}
+                    if blocked_actions: result["blocked_actions"]=blocked_actions
+                    return result
                 if declared not in {"pass","fail","escalate"}: break
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=report; a.outcome=declared
@@ -1947,7 +1985,9 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             elif name=="accept-reviewed-task":
                 task=load_task(run,phase,tid)
                 if task.get("role")=="goal-planner":
-                    return {"applied":applied,"stopped":"semantic-boundary","next_action":action,"state":state}
+                    result={"applied":applied,"stopped":"semantic-boundary","next_action":action,"state":state}
+                    if blocked_actions: result["blocked_actions"]=blocked_actions
+                    return result
                 review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(review.get("report"))) if review.get("report") else None
@@ -1964,14 +2004,20 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
                 a=A(); a.run_root=run; a.phase_id=phase
                 result=command_prepare_phase_gate(a)
             else:
-                return {"applied":applied,"stopped":"semantic-or-launch-boundary","next_action":action,"state":state}
+                result={"applied":applied,"stopped":"semantic-or-launch-boundary","next_action":action,"state":state}
+                if blocked_actions: result["blocked_actions"]=blocked_actions
+                return result
         except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
-            return {"applied":applied,"stopped":"control-error","next_action":action,"error":str(exc),"state":state}
+            key=action_key(action); blocked_keys.add(key)
+            blocked_actions.append({"key":key,"action":name,"phase_id":phase or None,"task_id":tid or None,"error":str(exc)})
+            continue
         applied.append({"action":name,"phase_id":phase or None,"task_id":tid or None,"result":result})
     class R: pass
     r=R(); r.run_root=run; r.phase_id=getattr(args,"phase_id",None); r.no_sweep=True; r.details=False
     state=command_reconcile_run(r)
-    return {"applied":applied,"stopped":"step-limit","state":state}
+    result={"applied":applied,"stopped":"step-limit","state":state}
+    if blocked_actions: result["blocked_actions"]=blocked_actions
+    return result
 
 
 def command_idle_check(args: argparse.Namespace) -> dict[str, Any]:

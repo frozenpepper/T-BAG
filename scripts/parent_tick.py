@@ -73,6 +73,10 @@ def args_for(**values: Any) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+def action_key(item: dict[str, Any]) -> str:
+    return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
+
+
 def reconcile(run: Path, phase_id: str | None, *, sweep: bool = True) -> dict[str, Any]:
     return dsd_task.command_reconcile_run(args_for(run_root=run, phase_id=phase_id, no_sweep=not sweep, details=False))
 
@@ -146,6 +150,7 @@ def update_due(
     if classification == "completion-candidate": urgent.append("project-end-candidate")
     if any(x.get("retirement_requested") for x in monitors): urgent.append("worker-retired")
     if any(x.get("attention") == "silent-long-running" for x in monitors): urgent.append("worker-stall")
+    if classification == "recovery-required": urgent.append("control-recovery-required")
     if urgent:
         due, reasons = True, urgent
     elif last_at is None:
@@ -233,7 +238,10 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         state = reconcile(run, getattr(args, "phase_id", None), sweep=False)
 
     run_status = str(state.get("run_status") or "active")
-    pending = list(state.get("first_useful_actions") or [])
+    blocked_actions=list(advance_result.get("blocked_actions") or []) if isinstance(advance_result,dict) else []
+    blocked_keys={str(item.get("key") or "") for item in blocked_actions if isinstance(item,dict)}
+    pending_all=list(state.get("first_useful_actions") or [])
+    pending=[item for item in pending_all if action_key(item) not in blocked_keys]
     live_now = list(state.get("live_attempts") or [])
     if run_status != "active":
         classification = f"run-{run_status}"
@@ -244,7 +252,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif completion_candidate(state):
         classification = "completion-candidate"
         turn = "finish-or-replan"
-    elif any(x.get("retirement_error") for x in monitors) or state.get("unresolved_state"):
+    elif any(x.get("retirement_error") for x in monitors) or state.get("unresolved_state") or (blocked_actions and not pending):
         classification = "recovery-required"
         turn = "intervene"
     elif pending:
@@ -286,6 +294,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "owner_update": owner,
     }
     if advance_result: out["advance"] = advance_result
+    if blocked_actions: out["blocked_actions"] = blocked_actions
     if pending: out["actions"] = pending
     if live_now: out["live_attempts"] = live_now
     if monitors: out["monitoring"] = monitors

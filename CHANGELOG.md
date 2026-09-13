@@ -8,7 +8,8 @@ This release package keeps only recent architectural history. Detailed pre-RC22 
 - OpenCode registers active runs for a low-frequency heartbeat, validates `already_armed` observer health, and wakes the parent into the tick. No task/model/semantic authority moved into the plugin.
 - Added lifecycle-owned attempt retirement. Final-report/no-terminal workers retire automatically after a short grace; confirmed silent anomalies are terminated through the recorded worker process group so retained state/session recovery can continue and spawned MCP children do not linger.
 - Owner updates are durable/acknowledged and periodic during long active work. Quiescent active runs surface `completion-candidate` instead of silently idling; explicit finish is mechanically refused while registered work remains.
-- Relaxed only the mechanical report envelope (anchored suffixed/bold verdict tokens, footer-safe/empty follow-up obligations), fixed superseded mutable-task phase-gate readiness, and documented replan-before-register ordering.
+- Relaxed only the mechanical report envelope: token-first Markdown decoration, pure leading title headings, anchored suffix prose, and footer-safe/empty follow-up obligations are accepted without semantic inference. `# Verdict: PASS` remains invalid.
+- `advance` now quarantines an isolated deterministic control error for the current pass and continues unrelated authorized actions instead of letting one poisoned action jam the parent loop. Superseded mutable-task phase-gate readiness and replan-before-register ordering remain fixed.
 
 ## v2.2.0 RC44 — shared dependency fixtures without fat workrooms
 
