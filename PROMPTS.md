@@ -2,9 +2,9 @@
 
 Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HARNESS.md` + selected adapter.
 
-**Normal rule:** semantic routing belongs to the worker report. `parent_tick.py tick` records explicit routing tokens automatically when possible. The manual result commands below record that same report-owned decision; `--outcome ...` is only a compatibility fallback for an older/tokenless report.
+**Normal rule:** semantic routing belongs to the worker report. `parent_tick.py tick` records explicit routing tokens automatically. Manual result commands record that same report-owned decision; `--outcome ...` is only a compatibility fallback for an older/tokenless report.
 
-**OpenCode parent:** detached core launch → immediate `tbag_follow` with the exact tuple returned by `dsd_attempt.py launch`. Call even if auto-armed; it is idempotent/backward-compatible.
+**OpenCode parent:** detached core launch → immediate `tbag_follow` with the exact tuple returned by `dsd_attempt.py launch`.
 
 ## Parent tick / turn boundary
 
@@ -12,7 +12,7 @@ Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HA
 python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-Run on owner turn/resume/wake/heartbeat. The packet owns reconcile, advance, monitoring, updates and end-state routing. After sending `owner_update`, acknowledge its token with `parent_tick.py ack-update`; on `completion-candidate`, replan or `parent_tick.py finish --reason "..."` after confirming plan exhaustion.
+Run on owner turn/resume/wake/heartbeat. The packet owns reconcile, advance, monitoring, updates and end-state routing. After sending `owner_update`, acknowledge its token with `parent_tick.py ack-update`. On `completion-candidate`, replan or `parent_tick.py finish --reason "..."` after confirming plan exhaustion.
 
 ## Initialize runtime
 
@@ -36,40 +36,38 @@ python3 <skill>/scripts/dsd_task.py register-direct \
   --run-root ... --phase-id bootstrap --task-id GOAL-PLAN \
   --brief .../goal-plan.md --kind analysis --role goal-planner --tier analyst --no-integration
 python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id bootstrap --task-id GOAL-PLAN [--authority-input ...]
-python3 <skill>/scripts/dsd_attempt.py gate   --run-root ... --phase-id bootstrap --task-id GOAL-PLAN
+python3 <skill>/scripts/dsd_attempt.py gate --run-root ... --phase-id bootstrap --task-id GOAL-PLAN
 
 python3 <skill>/scripts/dsd_task.py register-direct \
   --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW \
   --brief .../review.md --kind analysis --role plan-reviewer --tier analyst --no-integration \
   --reviews-task GOAL-PLAN
 python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW
-python3 <skill>/scripts/dsd_attempt.py gate   --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW
+python3 <skill>/scripts/dsd_attempt.py gate --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW
 python3 <skill>/scripts/dsd_task.py plan-review \
   --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW --report .../report.md
 ```
 
-FAIL returns the Goal Planner for revision; review the next proposal in a fresh session. PASS permits acceptance/rules creation.
+FAIL returns the Goal Planner for revision; the next proposal gets a fresh review. PASS permits acceptance/rules creation.
 
 ## Register an Analyst graph
 
-Analyst preflights before handoff; registration repeats the check. For an amendment/replan, the report starts `REPLAN` or `REPLAN+RESUME`; **record that disposition before registering its graph**:
+Analyst preflights before handoff; registration repeats the check. For an amendment/replan, the report starts `REPLAN` or `REPLAN+RESUME`; record that disposition before registering its graph:
 
 ```bash
 python3 <skill>/scripts/dsd_task.py analysis-result --run-root ... --phase-id phase-1 --task-id PLAN-X --report .../report.md
 python3 <skill>/scripts/dsd_task.py preflight-plan --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
-python3 <skill>/scripts/dsd_task.py register-plan  --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
+python3 <skill>/scripts/dsd_task.py register-plan --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
 ```
-
-`register-plan` returns `ready_registered`.
 
 ## Launch / inspect / observe
 
 ```bash
-python3 <skill>/scripts/dsd_attempt.py launch  --run-root ... --phase-id phase-1 --task-id T01
+python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 --task-id T01
 python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1 --task-id T01
 ```
 
-`inspect` is diagnostic. Routine monitoring belongs to `parent_tick.py tick`: final-report/no-terminal attempts retire after a short grace; confirmed silent anomalies use role history plus CPU/process evidence. Long-running work is not killed merely for being long.
+`inspect` is diagnostic. Routine monitoring belongs to `parent_tick.py tick`; long-running work is not killed merely for being long.
 
 ## Gate / Review / Fix
 
@@ -80,7 +78,7 @@ python3 <skill>/scripts/dsd_task.py review --run-root ... --phase-id phase-1 --t
 python3 <skill>/scripts/dsd_workspace.py integrate --run-root ... --phase-id phase-1 --task-id T01 --review-pass-report .../reviewer-N/report.md
 ```
 
-The Reviewer owns `PASS`/`FAIL`/`ESCALATE`; the parent never re-decides it. `--review-pass-report` validates and records that exact gated PASS, accepts it and integrates in one control call. FAIL opens the Fixer lane; Fixer resumes that Reviewer session, then a **new** Reviewer judges the whole task.
+The Reviewer owns `PASS`/`FAIL`/`ESCALATE`; the parent never re-decides it. `--review-pass-report` validates and records that exact gated PASS, accepts it and integrates. FAIL opens the Fixer lane; Fixer resumes that Reviewer session, then a **new** Reviewer judges the whole task.
 
 Analyst diagnosis/recovery routing is likewise report-owned:
 
@@ -89,9 +87,9 @@ python3 <skill>/scripts/dsd_task.py analysis-result \
   --run-root ... --phase-id phase-1 --task-id T01 --report .../discovery-N/report.md
 ```
 
-Lifecycle reports use `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, or `ESCALATE CAPABILITY`. Standalone Analyst findings without a lifecycle transition use `accept --report ...`. `REPLAN` requires a graph; `REPLAN+RESUME` is implementation/verification-only. Review-follow-up triage uses `RESUME` only when the frozen plan already covers every finding.
+Lifecycle reports use `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, or `ESCALATE CAPABILITY`. Findings-only Analyst work without a lifecycle transition uses `accept --report ...`. `REPLAN` requires a graph; `REPLAN+RESUME` is implementation/verification-only. Follow-up triage uses `RESUME` only when the frozen plan already covers every finding.
 
-For a legacy report with no parseable routing token only, add the matching `--outcome ...` to `review`, `plan-review`, `context-review`, or `analysis-result`; never use the flag to override a report token.
+For a legacy report with no parseable routing token, add the matching `--outcome ...` to `review`, `plan-review`, `context-review`, or `analysis-result`; never use it to override a report token.
 
 ## Human escalation
 
@@ -105,8 +103,6 @@ On Human-blocked follow-up triage, `--route accept` cancels its findings and pre
 
 ## Cleanup / interrupted process
 
-Cleanup is lifecycle-owned; these are diagnostics/recovery only:
-
 ```bash
 python3 <skill>/scripts/dsd_workspace.py cleanup-phase --run-root ... --phase-id phase-1
 python3 <skill>/scripts/dsd_task.py sweep-stale --run-root ... --phase-id phase-1
@@ -117,7 +113,7 @@ python3 <skill>/scripts/dsd_workspace.py purge-run --run-root ... --dry-run
 
 ## Same-session continuation
 
-After `sweep-stale`, use `--resume-last` when available; workspace state remains authoritative if host session state is gone. Recovery hands back with a `RESUME` report recorded through `analysis-result --report ...` first.
+After `sweep-stale`, use `--resume-last` when available. Recovery hands back with a `RESUME` report recorded through `analysis-result --report ...` first.
 
 ```bash
 python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 --task-id T01 --role implementer --resume-last
