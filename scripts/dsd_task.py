@@ -1905,6 +1905,77 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def _attempt_terminal(attempt:dict[str,Any])->dict[str,Any]|None:
+    event=Path(str(attempt.get("event_dir") or "")); terminal=event/"terminal.json"
+    if not terminal.is_file(): return None
+    try: value=load_json(terminal)
+    except (OSError,ValueError,json.JSONDecodeError): return None
+    return value
+
+def _terminal_changed_count(terminal:dict[str,Any])->int|None:
+    scope=terminal.get("scope_diff") if isinstance(terminal.get("scope_diff"),dict) else {}
+    raw=scope.get("changed_count")
+    try: return int(raw)
+    except (TypeError,ValueError): return None
+
+def _attempt_session_identity(attempt:dict[str,Any],terminal:dict[str,Any]|None=None)->str|None:
+    for value in ((terminal or {}).get("session_id"),attempt.get("session_id"),attempt.get("resume_session")):
+        if isinstance(value,str) and value.strip(): return value.strip()
+    event=Path(str(attempt.get("event_dir") or "")); detail=event/"attempt.json"
+    if detail.is_file():
+        try:
+            value=load_json(detail).get("session_id")
+            if isinstance(value,str) and value.strip(): return value.strip()
+        except (OSError,ValueError,json.JSONDecodeError): pass
+    return None
+
+def poisoned_session_candidate(task:dict[str,Any], *, failures:int=3)->dict[str,Any]|None:
+    base=str(task.get("role") or "")
+    attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
+    if len(attempts)<failures or not base: return None
+    tail=attempts[-failures:]
+    session=None; events=[]
+    for attempt in tail:
+        if str(attempt.get("role") or "")!=base: return None
+        if str(attempt.get("status") or "") not in {"report-resume","report-recovery"}: return None
+        terminal=_attempt_terminal(attempt)
+        if terminal is None: return None
+        try: exit_code=int(terminal.get("exit_code"))
+        except (TypeError,ValueError): return None
+        if exit_code==0 or str(terminal.get("report_state") or "")!="launcher-placeholder": return None
+        if _terminal_changed_count(terminal)!=0: return None
+        current=_attempt_session_identity(attempt,terminal)
+        if not current: return None
+        if session is None: session=current
+        elif current!=session: return None
+        events.append(str(attempt.get("event_dir") or ""))
+    return {"session_id":session,"failures":failures,"events":events,"role":base}
+
+def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
+    """Route strict repeated same-session transport deaths to Analyst Recovery."""
+    run=args.run_root.resolve(); selected=slug(args.phase_id) if getattr(args,"phase_id",None) else None; marked=[]
+    for initial in list(iter_run_tasks(run) or []):
+        phase=str(initial.get("phase_id") or ""); tid=str(initial.get("task_id") or "")
+        if not phase or not tid or (selected and phase!=selected): continue
+        if initial.get("status") in {"accepted","integrated","superseded","blocked","recovery-required"}: continue
+        if task_has_live_attempt(initial): continue
+        path=task_file(run,phase,tid)
+        with file_lock(path.with_suffix(".lock")):
+            task=load_json(path)
+            if task_has_live_attempt(task): continue
+            candidate=poisoned_session_candidate(task)
+            if candidate is None: continue
+            abandoned=task.setdefault("abandoned_sessions",[])
+            sid=str(candidate["session_id"])
+            if sid not in abandoned: abandoned.append(sid)
+            history=task.setdefault("session_poison_history",[])
+            if not any(isinstance(x,dict) and str(x.get("session_id") or "")==sid and x.get("events")==candidate.get("events") for x in history):
+                history.append({**candidate,"recorded_at":now(),"reason":"three-consecutive-no-work-nonzero-exits"})
+            task["status"]="recovery-required"; task["updated_at"]=now(); write_json(path,task)
+            marked.append({"phase_id":phase,"task_id":tid,**candidate,"action":"launch-recovery"})
+    return {"count":len(marked),"marked":marked}
+
+
 def _control_subprocess_json(argv: list[str]) -> dict[str, Any]:
     cp=subprocess.run(argv,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
     try: data=json.loads(cp.stdout.strip().splitlines()[-1]) if cp.stdout.strip() else {}
@@ -2084,10 +2155,16 @@ def command_update_attempt(args: argparse.Namespace) -> dict[str, Any]:
             # Backward-compatible reading of older gate output. New gates classify
             # admissible retained mutation as mutating-report-resume instead.
             task["status"]="recovery-required"
-        elif args.status in {"report-recovery", "report-resume", "mutating-report-resume"}:
-            # No-change report recovery and substantive in-progress reports are
-            # intentionally resumable. Preserve routing instead of forcing an
-            # expensive cold Analyst recovery for a transport hiccup.
+        elif args.status in {"report-recovery", "report-resume"}:
+            # An empty/no-change process failure has no semantic authority. Return
+            # to the durable lane this attempt entered; the attempt remains newest
+            # chronologically and is still the resume/retry target.
+            prior=str(found.get("prior_task_status") or "")
+            if prior in {"needs-fix","needs-analysis","recovery-required","awaiting-review","review-passed"}:
+                task["status"]=_stale_retry_status(task,found)
+        elif args.status=="mutating-report-resume":
+            # Retained project movement is genuinely in-progress work. Keep the
+            # active lane so the same worker/session owns completion of that delta.
             pass
         elif found.get("role") in {"implementer","fixer"} and args.status in {"gated", "process-exited"}:
             task["status"]="awaiting-review"
@@ -2113,6 +2190,50 @@ def matching_any_gated_attempt(task: dict[str, Any], report: Path) -> dict[str, 
         event=Path(str(attempt.get("event_dir") or ""))
         if (event/"report.md").resolve()==target: return attempt
     return None
+
+
+def _attempt_is_empty_retry(attempt: dict[str, Any]) -> bool:
+    status=str(attempt.get("status") or "")
+    if status=="stale-unresolved":
+        return str(attempt.get("stale_disposition") or "")=="safe-retry" and not list(attempt.get("stale_changed_paths") or [])
+    if status not in {"report-recovery","report-resume"}: return False
+    terminal=_attempt_terminal(attempt)
+    return bool(terminal and str(terminal.get("report_state") or "")=="launcher-placeholder" and _terminal_changed_count(terminal)==0)
+
+
+def _attempt_supersedes_task_review(attempt: dict[str, Any]) -> bool:
+    role=str(attempt.get("role") or "")
+    if role=="reviewer": return True
+    if role in {"implementer","fixer","verification"}:
+        return not _attempt_is_empty_retry(attempt)
+    # Analyst diagnosis/recovery can interpret the standing Review; it does not
+    # silently erase that Review merely by occurring later in wall-clock order.
+    return False
+
+
+def review_attempt_is_authoritative(task: dict[str, Any], attempt: dict[str, Any]) -> bool:
+    attempts=[a for a in task.get("attempts",[]) if isinstance(a,dict)]
+    target=Path(str(attempt.get("event_dir") or "")).resolve(); seen=False
+    for current in attempts:
+        if not seen and Path(str(current.get("event_dir") or "")).resolve()==target:
+            seen=True; continue
+        if seen and _attempt_supersedes_task_review(current): return False
+    return seen
+
+
+def require_current_review_attempt(task: dict[str, Any], attempt: dict[str, Any], *, reason: str) -> None:
+    if not review_attempt_is_authoritative(task,attempt):
+        raise ValueError(f"{reason}: report is stale because newer semantic Review/execution evidence exists")
+
+
+def standing_review_lane(task: dict[str, Any]) -> str | None:
+    review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
+    outcome=str(review.get("outcome") or "")
+    if outcome not in {"pass","fail"}: return None
+    target=str(review.get("attempt") or "")
+    attempt=next((a for a in task.get("attempts",[]) if isinstance(a,dict) and str(a.get("event_dir") or "")==target),None)
+    if attempt is None or not review_attempt_is_authoritative(task,attempt): return None
+    return "needs-fix" if outcome=="fail" else "review-passed"
 
 
 def require_current_attempt(task: dict[str, Any], attempt: dict[str, Any], *, reason: str) -> None:
@@ -2301,7 +2422,7 @@ def command_review(args: argparse.Namespace) -> dict[str, Any]:
         if declared is not None and declared!=outcome: raise ValueError(f"Reviewer declared {declared!r} but --outcome was {outcome!r}; do not make the parent reinterpret the report")
         attempt=matching_gated_attempt(task,"reviewer",report)
         if attempt is None: raise ValueError("review outcome must refer to a gated Reviewer attempt for this task")
-        require_current_attempt(task,attempt,reason="review outcome")
+        require_current_review_attempt(task,attempt,reason="review outcome")
         attempt_path=str(attempt.get("event_dir"))
         history=task.setdefault("review_history", [])
         if any(isinstance(x,dict) and str(x.get("attempt") or "")==attempt_path for x in history):
@@ -2462,12 +2583,12 @@ def command_analysis_result(args: argparse.Namespace) -> dict[str, Any]:
                 release_read_only_runtime(run,phase,tid)
                 return {"task_id":tid,"outcome":outcome,"status":"accepted","triaged_findings":ids}
             if task.get("kind") not in {"implementation","verification"}: raise ValueError("analysis-result resume is valid only for implementation/verification diagnosis or Review follow-up triage")
-            task["status"]="planned"
+            task["status"]=standing_review_lane(task) or "planned"
         elif outcome in {"replan","replan-resume"}:
             require_analyst_plan_graph(attempt, reason=f"analysis-result {outcome}")
             if outcome=="replan-resume":
                 if task.get("kind") not in {"implementation","verification"}: raise ValueError("analysis-result replan-resume is only valid when the current implementation/verification task also returns to its prior lane")
-                task["status"]="planned"
+                task["status"]=standing_review_lane(task) or "planned"
             else:
                 task["status"]="needs-analysis"
         else:
@@ -2719,6 +2840,7 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("sweep-stale"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("reconcile-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--no-sweep",action="store_true"); p.add_argument("--details",action="store_true")
     p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
+    p=sub.add_parser("poison-scan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
@@ -2755,6 +2877,7 @@ def main() -> int:
         elif args.command=="sweep-stale": result=command_sweep_stale(args)
         elif args.command=="reconcile-run": result=command_reconcile_run(args)
         elif args.command=="owner-status": result=command_owner_status(args)
+        elif args.command=="poison-scan": result=command_poison_scan(args)
         elif args.command=="advance": result=command_advance(args)
         elif args.command=="idle-check": result=command_idle_check(args)
         elif args.command=="show": result=command_show(args)

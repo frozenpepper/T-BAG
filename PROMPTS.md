@@ -51,6 +51,7 @@ FAIL resumes Planner; review again fresh. PASS permits acceptance/rules creation
 
 ## Register an Analyst graph
 
+
 Analyst preflights before handoff; registration repeats it. For an amendment/replan, **record `analysis-result --outcome replan` first, then register the graph**:
 
 ```bash

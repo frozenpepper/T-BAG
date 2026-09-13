@@ -28,7 +28,7 @@ There is exactly one parent protocol, including across adapter upgrades:
 6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
 7. Do not keep the conversation alive with Bash/Python sleeps or polling. Per-attempt completion requests an early tick; a periodic transport heartbeat requests another tick even when a wake was lost.
 
-The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth.
+The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth. A Human `--route analysis` opens Analyst authority only; the Analyst's later `replan` is the separate technical graph decision.
 
 ## Safety auto-arm (new adapter, not protocol authority)
 
@@ -47,13 +47,22 @@ Credential/config rotation is not assumed to hot-reload inside an already-runnin
 
 ## Wake transport boundary
 
-`tbag_follow` validates the exact recorded attempt and backgrounds the core `dsd_attempt.py follow` observer. The core role-aware deadline remains authoritative: 2h for Grunts and 6h for Analysts unless explicitly overridden.
+`tbag_follow` validates the exact recorded attempt and backgrounds the core `dsd_attempt.py follow` observer. The default 2h Grunt / 6h Analyst deadline is measured from the durable **attempt start**, not from observer arm time, so parent succession or re-arming cannot reset it. `running` means the recorded worker process exists; it never means semantic progress.
 
 OpenCode session lifecycle events are used only as a thin transport interlock. If an observer finishes while the parent is still busy, the plugin coalesces one **in-memory wake bit** for that session and flushes it when OpenCode reports idle (or releases the busy turn on a terminal session error). A completion that races the wake-generated parent turn receives one final non-blocking flush when that turn releases.
 
 Wake state is disposable. Per-attempt wakes are only fast hints; the run heartbeat requests another parent tick when one is lost. The tick re-derives live/terminal/action state from durable T-BAG files. Session deletion suppresses obsolete delivery; a successor session registers its own heartbeat on `tbag_follow`.
 
 The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists semantic notification state.
+
+## Status display
+
+Current OpenCode TUI builds can load the additive project-local `tbag-ui` companion. It renders only the read-only `TBag/tools/tbag_status.py` snapshot: registered-plan progress, phase gates, active Grunt/Analyst sessions, task purpose, model, process/observer health, elapsed/deadline state and attention items. `/tbag` opens the detailed panel; the footer/sidebar stay deliberately compact. Presentation never ticks, launches, retires, accepts or integrates work.
+
+Observer registrations are mirrored into run-local `.transport/opencode.json` only as disposable transport diagnostics. Durable task/run files remain semantic authority. Missing observer state is a reason to re-arm the exact live attempt, not evidence that the task failed.
+
+Repeated same-session instant deaths with a launcher-placeholder report and zero project movement are mechanically routed to `recovery-required` after three consecutive failures. That poisoned session is then abandoned and the existing `launch-recovery` action commissions an Analyst. Human authority is not consumed merely because a worker session became unusable.
+
 
 ## Forbidden substitutes
 

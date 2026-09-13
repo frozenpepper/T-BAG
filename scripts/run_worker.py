@@ -220,7 +220,7 @@ def opencode_json_session_id(log: Path)->tuple[str|None,str|None]:
 
 
 
-def capture_live_session_id(args: argparse.Namespace, log: Path, proc: subprocess.Popen, *, attempts: int = 4, delay_seconds: float = 0.5) -> tuple[str|None,str|None]:
+def capture_live_session_id(args: argparse.Namespace, log: Path, proc: subprocess.Popen, *, attempts: int = 60, delay_seconds: float = 0.5) -> tuple[str|None,str|None]:
     """Best-effort early session capture while the worker is still alive.
 
     A killed process may never write terminal.json. Persisting the host session ID in
@@ -460,6 +460,11 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
         elif args.driver in {"opencode","opencode2"}: session_id,session_error=opencode_json_session_id(p["log"])
         elif args.driver=="claude": session_id,session_error=claude_session_id(p["log"])
         else: session_id,session_error=codex_session_id(p["log"])
+    if session_id:
+        attempt["session_id"]=session_id; attempt.pop("session_lookup_error",None)
+    elif session_error:
+        attempt["session_lookup_error"]=session_error
+    atomic_json(p["event_dir"]/"attempt.json",attempt)
     terminal={"format":"dsd-worker-terminal-v2.2","status":"process-exited","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"attempt":args.attempt,"exit_code":rc,"worker_pid":proc.pid,"launcher_pid":os.getpid(),"session_id":session_id,"session_lookup_error":session_error,"reserved_at":reserved_at,"started_at":started,"ended_at":now(),"report":str(p["report"]),"report_state":report_state(p["report"]),"scope_diff":scope,"scope_error":scope_error}
     if process_retries: terminal["process_retries"]=process_retries
     if stderr_path is not None: terminal["stderr_log"]=str(stderr_path)

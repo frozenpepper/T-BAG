@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { readFileSync } from "node:fs"
+import { readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs"
 
 // OpenCode owns wake delivery; T-BAG durable task/run files own orchestration truth.
 // This adapter keeps only disposable per-session/per-attempt transport state.
@@ -11,6 +11,27 @@ const busySessions = new Set()
 const pendingWakeSessions = new Set()
 const wakeInflightSessions = new Set()
 const deletedSessions = new Set()
+
+function transportPath(runRoot) { return `${runRoot}/.transport/opencode.json` }
+function persistTransport(runRoot) {
+  if (!runRoot) return
+  try {
+    const parents = [...runHeartbeats.values()]
+      .filter((item) => item.run_root === runRoot)
+      .map((item) => ({ session_id: item.sessionID, run_root: item.run_root, last_queued_at_ms: item.lastQueuedAt }))
+    const observers = [...follows.values()]
+      .filter((item) => item.args?.run_root === runRoot)
+      .map((item) => ({
+        session_id: item.sessionID, phase_id: item.args?.phase_id, task_id: item.args?.task_id, event_dir: item.args?.event_dir,
+        observer_pid: item.proc?.pid, generation: item.generation, armed_at_ms: item.armedAt, done: item.done === true, orphaned: item.orphaned === true,
+      }))
+    const path = transportPath(runRoot); const tmp = `${path}.tmp-${process.pid}`
+    mkdirSync(`${runRoot}/.transport`, { recursive: true })
+    writeFileSync(tmp, JSON.stringify({ format: "tbag-opencode-transport-v1", adapter_pid: process.pid, updated_at: new Date().toISOString(), parent_sessions: parents, observers }, null, 2) + "\n")
+    renameSync(tmp, path)
+  } catch (_) { /* presentation/diagnostic state may never break orchestration */ }
+}
+
 
 function followKey(sessionID, args) {
   return [sessionID, args.run_root, args.phase_id, args.task_id, args.event_dir].join("\u0000")
@@ -50,6 +71,7 @@ function registerRunHeartbeat(sessionID, args) {
   runHeartbeats.set(heartbeatKey(sessionID, args.run_root), {
     sessionID, run_root: args.run_root, lastQueuedAt: Date.now(),
   })
+  persistTransport(args.run_root)
 }
 function runIsActive(runRoot) {
   try { return JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8")).status === "active" } catch (_) { return false }
@@ -136,8 +158,9 @@ function armAttempt(client, sessionID, root, args, validate = true) {
   }
 
   const proc = spawnObserver(root, args)
-  const entry = { proc, done: false, generation: ++observerGeneration, armedAt: Date.now() }
+  const entry = { proc, done: false, generation: ++observerGeneration, armedAt: Date.now(), sessionID, args: { ...args } }
   follows.set(key, entry)
+  persistTransport(args.run_root)
   void (async () => {
     try {
       await proc.exited
@@ -150,6 +173,7 @@ function armAttempt(client, sessionID, root, args, validate = true) {
     } finally {
       entry.done = true
       if (follows.get(key) === entry) follows.delete(key)
+      persistTransport(args.run_root)
       queueWake(client, sessionID)
     }
   })()
@@ -177,7 +201,10 @@ function markSessionStatus(client, event) {
     busySessions.delete(sessionID)
     pendingWakeSessions.delete(sessionID)
     wakeInflightSessions.delete(sessionID)
-    for (const [key, item] of runHeartbeats) if (item.sessionID === sessionID) runHeartbeats.delete(key)
+    const affected = new Set()
+    for (const [key, item] of runHeartbeats) if (item.sessionID === sessionID) { affected.add(item.run_root); runHeartbeats.delete(key) }
+    for (const item of follows.values()) if (item.sessionID === sessionID) { item.orphaned = true; affected.add(item.args?.run_root) }
+    for (const runRoot of affected) if (runRoot) persistTransport(runRoot)
     return
   }
 
@@ -217,10 +244,11 @@ const TBagPlugin = async (ctx) => {
   const heartbeatTimer = setInterval(() => {
     for (const [key, item] of runHeartbeats) {
       if (deletedSessions.has(item.sessionID) || !runIsActive(item.run_root)) {
-        runHeartbeats.delete(key); continue
+        runHeartbeats.delete(key); persistTransport(item.run_root); continue
       }
       if (Date.now() - item.lastQueuedAt < HEARTBEAT_MS) continue
       item.lastQueuedAt = Date.now()
+      persistTransport(item.run_root)
       queueWake(ctx.client, item.sessionID)
     }
   }, HEARTBEAT_MS)

@@ -102,6 +102,35 @@ def retire_attempt(run: Path, item: dict[str, Any], reason: str) -> dict[str, An
     ))
 
 
+def transport_registry(run:Path)->dict[str,Any]:
+    path=run/".transport"/"opencode.json"
+    try:
+        value=json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value,dict) else {}
+    except (OSError,json.JSONDecodeError):
+        return {}
+
+def observer_for(registry:dict[str,Any], event_dir:str)->dict[str,Any]|None:
+    target=str(Path(event_dir).resolve()) if event_dir else ""
+    adapter_pid=registry.get("adapter_pid"); adapter_alive=False
+    if isinstance(adapter_pid,int) and adapter_pid>0:
+        try: os.kill(adapter_pid,0); adapter_alive=True
+        except OSError: pass
+    matches=[]
+    for item in registry.get("observers",[]) if isinstance(registry.get("observers"),list) else []:
+        if not isinstance(item,dict): continue
+        try: current=str(Path(str(item.get("event_dir") or "")).resolve())
+        except OSError: current=str(item.get("event_dir") or "")
+        if current!=target: continue
+        pid=item.get("observer_pid"); alive=False
+        if isinstance(pid,int) and pid>0:
+            try: os.kill(pid,0); alive=True
+            except OSError: pass
+        matches.append({**item,"process_alive":alive,"adapter_alive":adapter_alive,"healthy":bool(alive and adapter_alive and not item.get("done") and not item.get("orphaned"))})
+    if not matches: return None
+    return next((x for x in reversed(matches) if x.get("healthy")),matches[-1])
+
+
 def completion_candidate(state: dict[str, Any]) -> bool:
     if str(state.get("run_status") or "active") != "active":
         return False
@@ -175,12 +204,14 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
 
     advance_result: dict[str, Any] | None = None
     info = dsd_task.load_run(run)
+    poison_result: dict[str, Any] | None = None
     if str(info.get("status") or "active") == "active":
         advance_result = dsd_task.command_advance(args_for(
             run_root=run,
             phase_id=getattr(args, "phase_id", None),
             max_steps=int(getattr(args, "max_steps", 12) or 12),
         ))
+        poison_result = dsd_task.command_poison_scan(args_for(run_root=run,phase_id=getattr(args,"phase_id",None)))
 
     state = reconcile(run, getattr(args, "phase_id", None), sweep=True)
     monitors: list[dict[str, Any]] = []
@@ -188,6 +219,8 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     seen_events: set[str] = set()
     changed_runtime = False
     current_time = time.time()
+    transport=transport_registry(run)
+    observer_rearm=[]
 
     for live in list(state.get("live_attempts") or []):
         event = str(live.get("event_dir") or "")
@@ -198,6 +231,12 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             monitors.append({**live, "monitor_error": str(exc), "attention": "monitor-error"})
             continue
         item = {**live, **observed}
+        observer=observer_for(transport,event) if transport else None
+        if transport:
+            item["observer"]=observer or {"healthy":False,"known":False}
+            if observer is None or not observer.get("healthy"):
+                item["observer_attention"]="observer-missing"
+                observer_rearm.append({"run_root":str(run),"phase_id":live.get("phase_id"),"task_id":live.get("task_id"),"event_dir":event})
         report_age = observed.get("report_age_seconds")
         if observed.get("state") == "running" and observed.get("report_state") == "present" and isinstance(report_age, (int, float)) and report_age >= float(args.report_complete_grace_seconds):
             try:
@@ -210,20 +249,27 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         elif observed.get("state") == "running" and observed.get("attention") == "silent-long-running":
             prior = stalls.get(event) if isinstance(stalls.get(event), dict) else {}
             first_seen = epoch(prior.get("first_seen_at"))
+            cpu_now=((observed.get("process") or {}).get("worker") or {}).get("cpu_seconds")
             if first_seen is None:
                 first_seen = current_time
-                prior = {"first_seen_at": now(), "task_id": live.get("task_id"), "phase_id": live.get("phase_id")}
-            prior["last_seen_at"] = now()
+                prior = {"first_seen_at": now(), "task_id": live.get("task_id"), "phase_id": live.get("phase_id"), "cpu_seconds_at_first_seen":cpu_now}
+            prior["last_seen_at"] = now(); prior["last_cpu_seconds"]=cpu_now
             stalls[event] = prior
             stalled_for = max(0.0, current_time - first_seen)
             item["stall_confirmed_seconds"] = round(stalled_for, 1)
-            if stalled_for >= float(args.stall_confirm_seconds):
+            cpu_start=prior.get("cpu_seconds_at_first_seen"); cpu_delta=None
+            if isinstance(cpu_now,(int,float)) and isinstance(cpu_start,(int,float)):
+                cpu_delta=max(0.0,float(cpu_now)-float(cpu_start)); item["stall_cpu_delta_seconds"]=round(cpu_delta,2)
+            cpu_quiet=cpu_delta is None or cpu_delta<=2.0
+            if stalled_for >= float(args.stall_confirm_seconds) and cpu_quiet:
                 try:
                     item["retirement_requested"] = retire_attempt(run, live, "confirmed-silent-long-running")
                     changed_runtime = True
                 except Exception as exc:
                     item["retirement_error"] = str(exc)
                     item["attention"] = "retirement-failed"
+            elif stalled_for >= float(args.stall_confirm_seconds):
+                item["automatic_intervention_deferred"]="worker-cpu-still-changing"
             else:
                 item["automatic_intervention_in_seconds"] = round(float(args.stall_confirm_seconds) - stalled_for, 1)
         else:
@@ -294,6 +340,8 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "owner_update": owner,
     }
     if advance_result: out["advance"] = advance_result
+    if poison_result and poison_result.get("count"): out["poisoned_sessions_routed"] = poison_result
+    if observer_rearm: out["observer_rearm_required"] = observer_rearm
     if blocked_actions: out["blocked_actions"] = blocked_actions
     if pending: out["actions"] = pending
     if live_now: out["live_attempts"] = live_now

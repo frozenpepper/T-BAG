@@ -130,15 +130,17 @@ def install_helper(skill_root: Path, project_root: Path) -> dict[str, Path]:
     dsd_task = tools / "dsd_task.py"
     dsd_attempt = tools / "dsd_attempt.py"
     parent_tick = tools / "parent_tick.py"
+    tbag_status = tools / "tbag_status.py"
     write_skill_shim(target, skill_root / "scripts" / "context_checkpoint.py")
     write_skill_shim(dsd_task, skill_root / "scripts" / "dsd_task.py")
     write_skill_shim(dsd_attempt, skill_root / "scripts" / "dsd_attempt.py")
     write_skill_shim(parent_tick, skill_root / "scripts" / "parent_tick.py")
+    write_skill_shim(tbag_status, skill_root / "scripts" / "tbag_status.py")
     # Remove legacy copied control-plane modules. Immutable run evidence remains in runs/;
     # project hooks need only the stable shim above.
     for name in ("check_state.py", "dsd_state.py", "_contract.py", "_rules_snapshot.py", "_roles.py"):
         (tools / name).unlink(missing_ok=True)
-    return {"context_checkpoint": target, "dsd_task": dsd_task, "dsd_attempt": dsd_attempt, "parent_tick": parent_tick}
+    return {"context_checkpoint": target, "dsd_task": dsd_task, "dsd_attempt": dsd_attempt, "parent_tick": parent_tick, "tbag_status": tbag_status}
 
 
 def install_codex(project_root: Path, skill_root: Path) -> dict[str, Any]:
@@ -197,17 +199,25 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         project_root, "opencode", Path(".opencode/plugins/tbag.js"),
         skill_root / "adapters" / "opencode" / "tbag.js",
     )
+    ui_results=[]
+    for name in ("index.ts","tui.ts","tui.tsx"):
+        ui_results.append(install_plugin_file(
+            project_root,"opencode",Path(".opencode/plugins/tbag-ui")/name,
+            skill_root/"adapters"/"opencode"/"tbag-ui"/name,
+        ))
     legacy = project_root / ".opencode" / "plugins" / "dsd-compaction.ts"
     legacy_removed = legacy.exists()
     legacy.unlink(missing_ok=True)
+    result["changed"] = bool(result.get("changed") or any(x.get("changed") for x in ui_results))
     result.update({
+        "tui_plugin": [x.get("plugin") for x in ui_results],
         "interactive_supervision": "detached-core-launch-then-tbag-follow",
         "autonomous_supervision": "per-attempt-wake-plus-parent-heartbeat",
         "required_live_tool": "tbag_follow",
         "live_capability_verified": False,
         "activation": "restart-required-to-load-refreshed-adapter" if result.get("changed") or legacy_removed else "disk-current-live-registry-unverified",
         "legacy_plugin_removed": legacy_removed,
-        "manual_step": "The installer proves only the project adapter file on disk; it cannot inspect the current OpenCode tool registry. If the adapter changed, restart/reload OpenCode to activate the refreshed hooks. Every owner turn/resume/wake/heartbeat begins with TBag/tools/parent_tick.py tick. New attempts still use detached core dsd_attempt.py launch followed immediately by tbag_follow; tbag_follow also registers the active run for the low-frequency heartbeat. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the OpenCode parent turn.",
+        "manual_step": "The installer proves only the project adapter file on disk plus companion presentation files; it cannot inspect the current OpenCode tool registry. Restart/reload OpenCode after changes. Current OpenCode TUI builds discover the companion T-BAG status plugin and expose /tbag; older hosts may ignore that presentation layer while the stable tbag_follow transport remains authoritative. Every owner turn/resume/wake/heartbeat begins with TBag/tools/parent_tick.py tick. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
     })
     return result
 

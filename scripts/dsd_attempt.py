@@ -35,6 +35,51 @@ def pid_alive(pid:Any)->bool:
     except OSError: return False
 
 
+def _cpu_time_seconds(value:str)->float|None:
+    text=str(value or "").strip()
+    if not text: return None
+    days=0
+    if "-" in text:
+        head,text=text.split("-",1)
+        try: days=int(head)
+        except ValueError: return None
+    parts=text.split(":")
+    try:
+        values=[float(x) for x in parts]
+    except ValueError:
+        return None
+    if len(values)==3: hours,minutes,seconds=values
+    elif len(values)==2: hours=0.0; minutes,seconds=values
+    else: return None
+    return days*86400.0+hours*3600.0+minutes*60.0+seconds
+
+
+def process_observation(pid:Any)->dict[str,Any]:
+    """Bounded OS process evidence. Existence is liveness evidence, never progress."""
+    if not isinstance(pid,int) or pid<=0:
+        return {"pid":pid,"alive":False,"known":False}
+    base={"pid":pid,"alive":pid_alive(pid),"known":True}
+    if not base["alive"] or not shutil.which("ps"):
+        return base
+    cp=subprocess.run(["ps","-o","pid=,ppid=,stat=,%cpu=,time=","-p",str(pid)],text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,check=False)
+    line=cp.stdout.strip().splitlines()[-1].strip() if cp.returncode==0 and cp.stdout.strip() else ""
+    if not line: return base
+    parts=line.split(None,4)
+    if len(parts)<5: return base
+    try: ppid=int(parts[1])
+    except ValueError: ppid=None
+    try: cpu_percent=float(parts[3])
+    except ValueError: cpu_percent=None
+    stat=parts[2]
+    # A zombie still has a PID but is not a viable worker.
+    alive=bool(base["alive"] and not stat.startswith("Z"))
+    return {**base,"alive":alive,"ppid":ppid,"state":stat,"cpu_percent":cpu_percent,"cpu_seconds":_cpu_time_seconds(parts[4])}
+
+
+def role_deadline_seconds(role:str)->float:
+    return 7200.0 if DEFAULT_TIER.get(role)=="grunt" else 21600.0
+
+
 def latest_rules(run:Path)->Path:
     candidates=rules_revisions(run)
     if not candidates: raise ValueError("no worker-rules revision exists; run prepare_worker_rules.py first")
@@ -61,11 +106,8 @@ def attempt_worker_rules(attempt: dict[str, Any]) -> str | None:
 
 
 def attempt_session_id(attempt: dict[str, Any]) -> str | None:
-    value = attempt.get("session_id")
-    if isinstance(value, str) and value:
-        return value
     event = Path(str(attempt.get("event_dir") or ""))
-    for evidence in (event / "attempt.json", event / "terminal.json"):
+    for evidence in (event / "terminal.json", event / "attempt.json"):
         if not evidence.is_file(): continue
         try:
             value = json.loads(evidence.read_text()).get("session_id")
@@ -73,7 +115,8 @@ def attempt_session_id(attempt: dict[str, Any]) -> str | None:
                 return value
         except (OSError, json.JSONDecodeError):
             pass
-    return None
+    value = attempt.get("session_id")
+    return value if isinstance(value, str) and value else None
 
 
 def rules_for_resumed_session(task: dict[str, Any], session_id: str) -> Path | None:
@@ -138,10 +181,11 @@ def resolve_runtime(run_info:dict[str,Any],tier:str,driver_override:str|None,mod
 
 
 def latest_session(task:dict[str,Any],role:str)->str|None:
+    abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
     for attempt in reversed(task.get("attempts",[])):
         if not isinstance(attempt,dict) or attempt.get("role")!=role: continue
         sid=attempt_session_id(attempt)
-        if sid: return sid
+        if sid and sid not in abandoned: return sid
     return None
 
 
@@ -156,6 +200,9 @@ def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:st
              interrupted Fixer turns may resume that same Fixer session.
     Analyst roles use their own explicit same-role continuation only.
     """
+    abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
+    if explicit and explicit in abandoned:
+        raise ValueError("requested session was mechanically abandoned after repeated no-work failures; route Analyst Recovery and cold-relaunch after Recovery RESUME")
     if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"}:
         if explicit or resume_last:
             raise ValueError(f"{role} must always start in a fresh session")
@@ -696,7 +743,12 @@ def command_inspect(args:argparse.Namespace)->dict[str,Any]:
         try: detail=json.loads(detail_path.read_text())
         except json.JSONDecodeError: detail={"status":"malformed-attempt"}
     pids=sorted(dsd_task.attempt_pids(record)); pid_state={str(pid):pid_alive(pid) for pid in pids}
-    live=terminal is None and any(pid_state.values())
+    worker_process=process_observation((detail or {}).get("worker_pid"))
+    launcher_process=process_observation((detail or {}).get("launcher_pid") or record.get("monitor_pid"))
+    worker_pid_known=bool(worker_process.get("known"))
+    # Prefer the actual CLI worker PID. Older attempts without attempt.json fall back
+    # to the legacy recorded-PID aggregate so they remain inspectable.
+    live=terminal is None and (bool(worker_process.get("alive")) if worker_pid_known else any(pid_state.values()))
     state="terminal" if terminal is not None else "running" if live else "dead-unresolved"
     report=event/"report.md"; log=event/"worker.log"; stderr=event/"worker.stderr.log"
     report_state="missing"
@@ -715,10 +767,21 @@ def command_inspect(args:argparse.Namespace)->dict[str,Any]:
     elapsed=max(0,round(time.time()-started,1)) if started is not None else None
     role=str(record.get("role") or ""); driver=str(record.get("driver") or ""); model=str(record.get("model") or ""); profile=str(record.get("runtime_profile") or "default")
     duration_ref=_completed_role_duration_reference(run,phase,role,driver,model,profile,event) if live and role and not getattr(args,"skip_duration_reference",False) else None
+    deadline_limit=role_deadline_seconds(role)
+    deadline_elapsed=float(elapsed or 0.0)
+    deadline={
+        "limit_seconds":deadline_limit,
+        "exceeded":bool(elapsed is not None and deadline_elapsed>=deadline_limit),
+        "remaining_seconds":round(max(0.0,deadline_limit-deadline_elapsed),1) if elapsed is not None else None,
+        "overrun_seconds":round(max(0.0,deadline_elapsed-deadline_limit),1) if elapsed is not None else None,
+    }
+    session_id=attempt_session_id(record)
     result={
         "task_id":tid,"event_dir":str(event),"state":state,"role":record.get("role"),"attempt_status":record.get("status"),
         "report_state":report_state,"log_bytes":log_obs.get("bytes",0),"log_age_seconds":log_obs.get("age_seconds"),
         "report_bytes":report_obs.get("bytes",0),"report_age_seconds":report_obs.get("age_seconds"),"elapsed_seconds":elapsed,
+        "process":{"worker":worker_process,"launcher":launcher_process},"process_alive":bool(worker_process.get("alive")),
+        "session_id":session_id,"session_known":bool(session_id),"deadline":deadline,
         "next_action":"gate" if terminal is not None else "running-progress-unknown" if live else "sweep-stale",
     }
     if profile!="default": result["runtime_profile"]=profile
@@ -813,7 +876,7 @@ def command_gate(args:argparse.Namespace)->dict[str,Any]:
 
 
 def _default_follow_timeout(role:str)->float:
-    return 7200.0 if DEFAULT_TIER.get(role)=="grunt" else 21600.0
+    return role_deadline_seconds(role)
 
 
 def command_follow(args:argparse.Namespace)->dict[str,Any]:
@@ -834,27 +897,36 @@ def command_follow(args:argparse.Namespace)->dict[str,Any]:
         class I: pass
         i=I(); i.run_root=run; i.phase_id=phase; i.task_id=tid; i.event_dir=event; i.skip_duration_reference=True
         out=command_inspect(i)
-        elapsed=round(time.monotonic()-started,1)
+        observer_elapsed=round(time.monotonic()-started,1)
         if timeout is None:
             default_timeout=_default_follow_timeout(str(out.get("role") or ""))
-            timeout=max(interval,float(requested_timeout if requested_timeout is not None else default_timeout))
+            if requested_timeout is not None:
+                timeout=max(interval,float(requested_timeout))
+            else:
+                attempt_elapsed=float(out.get("elapsed_seconds") or 0.0)
+                remaining=default_timeout-attempt_elapsed
+                if remaining<=0:
+                    print(f"[t-bag] {tid}/{out.get('role')} ATTEMPT-DEADLINE already exceeded; tick now",flush=True)
+                    out["follow_status"]="deadline"; out["follow_elapsed_seconds"]=observer_elapsed
+                    return out
+                timeout=max(interval,remaining)
         if out["state"]=="terminal":
             terminal=out.get("terminal") or {}
             print(f"[t-bag] {tid}/{out.get('role')} TERMINAL status={terminal.get('status')} exit={terminal.get('exit_code')}",flush=True)
-            out["follow_status"]="terminal"; out["elapsed_seconds"]=elapsed
+            out["follow_status"]="terminal"; out["follow_elapsed_seconds"]=observer_elapsed
             return out
         if out["state"]=="dead-unresolved":
             print(f"[t-bag] {tid}/{out.get('role')} DEAD-UNRESOLVED; reconcile/sweep-stale",flush=True)
-            out["follow_status"]="dead-unresolved"; out["elapsed_seconds"]=elapsed
+            out["follow_status"]="dead-unresolved"; out["follow_elapsed_seconds"]=observer_elapsed
             return out
         if initial is None:
             initial={"log_bytes":out.get("log_bytes",0),"report_bytes":out.get("report_bytes",0)}
             print(f"[t-bag] {tid}/{out.get('role')} following log={initial['log_bytes']}B report={initial['report_bytes']}B",flush=True)
-        if elapsed>=timeout:
-            print(f"[t-bag] {tid}/{out.get('role')} FOLLOW-DEADLINE; reconcile and re-arm only if still live",flush=True)
-            out["follow_status"]="deadline"; out["elapsed_seconds"]=elapsed
+        if observer_elapsed>=timeout:
+            print(f"[t-bag] {tid}/{out.get('role')} FOLLOW-DEADLINE; tick and re-arm only if still live",flush=True)
+            out["follow_status"]="deadline"; out["follow_elapsed_seconds"]=observer_elapsed
             return out
-        time.sleep(min(interval,max(0.1,timeout-elapsed)))
+        time.sleep(min(interval,max(0.1,timeout-observer_elapsed)))
 
 
 def parser()->argparse.ArgumentParser:

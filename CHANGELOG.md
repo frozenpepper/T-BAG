@@ -2,6 +2,14 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC46 — durable supervision state and OpenCode status UI
+
+- Made worker supervision attempt-relative instead of observer-relative: default Grunt/Analyst deadlines survive parent succession, bounded `inspect` exposes actual worker/launcher process state plus CPU/cumulative time, and silent-worker retirement waits when CPU is still materially changing.
+- Reconciled OpenCode session identity across launch and terminal evidence by extending bounded live capture and persisting terminal-time discovery back into `attempt.json`. Three consecutive same-session nonzero/no-report/no-delta failures now mechanically abandon the poisoned session and route the task to Analyst Recovery.
+- Separated chronological attempt order from semantic Review authority. Empty zero-delta placeholder retries preserve any standing semantic lane they entered instead of consuming it, while ordinary base-role retries keep the existing active same-session path; empty retries do not stale a standing Reviewer verdict, and Analyst `resume` returns to that still-authoritative Review lane when appropriate.
+- Added disposable run-local OpenCode transport diagnostics for parent-session/observer health. The parent tick surfaces missing observers as exact re-arm tuples; transport state never becomes semantic task authority.
+- Added a pure read-only `tbag_status.py` snapshot plus an additive modern OpenCode TUI companion: compact footer/sidebar status and `/tbag` detail panel show registered-plan/phase progress, active Analyst and Grunt sessions, what each is doing, model/session/process/observer/deadline state, gates and attention items.
+
 ## v2.2.0 RC45 — durable parent tick and bounded supervision
 
 - Added one canonical parent tick spanning reconcile, deterministic advance, live-attempt monitoring, owner-update cadence and explicit project-end classification. Adapter wakes are now optional fast hints rather than the only way long-lived orchestration makes progress.
