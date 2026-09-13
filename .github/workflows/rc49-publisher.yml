@@ -27,6 +27,16 @@ jobs:
           git show origin/rc49-publisher:publisher/rc49/apply_rc49.py > /tmp/apply_rc49.py
           git show origin/rc49-publisher:publisher/rc49/test_rc49_role_command_coherence.py > tests/test_rc49_role_command_coherence.py
           python3 /tmp/apply_rc49.py
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("scripts/dsd_task.py")
+          text=p.read_text()
+          old="Analyst specialists use their ESCALATE report through analysis-result; Reviewer/Plan-Reviewer/Context-Reviewer "
+          new="Analyst specialists use their ESCALATE report through analysis-result (legacy form: analysis-result --outcome escalate); Reviewer/Plan-Reviewer/Context-Reviewer "
+          if text.count(old) != 1:
+              raise SystemExit("RC49 compatibility anchor missing")
+          p.write_text(text.replace(old,new))
+          PY
           git diff --check
           wc -c SKILL.md PROMPTS.md CONTEXT.md worker/COMMON.md worker/QUALITY.md worker/PLAN-AUTHORING.md worker/roles/*/SKILL.md
           test "$(wc -c < SKILL.md)" -le 6500
