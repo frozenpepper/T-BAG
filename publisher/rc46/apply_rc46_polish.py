@@ -13,6 +13,12 @@ replace_once('PROMPTS.md',
 '''A Human `resolve-escalation --route analysis` opens the Analyst lane; it is not approval of a technical graph. The Analyst still records `analysis-result --outcome replan` before that graph can be registered.\n''',
 '''Human `--route analysis` opens the Analyst lane; the Analyst still records `replan` before graph registration.\n''')
 
+# A terminal session identity is finalized evidence; for a live attempt, attempt.json
+# is fresher than the task-level binding. This removes the launch-vs-gate contradiction.
+replace_once('scripts/dsd_attempt.py',
+'''def attempt_session_id(attempt: dict[str, Any]) -> str | None:\n    value = attempt.get("session_id")\n    if isinstance(value, str) and value:\n        return value\n    event = Path(str(attempt.get("event_dir") or ""))\n    for evidence in (event / "attempt.json", event / "terminal.json"):\n        if not evidence.is_file(): continue\n        try:\n            value = json.loads(evidence.read_text()).get("session_id")\n            if isinstance(value, str) and value:\n                return value\n        except (OSError, json.JSONDecodeError):\n            pass\n    return None\n''',
+'''def attempt_session_id(attempt: dict[str, Any]) -> str | None:\n    event = Path(str(attempt.get("event_dir") or ""))\n    for evidence in (event / "terminal.json", event / "attempt.json"):\n        if not evidence.is_file(): continue\n        try:\n            value = json.loads(evidence.read_text()).get("session_id")\n            if isinstance(value, str) and value:\n                return value\n        except (OSError, json.JSONDecodeError):\n            pass\n    value = attempt.get("session_id")\n    return value if isinstance(value, str) and value else None\n''')
+
 # Progress means current registered obligations, not historical superseded work or the
 # phase-auditor gate itself.
 replace_once('scripts/tbag_status.py',
@@ -40,7 +46,11 @@ replace_once('scripts/install_harness_adapter.py',
 '''    for name in ("index.ts","tui.tsx"):\n''',
 '''    for name in ("index.ts","tui.ts","tui.tsx"):\n''')
 
-# Tight source-level guard for the documented bridge and progress semantics.
+# Tight source-level guards for the documented bridge, finalized session precedence,
+# and progress/display semantics.
+replace_once('tests/test_rc46_supervision.py',
+'''    def test_rearmed_observer_does_not_reset_attempt_deadline(self):\n''',
+'''    def test_finalized_terminal_session_identity_wins_over_stale_task_binding(self):\n        with tempfile.TemporaryDirectory() as td:\n            event=Path(td)/"event"; event.mkdir()\n            (event/"attempt.json").write_text(json.dumps({"session_id":"live-discovery"}))\n            (event/"terminal.json").write_text(json.dumps({"session_id":"final-session"}))\n            self.assertEqual(dsd_attempt.attempt_session_id({"event_dir":str(event),"session_id":"stale-task"}),"final-session")\n\n    def test_rearmed_observer_does_not_reset_attempt_deadline(self):\n''')
 replace_once('tests/test_rc46_supervision.py',
 '''        self.assertIn('TBag", "tools", "tbag_status.py"',tui)\n''',
 '''        self.assertIn('TBag", "tools", "tbag_status.py"',tui)\n        self.assertIn('CPU ${w().process?.worker?.cpu_percent',tui)\n        bridge=(Path(__file__).resolve().parents[1]/"adapters"/"opencode"/"tbag-ui"/"tui.ts").read_text()\n        self.assertIn('./tui.tsx',bridge)\n''')
