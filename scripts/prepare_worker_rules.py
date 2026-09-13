@@ -223,7 +223,7 @@ def main() -> int:
             analysis = task_state.get("last_analysis") if isinstance(task_state.get("last_analysis"), dict) else {}
             routed = analysis.get("outcome") in {"resume", "replan", "replan-resume"} and str(analysis.get("report") or "") == report_resolved and Path(str(analysis.get("attempt") or "")).resolve() == adopt_from
             if not report.is_file() or not (accepted or routed):
-                raise ValueError("Analyst context is mechanically gated but has not been approved: accept the Analyst result, or record analysis-result --outcome resume/replan/replan-resume for same-task diagnosis")
+                raise ValueError("Analyst context is mechanically gated but has not been approved: accept standalone findings, or record the Analyst report's RESUME/REPLAN/REPLAN+RESUME disposition for same-task diagnosis")
             dsd_task.require_context_review(task_state, gated_attempt, reason="Analyst context adoption")
             candidate = adopt_from / "project-protocol" / "PROJECT-PROTOCOL.md"
             if candidate.is_symlink():

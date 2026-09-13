@@ -40,6 +40,7 @@ DEFAULT_TIER = {
 }
 
 ANALYST_ROLES = frozenset(name for name, tier in DEFAULT_TIER.items() if tier == "analyst")
+ANALYST_DISPOSITION_ROLES = frozenset({"planner", "discovery", "phase-surveyor", "recovery"})
 
 TECHNICAL_QUALITY_ROLES = frozenset(set(ROLE_NAMES) - {"evidence-clerk", "context-reviewer"})
 
