@@ -37,6 +37,7 @@ class RoleCommandCoherenceTests(unittest.TestCase):
     def gated(self,tid,role,text,name=None):
         task=dsd_task.load_task(self.run,"P1",tid); event=dsd_task.task_root(self.run,"P1",tid)/"attempts"/(name or f"{role}-1"); event.mkdir(parents=True,exist_ok=True)
         report=event/"report.md"; report.write_text(text)
+        (event/"terminal.json").write_text(json.dumps({"exit_code":0,"report_state":"present"}))
         task["attempts"].append({"task_id":tid,"role":role,"tier":dsd_task.DEFAULT_TIER[role],"status":"gated","event_dir":str(event)})
         task["status"]="awaiting-review" if role=="reviewer" else "active"
         dsd_task.write_json(dsd_task.task_file(self.run,"P1",tid),task)
