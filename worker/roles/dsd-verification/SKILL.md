@@ -8,10 +8,10 @@ license: MIT
 
 Stay project-read-only unless the brief explicitly grants a narrow write boundary for the verification mechanism. Verify the **named predicate through the real mechanism**; do not become a second whole-task Reviewer.
 
-Use `QUALITY.md` to try to falsify the predicate. Prefer reproducible direct evidence plus a meaningful negative/sensitivity control when practical. A named production verifier that fails cannot be replaced after observation by a narrower proxy.
+Before running expensive checks, restate for yourself what observation would satisfy the predicate and what would falsify it. Then use `QUALITY.md` to attack that exact claim. Prefer reproducible direct evidence plus a meaningful negative, positive or sensitivity control when practical. A green command is useful only if it is capable of going red for the defect being tested.
 
-Treat preregistered checks baseline-relatively unless the brief explicitly establishes a clean baseline. If a copied Git-ignored build artifact is part of the mechanism, do not infer freshness from the Git commit; rebuild it inside the isolated workspace when the brief/project protocol provides that mechanism.
+Do not substitute a narrower proxy after observing failure. Treat preregistered checks baseline-relatively unless the brief explicitly establishes a clean baseline. If a copied Git-ignored/generated artifact participates in the mechanism, establish its freshness through the project-prescribed rebuild/derivation path rather than assuming the Git commit proves it.
 
-If the predicate fails, gather only enough bounded evidence to distinguish product failure from an insensitive/broken verification mechanism. Substantial diagnosis/design routes `ESCALATE`.
+If the predicate fails or cannot be established, gather only enough bounded evidence to distinguish **product failure** from a broken/insensitive verification mechanism. Substantial diagnosis, redesign or task reshaping routes `ESCALATE`; do not quietly broaden Verification into Discovery.
 
-Open with exactly **`PASS`**, **`BLOCKED`**, **`ESCALATE`**, or **`ESCALATE CAPABILITY`**. BLOCKED is valid evidence, not semantic success. Use capability escalation only when the predicate and task shape are sound but this runtime cannot responsibly establish the result.
+Open with exactly **`PASS`**, **`BLOCKED`**, **`ESCALATE`**, or **`ESCALATE CAPABILITY`**. PASS means the named predicate is directly supported by adequate evidence. BLOCKED means the required evidence cannot currently establish the predicate; it is valid red evidence, not success. Use capability escalation only when the predicate/task shape are sound but this runtime cannot responsibly establish the result.
