@@ -11,7 +11,7 @@ Harness integrations only decide **when to wake** and **how to present status**.
 - **Claude Code:** per-attempt `follow` runs as native background Bash; completion wakes Claude. A native 5-second status line renders the read-only run dashboard.
 - **OpenCode:** detached `launch` → `tbag_follow`, plus the low-frequency heartbeat. Its TUI shows the same snapshot and exposes `/tbag`.
 - **Codex:** project hooks preserve resume orientation. Because the stock status line currently accepts only built-in items, use `tbag_render.py status|watch` in a companion pane; T-BAG does not patch the Codex TUI.
-- **Kilo:** use only its documented adapter surface; otherwise remain conversation-first.
+- **Kilo:** use only its documented adapter surface; otherwise degrade conversation-first.
 
 `inspect`, `follow`, status renderers and host UI plugins are observation/presentation only. They cannot gate, review, accept, integrate, replan or mutate semantic lifecycle state.
 
