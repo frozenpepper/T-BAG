@@ -1,7 +1,7 @@
 import json, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
-ROOT=Path(__file__).resolve().parents[2]
+ROOT=Path(__file__).resolve().parents[1]
 SCRIPTS=ROOT/"scripts"
 sys.path.insert(0,str(SCRIPTS))
 import dsd_task
@@ -75,7 +75,7 @@ class RoleCommandCoherenceTests(unittest.TestCase):
             self.assertIsNone(args.outcome,command)
 
     def test_followup_triage_and_explicit_analyst_tokens_use_analyst_disposition_route(self):
-        self.task("TRIAGE",kind="analysis",role="planner",followup=True); report,_=self.gated("TRIAGE","planner","RESUME\nCurrent plan already owns it.\n")
+        self.task("TRIAGE",kind="analysis",role="planner",followup=True); self.gated("TRIAGE","planner","RESUME\nCurrent plan already owns it.\n")
         task=dsd_task.load_task(self.run,"P1","TRIAGE")
         action=dsd_task._reconcile_action(self.run,"P1",task)
         self.assertEqual(action["action"],"record-analyst-disposition")
