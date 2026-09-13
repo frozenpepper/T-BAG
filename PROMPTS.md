@@ -2,7 +2,7 @@
 
 Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HARNESS.md` + selected adapter.
 
-**Normal rule:** semantic routing belongs to the worker report. `parent_tick.py tick` records explicit routing tokens automatically. Manual result commands record that same report-owned decision; `--outcome ...` is only a compatibility fallback for an older/tokenless report.
+**Normal rule:** semantic routing belongs to the worker report. `parent_tick.py tick` records explicit routing tokens automatically. Manual result commands record that same decision; `--outcome ...` is only a compatibility fallback for an older/tokenless report.
 
 **OpenCode parent:** detached core launch → immediate `tbag_follow` with the exact tuple returned by `dsd_attempt.py launch`.
 
@@ -12,7 +12,7 @@ Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HA
 python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-Run on owner turn/resume/wake/heartbeat. The packet owns reconcile, advance, monitoring, updates and end-state routing. After sending `owner_update`, acknowledge its token with `parent_tick.py ack-update`. On `completion-candidate`, replan or `parent_tick.py finish --reason "..."` after confirming plan exhaustion.
+Run on owner turn/resume/wake/heartbeat. After sending `owner_update`, acknowledge its token with `parent_tick.py ack-update`. On `completion-candidate`, replan or `parent_tick.py finish --reason "..."` after confirming plan exhaustion.
 
 ## Initialize runtime
 
@@ -24,8 +24,6 @@ python3 <skill>/scripts/dsd_task.py set-runtime ...
 python3 <skill>/scripts/prepare_worker_rules.py \
   --project-root /abs/project --run-root ... --revision 1 [--plan /abs/PLAN.md]
 ```
-
-Runtime configuration: `CONFIG.md`.
 
 ## Goal-only bootstrap
 
@@ -52,7 +50,7 @@ FAIL returns the Goal Planner for revision; the next proposal gets a fresh revie
 
 ## Register an Analyst graph
 
-Analyst preflights before handoff; registration repeats the check. For an amendment/replan, the report starts `REPLAN` or `REPLAN+RESUME`; record that disposition before registering its graph:
+For amendment/replan, the report starts `REPLAN` or `REPLAN+RESUME`; record that disposition before registering its graph:
 
 ```bash
 python3 <skill>/scripts/dsd_task.py analysis-result --run-root ... --phase-id phase-1 --task-id PLAN-X --report .../report.md
@@ -60,14 +58,14 @@ python3 <skill>/scripts/dsd_task.py preflight-plan --run-root ... --phase-id pha
 python3 <skill>/scripts/dsd_task.py register-plan --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
 ```
 
-## Launch / inspect / observe
+## Launch / inspect
 
 ```bash
 python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 --task-id T01
 python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1 --task-id T01
 ```
 
-`inspect` is diagnostic. Routine monitoring belongs to `parent_tick.py tick`; long-running work is not killed merely for being long.
+`inspect` is diagnostic. Routine monitoring belongs to `parent_tick.py tick`.
 
 ## Gate / Review / Fix
 
@@ -78,18 +76,18 @@ python3 <skill>/scripts/dsd_task.py review --run-root ... --phase-id phase-1 --t
 python3 <skill>/scripts/dsd_workspace.py integrate --run-root ... --phase-id phase-1 --task-id T01 --review-pass-report .../reviewer-N/report.md
 ```
 
-The Reviewer owns `PASS`/`FAIL`/`ESCALATE`; the parent never re-decides it. `--review-pass-report` validates and records that exact gated PASS, accepts it and integrates. FAIL opens the Fixer lane; Fixer resumes that Reviewer session, then a **new** Reviewer judges the whole task.
+The Reviewer owns `PASS`/`FAIL`/`ESCALATE`; the parent never re-decides it. `--review-pass-report` validates and records that gated PASS, accepts it and integrates. FAIL opens the Fixer lane; Fixer resumes that Reviewer session, then a **new** Reviewer judges the whole task.
 
-Analyst diagnosis/recovery routing is likewise report-owned:
+Analyst diagnosis/recovery routing is also report-owned:
 
 ```bash
 python3 <skill>/scripts/dsd_task.py analysis-result \
   --run-root ... --phase-id phase-1 --task-id T01 --report .../discovery-N/report.md
 ```
 
-Lifecycle reports use `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, or `ESCALATE CAPABILITY`. Findings-only Analyst work without a lifecycle transition uses `accept --report ...`. `REPLAN` requires a graph; `REPLAN+RESUME` is implementation/verification-only. Follow-up triage uses `RESUME` only when the frozen plan already covers every finding.
+Lifecycle reports use `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, or `ESCALATE CAPABILITY`. Findings-only Analyst work uses `accept --report ...`. `REPLAN` requires a graph; `REPLAN+RESUME` is implementation/verification-only. Follow-up triage uses `RESUME` only when the frozen plan already covers every finding.
 
-For a legacy report with no parseable routing token, add the matching `--outcome ...` to `review`, `plan-review`, `context-review`, or `analysis-result`; never use it to override a report token.
+For a legacy report with no routing token, add the matching `--outcome ...` to `review`, `plan-review`, `context-review`, or `analysis-result`; never use it to override a report token.
 
 ## Human escalation
 
@@ -121,7 +119,7 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 
 
 ## Owner-requested status
 
-Use `dsd_task.py owner-status --run-root ... [--phase-id ...]`; `reconcile-run --details` is internal inventory. For legacy/non-gate reports only:
+Use `dsd_task.py owner-status --run-root ... [--phase-id ...]`; `reconcile-run --details` is internal inventory. For legacy/non-gate reports:
 
 ```bash
 python3 <skill>/scripts/report_surface.py --report .../report.md --lines 8 --chars 1600
