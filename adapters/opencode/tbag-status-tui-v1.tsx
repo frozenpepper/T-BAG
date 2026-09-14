@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiSlotPlugin } from "@opencode-ai/plugin/tui"
 import { For, Show, createSignal, onCleanup } from "solid-js"
 import path from "node:path"
 
@@ -42,13 +42,15 @@ function SegmentedBar(props: { value: unknown; width?: number }) {
   const filled = () => Math.round((clampPercent(props.value) / 100) * width())
   return (
     <text>
-      <For each={Array.from({ length: width() })}>{(_, index) => <span fg={index() < filled() ? "green" : "gray"}>█</span>}</For>
+      <For each={Array.from({ length: width() })}>
+        {(_, index) => <span style={{ fg: index() < filled() ? "green" : "gray" }}>█</span>}
+      </For>
     </text>
   )
 }
 
 function TierGlyph(props: { tier: unknown }) {
-  return <span fg={props.tier === "analyst" ? "magenta" : "cyan"}>{props.tier === "analyst" ? "◆" : "●"}</span>
+  return <span style={{ fg: props.tier === "analyst" ? "magenta" : "cyan" }}>{props.tier === "analyst" ? "◆" : "●"}</span>
 }
 
 function workerHealth(worker: any) {
@@ -74,29 +76,64 @@ function Worker(props: { worker: any }) {
   )
 }
 
+function sidebarPlugin(api: TuiPluginApi, snapshot: (sessionID?: string) => Snapshot | null, remember: (sessionID?: string) => void): TuiSlotPlugin {
+  return {
+    order: 550,
+    slots: {
+      sidebar_content(_ctx, value) {
+        remember(value.session_id)
+        const s = () => snapshot(value.session_id)
+        return (
+          <box flexDirection="column" marginTop={1}>
+            <Show when={s()} fallback={<text>T-BAG status unavailable.</text>}>
+              <text>
+                T-BAG <span style={{ fg: statusColor(s()?.run?.status) }}>{String(s()?.run?.status ?? "?").toUpperCase()}</span>
+                {` · ${s()?.progress?.registered_percent ?? 0}% · ${s()?.worker_budget?.live ?? 0}/${s()?.worker_budget?.max ?? 0}`}
+              </text>
+              <SegmentedBar value={s()?.progress?.registered_percent} width={12} />
+              <For each={(s()?.workers ?? []).slice(0, 4)}>
+                {(worker: any) => <text><TierGlyph tier={worker.tier} /> {`${worker.task_id} ${worker.role} ${duration(worker.elapsed_seconds)}`}</text>}
+              </For>
+              <Show when={(s()?.attention?.length ?? 0) > 0}>
+                <text fg="red">{`⚠ ${s()?.attention.length} item${s()?.attention.length === 1 ? "" : "s"} need attention`}</text>
+              </Show>
+              <text>/tbag for details</text>
+            </Show>
+          </box>
+        )
+      },
+    },
+  }
+}
+
 const tui: TuiPlugin = async (api) => {
   const [snapshots, setSnapshots] = createSignal<Record<string, Snapshot>>({})
   const refreshing = new Set<string>()
-  const projectRoot = api.state.path.worktree || api.state.path.directory
   let lastSessionID: string | undefined
+
+  const projectRoot = () => api.state.path.worktree || api.state.path.directory
+  const remember = (sessionID?: string) => {
+    if (sessionID) lastSessionID = sessionID
+  }
 
   function sessionFromRoute() {
     const route: any = api.route.current
-    const value = route?.name === "session" ? route.params?.sessionID : route?.params?.sessionID
-    if (value) lastSessionID = value
+    const value = route?.params?.sessionID
+    remember(value)
     return value || lastSessionID
   }
 
   function readSnapshot(sessionID?: string) {
-    if (!projectRoot || !sessionID || refreshing.has(sessionID)) return
+    const root = projectRoot()
+    if (!root || !sessionID || refreshing.has(sessionID)) return
     refreshing.add(sessionID)
     try {
       const bun = (globalThis as any).Bun
       if (!bun?.spawnSync) return
-      const tool = path.join(projectRoot, "TBag", "tools", "tbag_status.py")
+      const tool = path.join(root, "TBag", "tools", "tbag_status.py")
       const result = bun.spawnSync([
         "python3", tool,
-        "--project-root", projectRoot,
+        "--project-root", root,
         "--parent-session-id", sessionID,
       ], { stdout: "pipe", stderr: "pipe" })
       if (result.exitCode !== 0) return
@@ -119,27 +156,7 @@ const tui: TuiPlugin = async (api) => {
     return current
   }
 
-  api.slots.register({
-    name: "sidebar_content",
-    render: (_context: any, props: { session_id?: string }) => {
-      const sessionID = props.session_id
-      if (sessionID) lastSessionID = sessionID
-      const s = snapshot(sessionID)
-      if (!s) return <text>T-BAG status unavailable.</text>
-      return (
-        <box flexDirection="column" marginTop={1}>
-          <text>
-            T-BAG <span fg={statusColor(s.run?.status)}>{String(s.run?.status ?? "?").toUpperCase()}</span>
-            {` · ${s.progress?.registered_percent ?? 0}% · ${s.worker_budget?.live ?? 0}/${s.worker_budget?.max ?? 0}`}
-          </text>
-          <SegmentedBar value={s.progress?.registered_percent} width={12} />
-          <For each={(s.workers ?? []).slice(0, 4)}>{(worker: any) => <text><TierGlyph tier={worker.tier} /> {`${worker.task_id} ${worker.role} ${duration(worker.elapsed_seconds)}`}</text>}</For>
-          <Show when={(s.attention?.length ?? 0) > 0}><text fg="red">{`⚠ ${s.attention.length} item${s.attention.length === 1 ? "" : "s"} need attention`}</text></Show>
-          <text>/tbag for details</text>
-        </box>
-      )
-    },
-  })
+  api.slots.register(sidebarPlugin(api, snapshot, remember))
 
   api.route.register([
     {
@@ -148,25 +165,28 @@ const tui: TuiPlugin = async (api) => {
         const popMode = api.mode.push(MODE)
         onCleanup(popMode)
         const sessionID = sessionFromRoute()
-        const s = snapshot(sessionID)
+        const s = () => snapshot(sessionID)
+        queueMicrotask(() => readSnapshot(sessionID))
         return (
           <box flexDirection="column" padding={1}>
-            <Show when={s} fallback={<text>T-BAG status unavailable for this session.</text>}>
+            <Show when={s()} fallback={<text>T-BAG status unavailable for this session.</text>}>
               <text>
-                T-BAG · <span fg={statusColor(s?.run?.status)}>{String(s?.run?.status ?? "unknown").toUpperCase()}</span>
-                {` · ${s?.run?.id ?? "run"}`}
+                T-BAG · <span style={{ fg: statusColor(s()?.run?.status) }}>{String(s()?.run?.status ?? "unknown").toUpperCase()}</span>
+                {` · ${s()?.run?.id ?? "run"}`}
               </text>
-              <SegmentedBar value={s?.progress?.registered_percent} width={22} />
-              <text>{`${s?.progress?.registered_percent ?? 0}% registered work · ${s?.progress?.registered_done ?? 0}/${s?.progress?.registered_total ?? 0}`}</text>
-              <text>{`Phases ${s?.progress?.phases_done ?? 0}/${s?.progress?.phases_total ?? 0} · slots ${s?.worker_budget?.live ?? 0}/${s?.worker_budget?.max ?? 0} · ${s?.run?.parent_loop ?? "no tick yet"}`}</text>
+              <SegmentedBar value={s()?.progress?.registered_percent} width={22} />
+              <text>{`${s()?.progress?.registered_percent ?? 0}% registered work · ${s()?.progress?.registered_done ?? 0}/${s()?.progress?.registered_total ?? 0}`}</text>
+              <text>{`Phases ${s()?.progress?.phases_done ?? 0}/${s()?.progress?.phases_total ?? 0} · slots ${s()?.worker_budget?.live ?? 0}/${s()?.worker_budget?.max ?? 0} · ${s()?.run?.parent_loop ?? "no tick yet"}`}</text>
               <text> </text>
-              <text>{`ACTIVE SESSIONS · Analysts ${s?.analysts_active?.length ?? 0} · Grunts ${s?.grunts_active?.length ?? 0}`}</text>
-              <Show when={(s?.workers?.length ?? 0) > 0} fallback={<text>No active workers.</text>}>
-                <For each={s?.workers ?? []}>{(worker: any) => <Worker worker={worker} />}</For>
+              <text>{`ACTIVE SESSIONS · Analysts ${s()?.analysts_active?.length ?? 0} · Grunts ${s()?.grunts_active?.length ?? 0}`}</text>
+              <Show when={(s()?.workers?.length ?? 0) > 0} fallback={<text>No active workers.</text>}>
+                <For each={s()?.workers ?? []}>{(worker: any) => <Worker worker={worker} />}</For>
               </Show>
-              <Show when={(s?.attention?.length ?? 0) > 0}>
+              <Show when={(s()?.attention?.length ?? 0) > 0}>
                 <text fg="red">ATTENTION</text>
-                <For each={(s?.attention ?? []).slice(0, 8)}>{(item: any) => <text fg="red">{`⚠ ${item.phase_id ?? ""}/${item.task_id ?? ""} · ${item.status ?? "attention"} · ${item.objective ?? ""}`}</text>}</For>
+                <For each={(s()?.attention ?? []).slice(0, 8)}>
+                  {(item: any) => <text fg="red">{`⚠ ${item.phase_id ?? ""}/${item.task_id ?? ""} · ${item.status ?? "attention"} · ${item.objective ?? ""}`}</text>}
+                </For>
               </Show>
               <text> </text>
               <text>esc back</text>
@@ -200,7 +220,15 @@ const tui: TuiPlugin = async (api) => {
 
   api.keymap.registerLayer({
     mode: MODE,
-    bindings: [{ key: "escape", cmd: () => api.route.navigate("home"), desc: "Back" }],
+    bindings: [{
+      key: "escape",
+      cmd: () => {
+        const sessionID = sessionFromRoute()
+        if (sessionID) api.route.navigate("session", { sessionID })
+        else api.route.navigate("home")
+      },
+      desc: "Back",
+    }],
   })
 
   const timer = setInterval(() => readSnapshot(sessionFromRoute()), REFRESH_MS)
