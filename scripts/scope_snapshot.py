@@ -91,6 +91,39 @@ def compare(root: Path, baseline: dict[str,Any]) -> dict[str,Any]:
     }
 
 
+def resolve_comparison(value: Any, *, relative_to: Path | None = None) -> dict[str,Any] | None:
+    """Resolve terminal scope evidence through one compatibility boundary.
+
+    Worker terminals intentionally store the comparison as a path so the terminal stays
+    compact, while older fixtures and tests may embed the object directly. Consumers
+    must not care which representation they received.
+    """
+    if isinstance(value,dict):
+        return value
+    if not isinstance(value,str) or not value.strip():
+        return None
+    path=Path(value)
+    if not path.is_absolute() and relative_to is not None:
+        path=relative_to/path
+    try:
+        data=json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError):
+        return None
+    return data if isinstance(data,dict) else None
+
+
+def comparison_changed_count(value: Any, *, relative_to: Path | None = None) -> int | None:
+    scope=resolve_comparison(value,relative_to=relative_to)
+    if scope is None:
+        return None
+    raw=scope.get("changed_count")
+    try:
+        return int(raw)
+    except (TypeError,ValueError):
+        changed=scope.get("changed_since_attempt_baseline")
+        return len(changed) if isinstance(changed,list) else None
+
+
 def write_new(path: Path, data: dict[str,Any])->None:
     path.parent.mkdir(parents=True,exist_ok=True)
     with path.open("x",encoding="utf-8") as f: f.write(json.dumps(data,indent=2,sort_keys=True)+"\n")
