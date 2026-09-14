@@ -52,6 +52,11 @@ class ActionabilityInvariantTests(unittest.TestCase):
             "task_id":"land","status":"accepted","attempts":[residue],"requires_integration":True,
         })
         self.assertEqual(accepted["action"],"integrate-accepted-task")
+        integrated_with_obligation=dsd_task._reconcile_action(Path("/tmp/run"),"p",{
+            "task_id":"integrated-followup","status":"integrated","attempts":[residue],"requires_integration":True,
+            "review_history":[{"findings":[{"finding_id":"F1","status":"open","text":"carry me"}]}],
+        })
+        self.assertEqual(integrated_with_obligation["action"],"prepare-followup-triage")
         recovery=dsd_task._reconcile_action(Path("/tmp/run"),"p",{
             "task_id":"recover","status":"recovery-required","attempts":[residue],"requires_integration":True,
         })

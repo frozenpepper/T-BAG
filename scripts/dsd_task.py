@@ -1703,7 +1703,11 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     role=str(latest.get("role") or task.get("role") or "")
     base={"phase_id":phase,"task_id":tid,"task_status":status}
 
-    # Terminal durable state dominates chronological attempt residue.
+    # Explicit durable obligations outrank task terminality; task status then
+    # outranks chronological attempt residue. This is the actionability order.
+    findings=open_review_findings(task)
+    if any(not str(f.get("triage_task_id") or "") for f in findings):
+        return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}
     if status in {"integrated","superseded"}: return None
     if status=="accepted":
         return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None
@@ -1724,9 +1728,6 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if attempt_status in {"report-recovery","report-resume","mutating-report-resume"}:
         session=latest.get("session_id") or latest.get("resume_session")
         return {**base,"action":"resume-recorded-session" if session else "retry-same-role-retained-workspace","role":role,"event_dir":str(event),**({"session_id":session} if session else {})}
-    findings=open_review_findings(task)
-    if any(not str(f.get("triage_task_id") or "") for f in findings):
-        return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}
     if status=="needs-analysis": return {**base,"action":"launch-analyst-discovery"}
     if status=="needs-fix": return {**base,"action":"launch-fixer"}
     if status=="awaiting-review":
