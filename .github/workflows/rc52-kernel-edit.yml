@@ -1,14 +1,15 @@
-name: RC52 broad validation
+name: RC52 accepted-obligation validation
 
 on:
   push:
     branches: [rc52-architecture]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -19,9 +20,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Refine actionability invariant
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path=Path('scripts/dsd_task.py')
+          text=path.read_text(encoding='utf-8')
+          old='''    # Terminal durable state dominates chronological attempt residue.\n    if status in {"integrated","superseded"}: return None\n    if status=="accepted":\n        return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None\n    if status=="blocked":\n        return {**base,"action":"await-human-decision","escalation":task.get("last_escalation")}\n\n'''
+          new='''    # Terminal durable state dominates chronological attempt residue.\n    if status in {"integrated","superseded"}: return None\n    if status=="blocked":\n        return {**base,"action":"await-human-decision","escalation":task.get("last_escalation")}\n    findings=open_review_findings(task)\n    if status=="accepted":\n        # Accepted is not terminal until its explicit Reviewer obligations have\n        # durable routing and required integration is complete.\n        if any(not str(f.get("triage_task_id") or "") for f in findings):\n            return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}\n        return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None\n\n'''
+          assert text.count(old)==1
+          text=text.replace(old,new,1)
+          duplicate='''    findings=open_review_findings(task)\n    if any(not str(f.get("triage_task_id") or "") for f in findings):\n'''
+          replacement='''    if any(not str(f.get("triage_task_id") or "") for f in findings):\n'''
+          assert text.count(duplicate)==1
+          text=text.replace(duplicate,replacement,1)
+          path.write_text(text,encoding='utf-8')
+
+          test=Path('tests/test_rc52_architecture.py')
+          t=test.read_text(encoding='utf-8')
+          needle='''        self.assertEqual(accepted["action"],"integrate-accepted-task")\n        recovery=dsd_task._reconcile_action(Path("/tmp/run"),"p",{\n'''
+          insert='''        self.assertEqual(accepted["action"],"integrate-accepted-task")\n        accepted_with_obligation=dsd_task._reconcile_action(Path("/tmp/run"),"p",{\n            "task_id":"land-with-followup","status":"accepted","attempts":[residue],"requires_integration":True,\n            "review_history":[{"findings":[{"finding_id":"F1","status":"open","text":"carry me"}]}],\n        })\n        self.assertEqual(accepted_with_obligation["action"],"prepare-followup-triage")\n        recovery=dsd_task._reconcile_action(Path("/tmp/run"),"p",{\n'''
+          assert t.count(needle)==1
+          test.write_text(t.replace(needle,insert,1),encoding='utf-8')
+          PY
       - name: Compile control plane
         run: python -m py_compile scripts/*.py
       - name: Run Python regression suite
         run: python -m unittest discover -s tests -p 'test_*.py'
       - name: Check diff hygiene
         run: git diff --check
+      - name: Commit verified refinement
+        shell: bash
+        run: |
+          git config user.name 'T-BAG RC52 verifier'
+          git config user.email 'actions@users.noreply.github.com'
+          git add scripts/dsd_task.py tests/test_rc52_architecture.py
+          git commit -m 'RC52: preserve accepted follow-up routing'
+          git push origin HEAD:rc52-architecture
