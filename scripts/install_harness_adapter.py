@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from detect_harness import select_harness
+from opencode_tui_compat import V1_SPEC, detect_opencode_version, ensure_tui_plugin, remove_tui_plugin, tui_config_path
 
 MARKER = "TBag/tools/context_checkpoint.py"
 
@@ -41,6 +42,13 @@ def backup(path: Path) -> Path | None:
         return None
     destination = path.with_name(path.name + f".dsd-backup-{utc_stamp()}")
     shutil.copy2(path, destination)
+    return destination
+
+
+def backup_text(path: Path, text: str) -> Path:
+    destination = path.with_name(path.name + f".dsd-backup-{utc_stamp()}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text, encoding="utf-8")
     return destination
 
 
@@ -234,25 +242,81 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         project_root, "opencode", Path(".opencode/plugins/tbag.js"),
         skill_root / "adapters" / "opencode" / "tbag.js",
     )
-    ui_results=[]
-    for name in ("index.ts","tui.ts","tui.tsx"):
+    version, major = detect_opencode_version()
+    ui_results: list[dict[str, Any]] = []
+    tui_config: str | None = None
+    tui_config_changed = False
+    tui_config_backup: Path | None = None
+    stale_v1_removed = False
+    status_surface = "transport-only-host-version-unknown"
+    tui_generation = "unknown"
+
+    config_before_path = tui_config_path(project_root)
+    config_before_text = config_before_path.read_text(encoding="utf-8") if config_before_path.exists() else None
+
+    if major == 1:
         ui_results.append(install_plugin_file(
-            project_root,"opencode",Path(".opencode/plugins/tbag-ui")/name,
-            skill_root/"adapters"/"opencode"/"tbag-ui"/name,
+            project_root, "opencode", Path(".opencode/plugins/tbag-status-tui-v1.tsx"),
+            skill_root / "adapters" / "opencode" / "tbag-status-tui-v1.tsx",
         ))
+        tui_config_changed, config_path = ensure_tui_plugin(project_root, V1_SPEC)
+        tui_config = str(config_path)
+        if tui_config_changed and config_before_text is not None:
+            tui_config_backup = backup_text(config_path, config_before_text)
+        status_surface = "tui-v1-sidebar-route"
+        tui_generation = "v1"
+    elif major == 2:
+        for name in ("index.ts", "tui.ts", "tui.tsx"):
+            ui_results.append(install_plugin_file(
+                project_root, "opencode", Path(".opencode/plugins/tbag-ui") / name,
+                skill_root / "adapters" / "opencode" / "tbag-ui" / name,
+            ))
+        tui_config_changed, config_path = remove_tui_plugin(project_root, V1_SPEC)
+        tui_config = str(config_path) if config_path else None
+        if tui_config_changed and config_before_text is not None and config_path is not None:
+            tui_config_backup = backup_text(config_path, config_before_text)
+        stale_v1 = project_root / ".opencode" / "plugins" / "tbag-status-tui-v1.tsx"
+        stale_v1_removed = stale_v1.exists()
+        stale_v1.unlink(missing_ok=True)
+        status_surface = "tui-v2-companion"
+        tui_generation = "v2"
+
     legacy = project_root / ".opencode" / "plugins" / "dsd-compaction.ts"
     legacy_removed = legacy.exists()
     legacy.unlink(missing_ok=True)
-    result["changed"] = bool(result.get("changed") or any(x.get("changed") for x in ui_results))
+    changed = bool(
+        result.get("changed")
+        or any(x.get("changed") for x in ui_results)
+        or tui_config_changed
+        or stale_v1_removed
+        or legacy_removed
+    )
+    result["changed"] = changed
+
+    if major == 1:
+        presentation_note = "OpenCode 1.x requires the T-BAG TUI file to be listed in .opencode/tui.json or tui.jsonc; the installer has merged that registration. After restart, /tbag and the sidebar should appear. In the built-in Plugins dialog, tbag.status.v1 should be listed enabled+active."
+    elif major == 2:
+        presentation_note = "OpenCode 2.x uses the separately shipped tbag-ui companion. Restart/reload after changes and confirm its presentation plugin is active."
+    else:
+        presentation_note = "OpenCode version detection failed or returned an unsupported major version, so T-BAG installed only the stable server transport adapter and did not guess a TUI API generation."
+
     result.update({
+        "opencode_version": version,
+        "opencode_major": major,
+        "tui_generation": tui_generation,
         "tui_plugin": [x.get("plugin") for x in ui_results],
+        "tui_config": tui_config,
+        "tui_config_changed": tui_config_changed,
+        "tui_config_backup": str(tui_config_backup) if tui_config_backup else None,
+        "status_surface": status_surface,
         "interactive_supervision": "detached-core-launch-then-tbag-follow",
         "autonomous_supervision": "per-attempt-wake-plus-parent-heartbeat",
         "required_live_tool": "tbag_follow",
         "live_capability_verified": False,
-        "activation": "restart-required-to-load-refreshed-adapter" if result.get("changed") or legacy_removed else "disk-current-live-registry-unverified",
+        "activation": "restart-required-to-load-refreshed-adapter" if changed else "disk-current-live-registry-unverified",
         "legacy_plugin_removed": legacy_removed,
-        "manual_step": "The installer proves only the project adapter file on disk plus companion presentation files; it cannot inspect the current OpenCode tool registry. Restart/reload OpenCode after changes. Current OpenCode TUI builds discover the companion T-BAG status plugin and expose /tbag; older hosts may ignore that presentation layer while the stable tbag_follow transport remains authoritative. Every owner turn/resume/wake/heartbeat begins with TBag/tools/parent_tick.py tick. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
+        "stale_v1_companion_removed": stale_v1_removed,
+        "manual_step": "The installer proves only the project adapter file on disk plus project TUI config; it cannot inspect the current OpenCode tool registry or prove either plugin is live. " + presentation_note + " Every owner turn/resume/wake/heartbeat begins with TBag/tools/parent_tick.py tick. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
     })
     return result
 

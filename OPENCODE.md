@@ -10,9 +10,11 @@ Refresh the project-local adapter once when an OpenCode parent starts or resumes
 python3 <skill>/scripts/install_harness_adapter.py --harness opencode --project-root <project>
 ```
 
-The installer proves the **file on disk**, not the live OpenCode tool registry. OpenCode loads project plugins from `.opencode/plugins/` at host startup. If the adapter file changed, restart/reload OpenCode when practical to activate the newest wake-race safeguards. Do not infer live capabilities from installer output.
+The installer detects the local host generation with `opencode --version` and installs the matching **presentation companion** while keeping the stable `tbag.js` transport adapter unchanged. OpenCode 1.x receives the v1 `@opencode-ai/plugin/tui` companion plus an explicit entry merged into `.opencode/tui.json` or existing `tui.jsonc`; OpenCode 2.x receives the separate `tbag-ui/` companion. T-BAG does not add `solid-js`, `@opentui/solid`, or OpenCode plugin packages to the project: the host owns those runtime dependencies.
 
-The only required custom tool is **`tbag_follow`**. If `tbag_follow` is already visible, the canonical protocol below is valid even when the current host loaded an older follow-only T-BAG adapter. A newer T-BAG release must not require a newly invented tool name in order to launch safely.
+The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. `live_capability_verified=false` is intentional until the running host proves activation.
+
+The only required custom tool is **`tbag_follow`**. If `tbag_follow` is already visible, the canonical protocol below is valid even when presentation is unavailable. A newer T-BAG release must not require a newly invented tool name in order to launch safely.
 
 If `tbag_follow` is absent, do not improvise a foreground waiter or scheduler. Stay conversation-first and ask for/rely on a host reload before autonomous long-running orchestration.
 
@@ -57,12 +59,24 @@ The adapter never polls idleness, chooses models/tasks, launches additional work
 
 ## Status display
 
-Current OpenCode TUI builds can load the additive project-local `tbag-ui` companion. It renders only the read-only `TBag/tools/tbag_status.py` snapshot: registered-plan progress, phase gates, active Grunt/Analyst sessions, task purpose, model, process/observer health, elapsed/deadline state and attention items. `/tbag` opens the detailed panel; the footer/sidebar stay deliberately compact. Presentation never ticks, launches, retires, accepts or integrates work.
+The status UI is additive and read-only. Both host generations render the existing `TBag/tools/tbag_status.py` snapshot: registered-plan progress, phase gates, active Grunt/Analyst sessions, task purpose, model, process/observer health, elapsed/deadline state and attention items. Presentation never ticks, launches, retires, accepts or integrates work.
+
+- **OpenCode 1.x:** the installer writes `.opencode/plugins/tbag-status-tui-v1.tsx` and merges `./plugins/tbag-status-tui-v1.tsx` into the local TUI config. `/tbag` opens the detail route; the sidebar carries the compact status card. The v1 companion id is `tbag.status.v1`.
+- **OpenCode 2.x:** the installer writes the existing `.opencode/plugins/tbag-ui/` companion and removes T-BAG's stale v1 file/config registration when upgrading across the major-version boundary.
+- **Unknown/unsupported major:** transport still installs, but presentation is deliberately skipped rather than guessing an incompatible TUI API.
+
+### Fast troubleshooting
+
+After a restart, open OpenCode's built-in **Plugins** dialog. On 1.x this is the quickest activation test:
+
+- `tbag.status.v1` **missing** → the TUI file/config registration was not loaded; rerun the installer and inspect its reported `tui_config` / `opencode_version`.
+- row present but **inactive** → enable/activate it in the Plugins dialog, then retry.
+- row enabled+active but `/tbag` missing → command registration failed; inspect the TUI-side plugin error rather than the server adapter log.
+- `/tbag` works but transport is red → diagnose `tbag_follow`/observer transport separately. Presentation health does not prove server-adapter health, and vice versa.
 
 Observer registrations are mirrored into run-local `.transport/opencode.json` only as disposable transport diagnostics. Durable task/run files remain semantic authority. Missing observer state is a reason to re-arm the exact live attempt, not evidence that the task failed.
 
 Repeated same-session instant deaths with a launcher-placeholder report and zero project movement are mechanically routed to `recovery-required` after three consecutive failures. That poisoned session is then abandoned and the existing `launch-recovery` action commissions an Analyst. Human authority is not consumed merely because a worker session became unusable.
-
 
 ## Forbidden substitutes
 
