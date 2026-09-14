@@ -15,6 +15,8 @@ Harness integrations only answer two practical questions: **when should the pare
 
 `inspect`, `follow`, renderers and UI plugins observe or present state. They cannot gate, review, accept, integrate, replan or otherwise decide semantic outcomes.
 
+A `follow` observer is a disposable wake edge, not durable supervision. Once the role attempt deadline is exceeded it is not re-armed; the parent tick owns retirement/recovery from durable process and attempt evidence. Repeated same-session, non-zero, zero-delta launcher failures are likewise classified from terminal evidence and routed to Recovery by the control plane rather than escaped by cloning replacement tasks.
+
 There is no second generic scheduler hidden in a harness adapter. Correctness stays in the durable parent tick.
 
 Install/check the selected adapter before a long run:
