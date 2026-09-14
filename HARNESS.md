@@ -13,7 +13,7 @@ Harness integrations only answer two practical questions: **when should the pare
 - **Codex:** hooks restore orientation; `tbag_render.py status|watch` provides the live dashboard in a companion terminal pane.
 - **Kilo:** use only its documented adapter surface; if a native wake surface is unavailable, degrade conversation-first rather than inventing a polling daemon.
 
-`inspect`, `follow`, renderers and UI plugins observe or present state. They cannot gate, review, accept, integrate, replan or otherwise decide semantic outcomes.
+`inspect`, `follow`, renderers and UI plugins only observe/present state. `follow` is disposable: after the role deadline it is not re-armed; the tick owns recovery, including repeated same-session zero-delta launcher failures.
 
 There is no second generic scheduler hidden in a harness adapter. Correctness stays in the durable parent tick.
 

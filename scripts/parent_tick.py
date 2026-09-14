@@ -168,11 +168,13 @@ def update_due(
     heartbeat_seconds: float,
     changed_min_seconds: float,
 ) -> dict[str, Any]:
+    """Classify owner communication as an acknowledged edge, not a level alarm."""
     stamp = time.time()
     signature = owner_signature(state, monitors, classification)
     last_at = epoch(loop.get("last_owner_update_at"))
     elapsed = None if last_at is None else max(0.0, stamp - last_at)
     last_signature = str(loop.get("last_owner_update_signature") or "")
+    last_reasons = sorted(str(x) for x in (loop.get("last_owner_update_reasons") or []) if str(x))
     urgent: list[str] = []
     if str(state.get("run_status") or "active") != "active": urgent.append("run-terminal-state")
     if state.get("human_blocks"): urgent.append("owner-decision-required")
@@ -180,21 +182,48 @@ def update_due(
     if any(x.get("retirement_requested") for x in monitors): urgent.append("worker-retired")
     if any(x.get("attention") == "silent-long-running" for x in monitors): urgent.append("worker-stall")
     if classification == "recovery-required": urgent.append("control-recovery-required")
-    if urgent:
+    same_acknowledged_condition = signature == last_signature and sorted(urgent) == last_reasons
+    if urgent and (last_at is None or not same_acknowledged_condition):
         due, reasons = True, urgent
     elif last_at is None:
         due, reasons = True, ["initial-status"]
+    elif urgent and elapsed is not None and elapsed >= heartbeat_seconds:
+        due, reasons = True, urgent
     elif signature != last_signature and elapsed is not None and elapsed >= changed_min_seconds:
         due, reasons = True, ["material-state-change"]
     elif elapsed is not None and elapsed >= heartbeat_seconds:
         due, reasons = True, ["periodic-heartbeat"]
     else:
         due, reasons = False, []
-    token = hashlib.blake2s(f"{signature}:{int(stamp)}".encode(), digest_size=10).hexdigest() if due else None
+
+    token = None
+    if due:
+        pending = loop.get("pending_owner_update") if isinstance(loop.get("pending_owner_update"),dict) else {}
+        pending_reasons = sorted(str(x) for x in (pending.get("reasons") or []) if str(x))
+        if str(pending.get("signature") or "") == signature and pending_reasons == sorted(reasons) and pending.get("token"):
+            token = str(pending["token"])
+        else:
+            token = hashlib.blake2s(f"{signature}:{int(stamp)}".encode(), digest_size=10).hexdigest()
     result: dict[str, Any] = {"due": due, "reasons": reasons, "signature": signature}
     if token: result["token"] = token
     if elapsed is not None: result["seconds_since_last_update"] = round(elapsed, 1)
     return result
+
+
+def compact_advance(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep deterministic transition receipts, not a duplicate reconciliation tree."""
+    if not isinstance(result,dict):
+        return None
+    applied=list(result.get("applied") or [])
+    blocked=list(result.get("blocked_actions") or [])
+    stopped=str(result.get("stopped") or "")
+    if not applied and not blocked and stopped in {"", "quiescent", "semantic-or-launch-boundary"}:
+        return None
+    out={"stopped":stopped}
+    if applied: out["applied"]=applied
+    if blocked: out["blocked_actions"]=blocked
+    if result.get("reason"): out["reason"]=result["reason"]
+    return out
 
 
 def command_tick(args: argparse.Namespace) -> dict[str, Any]:
@@ -231,12 +260,17 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             monitors.append({**live, "monitor_error": str(exc), "attention": "monitor-error"})
             continue
         item = {**live, **observed}
+        deadline = observed.get("deadline") if isinstance(observed.get("deadline"),dict) else {}
+        deadline_exceeded = bool(deadline.get("exceeded"))
         observer=observer_for(transport,event) if transport else None
         if transport:
             item["observer"]=observer or {"healthy":False,"known":False}
             if observer is None or not observer.get("healthy"):
-                item["observer_attention"]="observer-missing"
-                observer_rearm.append({"run_root":str(run),"phase_id":live.get("phase_id"),"task_id":live.get("task_id"),"event_dir":event})
+                if observed.get("state") == "running" and not deadline_exceeded:
+                    item["observer_attention"]="observer-missing"
+                    observer_rearm.append({"run_root":str(run),"phase_id":live.get("phase_id"),"task_id":live.get("task_id"),"event_dir":event})
+                elif deadline_exceeded:
+                    item["observer_attention"]="observer-not-rearmed-after-attempt-deadline"
         report_age = observed.get("report_age_seconds")
         if observed.get("state") == "running" and observed.get("report_state") == "present" and isinstance(report_age, (int, float)) and report_age >= float(args.report_complete_grace_seconds):
             try:
@@ -261,9 +295,10 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             if isinstance(cpu_now,(int,float)) and isinstance(cpu_start,(int,float)):
                 cpu_delta=max(0.0,float(cpu_now)-float(cpu_start)); item["stall_cpu_delta_seconds"]=round(cpu_delta,2)
             cpu_quiet=cpu_delta is None or cpu_delta<=2.0
-            if stalled_for >= float(args.stall_confirm_seconds) and cpu_quiet:
+            if stalled_for >= float(args.stall_confirm_seconds) and (cpu_quiet or deadline_exceeded):
                 try:
-                    item["retirement_requested"] = retire_attempt(run, live, "confirmed-silent-long-running")
+                    reason="confirmed-silent-after-attempt-deadline" if deadline_exceeded else "confirmed-silent-long-running"
+                    item["retirement_requested"] = retire_attempt(run, live, reason)
                     changed_runtime = True
                 except Exception as exc:
                     item["retirement_error"] = str(exc)
@@ -339,7 +374,8 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "worker_budget": state.get("worker_budget"),
         "owner_update": owner,
     }
-    if advance_result: out["advance"] = advance_result
+    advance_packet=compact_advance(advance_result)
+    if advance_packet: out["advance"] = advance_packet
     if poison_result and poison_result.get("count"): out["poisoned_sessions_routed"] = poison_result
     if observer_rearm: out["observer_rearm_required"] = observer_rearm
     if blocked_actions: out["blocked_actions"] = blocked_actions
