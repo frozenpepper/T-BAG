@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 V1_SPEC = "./plugins/tbag-status-tui-v1.tsx"
+LEGACY_V1_SPECS = ("./plugins/tbag-status-tui.tsx",)
 
 
 def detect_opencode_version() -> tuple[str | None, int | None]:
@@ -258,35 +259,7 @@ def _plugin_entries(text: str) -> tuple[tuple[int, int] | None, list[tuple[int, 
     return value, _array_entries(text, start, end)
 
 
-def ensure_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Path]:
-    path = tui_config_path(project_root)
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"$schema": "https://opencode.ai/tui.json", "plugin": [[spec, {}]]}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        return True, path
-
-    text = path.read_text(encoding="utf-8")
-    value, entries = _plugin_entries(text)
-    if any(_entry_spec_text(text[a:b]) == spec for a, b, _ in entries):
-        return False, path
-    entry = json.dumps([spec, {}])
-    if value is None:
-        close, has_members, trailing_comma = _root_close_info(text)
-        prefix = "" if not has_members or trailing_comma else ","
-        replacement = text[:close] + f'{prefix}\n  "plugin": [\n    {entry}\n  ]\n' + text[close:]
-    else:
-        start, end = value
-        close = end - 1
-        prefix = "" if not entries or entries[-1][2] is not None else ","
-        replacement = text[:close] + f'{prefix}\n    {entry}\n  ' + text[close:]
-    path.write_text(replacement, encoding="utf-8")
-    return True, path
-
-
-def remove_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Path | None]:
+def _remove_tui_plugin_once(project_root: Path, spec: str) -> tuple[bool, Path | None]:
     path = tui_config_path(project_root)
     if not path.exists():
         return False, None
@@ -310,3 +283,49 @@ def remove_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Pa
         cut_start, cut_end = start, end
     path.write_text(text[:cut_start] + text[cut_end:], encoding="utf-8")
     return True, path
+
+
+def ensure_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Path]:
+    changed = False
+    if spec == V1_SPEC:
+        for legacy_spec in LEGACY_V1_SPECS:
+            removed, _ = _remove_tui_plugin_once(project_root, legacy_spec)
+            changed |= removed
+
+    path = tui_config_path(project_root)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"$schema": "https://opencode.ai/tui.json", "plugin": [[spec, {}]]}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return True, path
+
+    text = path.read_text(encoding="utf-8")
+    value, entries = _plugin_entries(text)
+    if any(_entry_spec_text(text[a:b]) == spec for a, b, _ in entries):
+        return changed, path
+    entry = json.dumps([spec, {}])
+    if value is None:
+        close, has_members, trailing_comma = _root_close_info(text)
+        prefix = "" if not has_members or trailing_comma else ","
+        replacement = text[:close] + f'{prefix}\n  "plugin": [\n    {entry}\n  ]\n' + text[close:]
+    else:
+        start, end = value
+        close = end - 1
+        prefix = "" if not entries or entries[-1][2] is not None else ","
+        replacement = text[:close] + f'{prefix}\n    {entry}\n  ' + text[close:]
+    path.write_text(replacement, encoding="utf-8")
+    return True, path
+
+
+def remove_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Path | None]:
+    specs = (spec, *LEGACY_V1_SPECS) if spec == V1_SPEC else (spec,)
+    changed = False
+    path: Path | None = None
+    for candidate in specs:
+        removed, current_path = _remove_tui_plugin_once(project_root, candidate)
+        changed |= removed
+        if current_path is not None:
+            path = current_path
+    return changed, path
