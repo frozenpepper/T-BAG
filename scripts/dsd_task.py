@@ -25,6 +25,7 @@ from typing import Any
 from _roles import ANALYST_DISPOSITION_ROLES, DEFAULT_TIER, ESCALATION_LADDER, ROLE_NAMES
 from _contract import allowed_source_changes, declared_worker_skill_tags, generated_output_mappings, has_explicit_write_restriction, required_worktree_fixtures, role_writes_project, validate_path_relationships
 from _rules_snapshot import rules_revisions, verify_snapshot
+import scope_snapshot
 
 FORMAT = "dsd-task-state-v2.1"
 PLAN_FORMAT = "dsd-task-plan-v2.1"
@@ -1689,28 +1690,43 @@ def command_prepare_followup_triage(args: argparse.Namespace) -> dict[str, Any]:
     return {"source_task":source_id,"triage_task":triage_id,"finding_ids":finding_ids,"existing":False}
 
 def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the one mechanically executable next action for a task.
+
+    Durable task status owns actionability. Historical attempt residue may
+    refine an unfinished lane, but it can never reopen a completed/superseded
+    task or override a Recovery boundary.
+    """
     tid=str(task.get("task_id") or ""); status=str(task.get("status") or ""); attempts=[a for a in task.get("attempts",[]) if isinstance(a,dict)]; latest=attempts[-1] if attempts else {}
     event=Path(str(latest.get("event_dir") or "")) if latest else Path()
     terminal=(event/"terminal.json").is_file() if event and str(event) not in {".",""} else False
     attempt_status=str(latest.get("status") or "")
     role=str(latest.get("role") or task.get("role") or "")
     base={"phase_id":phase,"task_id":tid,"task_status":status}
+
+    # Terminal durable state dominates chronological attempt residue.
+    if status in {"integrated","superseded"}: return None
+    if status=="accepted":
+        return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None
+    if status=="blocked":
+        return {**base,"action":"await-human-decision","escalation":task.get("last_escalation")}
+
     if latest and attempt_status=="gated" and report_requests_capability(event/"report.md"):
         return {**base,"action":"route-capability-escalation","report":str(event/"report.md"),"role":role}
     if latest and attempt_status=="started" and terminal:
         return {**base,"action":"gate-finished-attempt","event_dir":str(event)}
-    # A live attempt already owns this task transition. Never advertise another
-    # launch for the same task (Reviewer/Fixer/Recovery/base role) while it runs.
-    # A live attempt already owns the transition; do not advertise duplicate launches.
     if any(attempt_is_live(a) for a in attempts):
         return None
+
+    # Recovery is a durable lane decision (including poisoned-session
+    # routing), so an older resumable session may not pull the task backward.
+    if status=="recovery-required": return {**base,"action":"launch-recovery"}
+
     if attempt_status in {"report-recovery","report-resume","mutating-report-resume"}:
         session=latest.get("session_id") or latest.get("resume_session")
         return {**base,"action":"resume-recorded-session" if session else "retry-same-role-retained-workspace","role":role,"event_dir":str(event),**({"session_id":session} if session else {})}
     findings=open_review_findings(task)
     if any(not str(f.get("triage_task_id") or "") for f in findings):
         return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}
-    if status=="recovery-required": return {**base,"action":"launch-recovery"}
     if status=="needs-analysis": return {**base,"action":"launch-analyst-discovery"}
     if status=="needs-fix": return {**base,"action":"launch-fixer"}
     if status=="awaiting-review":
@@ -1718,8 +1734,6 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
             return {**base,"action":"record-review-outcome","report":str(event/"report.md")}
         return {**base,"action":"launch-fresh-reviewer"}
     if status=="review-passed": return {**base,"action":"accept-reviewed-task"}
-    if status=="accepted" and task.get("requires_integration"): return {**base,"action":"integrate-accepted-task"}
-    if status=="blocked": return {**base,"action":"await-human-decision","escalation":task.get("last_escalation")}
     if status in {"planned","ready"}:
         ok,missing=readiness(run,phase,task)
         if ok: return {**base,"action":"launch-ready-task","role":task.get("role"),"tier":task.get("tier")}
@@ -1745,7 +1759,6 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
         if task.get("kind") in {"analysis","verification"}: return {**base,"action":"accept-specialist-result","report":str(event/"report.md")}
     return None
 
-
 def _quiescent_reusable_review_conduit(task: dict[str, Any]) -> bool:
     """Whether a reusable Plan/Context Reviewer has no unrecorded semantic outcome.
 
@@ -1763,6 +1776,16 @@ def _quiescent_reusable_review_conduit(task: dict[str, Any]) -> bool:
     if not field: return False
     recorded=task.get(field) if isinstance(task.get(field),dict) else {}
     return str(recorded.get("reviewer_attempt") or "") == str(latest.get("event_dir") or "")
+
+
+def _runtime_reaped_counts(housekeeping: dict[str, Any]) -> dict[str, int]:
+    """Bound housekeeping receipts for the parent routing surface."""
+    out: dict[str,int] = {}
+    for key in ("cleaned","orphan_databases_removed","analysis_views_removed"):
+        value=housekeeping.get(key)
+        count=len(value) if isinstance(value,list) else int(value) if isinstance(value,int) else 0
+        if count: out[f"{key}_count"]=count
+    return out
 
 
 def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
@@ -1845,8 +1868,8 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     if human: result["human_blocks"]=human
     if unresolved_state: result["unresolved_state"]=unresolved_state
     if swept.get("count"): result["swept_stale"]=swept
-    if housekeeping.get("cleaned") or housekeeping.get("orphan_databases_removed") or housekeeping.get("analysis_views_removed"):
-        result["runtime_reaped"]={k:v for k,v in housekeeping.items() if v and k!="skipped"}
+    reaped_counts=_runtime_reaped_counts(housekeeping)
+    if reaped_counts: result["runtime_reaped"]=reaped_counts
     if housekeeping.get("deferred"): result["runtime_reap_deferred"]=housekeeping["deferred"]
     if getattr(args,"details",False):
         result.update({
@@ -1923,11 +1946,10 @@ def _attempt_terminal(attempt:dict[str,Any])->dict[str,Any]|None:
     except (OSError,ValueError,json.JSONDecodeError): return None
     return value
 
-def _terminal_changed_count(terminal:dict[str,Any])->int|None:
-    scope=terminal.get("scope_diff") if isinstance(terminal.get("scope_diff"),dict) else {}
-    raw=scope.get("changed_count")
-    try: return int(raw)
-    except (TypeError,ValueError): return None
+def _terminal_changed_count(terminal:dict[str,Any], attempt:dict[str,Any]|None=None)->int|None:
+    event_raw=str((attempt or {}).get("event_dir") or "")
+    event=Path(event_raw) if event_raw else None
+    return scope_snapshot.comparison_changed_count(terminal.get("scope_diff"),relative_to=event)
 
 def _attempt_session_identity(attempt:dict[str,Any],terminal:dict[str,Any]|None=None)->str|None:
     for value in ((terminal or {}).get("session_id"),attempt.get("session_id"),attempt.get("resume_session")):
@@ -1954,7 +1976,7 @@ def poisoned_session_candidate(task:dict[str,Any], *, failures:int=3)->dict[str,
         try: exit_code=int(terminal.get("exit_code"))
         except (TypeError,ValueError): return None
         if exit_code==0 or str(terminal.get("report_state") or "")!="launcher-placeholder": return None
-        if _terminal_changed_count(terminal)!=0: return None
+        if _terminal_changed_count(terminal,attempt)!=0: return None
         current=_attempt_session_identity(attempt,terminal)
         if not current: return None
         if session is None: session=current
@@ -2213,7 +2235,7 @@ def _attempt_is_empty_retry(attempt: dict[str, Any]) -> bool:
         return str(attempt.get("stale_disposition") or "")=="safe-retry" and not list(attempt.get("stale_changed_paths") or [])
     if status not in {"report-recovery","report-resume"}: return False
     terminal=_attempt_terminal(attempt)
-    return bool(terminal and str(terminal.get("report_state") or "")=="launcher-placeholder" and _terminal_changed_count(terminal)==0)
+    return bool(terminal and str(terminal.get("report_state") or "")=="launcher-placeholder" and _terminal_changed_count(terminal,attempt)==0)
 
 
 def _attempt_supersedes_task_review(attempt: dict[str, Any]) -> bool:

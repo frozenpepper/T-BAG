@@ -304,7 +304,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
                     item["retirement_error"] = str(exc)
                     item["attention"] = "retirement-failed"
             elif stalled_for >= float(args.stall_confirm_seconds):
-                item["automatic_intervention_deferred"]="worker-cpu-still-changing-before-attempt-deadline"
+                item["automatic_intervention_deferred"]="worker-cpu-still-changing"
             else:
                 item["automatic_intervention_in_seconds"] = round(float(args.stall_confirm_seconds) - stalled_for, 1)
         else:
