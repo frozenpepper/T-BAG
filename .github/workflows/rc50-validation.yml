@@ -1,0 +1,66 @@
+name: RC50 OpenCode v1 TUI validation
+
+on:
+  push:
+    branches: [rc50-publisher]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: rc50-opencode-v1-tui
+          fetch-depth: 0
+
+      - name: Focused RC50 regressions
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc50_opencode_v1_tui -v
+          python3 -m compileall -q scripts tests
+          git diff --check
+
+      - name: Type-check v1 TUI against OpenCode 1.18.x contract
+        run: |
+          set -euo pipefail
+          TMP="$(mktemp -d)"
+          cp adapters/opencode/tbag-status-tui-v1.tsx "$TMP/index.tsx"
+          cd "$TMP"
+          npm init -y >/dev/null
+          npm install --ignore-scripts --no-save typescript @types/node @opencode-ai/plugin@1.18.29 @opentui/solid solid-js >/dev/null
+          cat > tsconfig.json <<'JSON'
+          {
+            "compilerOptions": {
+              "target": "ES2022",
+              "module": "ESNext",
+              "moduleResolution": "Bundler",
+              "jsx": "preserve",
+              "jsxImportSource": "@opentui/solid",
+              "strict": false,
+              "skipLibCheck": true,
+              "types": ["node"]
+            },
+            "include": ["index.tsx"]
+          }
+          JSON
+          npx tsc --noEmit
+
+      - name: Full regression matrix
+        run: |
+          set -euo pipefail
+          python3 -m unittest tests.test_rc46_supervision -q
+          python3 -m unittest tests.test_components -q
+          python3 -m unittest tests.test_task_control -q
+          python3 -m unittest tests.test_workspace -q
+          python3 -m unittest tests.test_gate -q
+          python3 -m unittest tests.test_runtime_and_evals tests.test_docs -q
+          python3 -m unittest tests.test_context_composition -q
+          python3 -m unittest tests.test_end_to_end -q
+          python3 scripts/check_behavioral_evals.py
+          node --check adapters/opencode/tbag.js
+          node tests/opencode_plugin_runtime.mjs adapters/opencode/tbag.js
+          node tests/opencode_transport_registry_runtime.mjs adapters/opencode/tbag.js
