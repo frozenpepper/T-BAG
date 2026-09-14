@@ -25,6 +25,7 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import textwrap
 
           path = Path('scripts/dsd_task.py')
           text = path.read_text(encoding='utf-8')
@@ -36,7 +37,7 @@ jobs:
 
           start = text.index('def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:\n')
           end = text.index('\ndef _quiescent_reusable_review_conduit', start)
-          reconcile_action = '''def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
+          reconcile_action = textwrap.dedent('''def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
               """Return the one mechanically executable next action for a task.
 
               Durable task status owns actionability. Historical attempt residue may
@@ -105,14 +106,12 @@ jobs:
                           return {**base,"action":"record-analyst-disposition","report":str(event/"report.md")}
                   if task.get("kind") in {"analysis","verification"}: return {**base,"action":"accept-specialist-result","report":str(event/"report.md")}
               return None
-          '''
-          import textwrap
-          reconcile_action = textwrap.dedent(reconcile_action)
+          ''')
           text = text[:start] + reconcile_action + text[end:]
 
           reconcile_def = 'def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:\n'
           assert text.count(reconcile_def) == 1
-          housekeeping_helper = '''def _runtime_reaped_counts(housekeeping: dict[str, Any]) -> dict[str, int]:
+          housekeeping_helper = textwrap.dedent('''def _runtime_reaped_counts(housekeeping: dict[str, Any]) -> dict[str, int]:
               """Bound housekeeping receipts for the parent routing surface."""
               out: dict[str,int] = {}
               for key in ("cleaned","orphan_databases_removed","analysis_views_removed"):
@@ -122,34 +121,27 @@ jobs:
               return out
 
 
-          '''
-          housekeeping_helper = textwrap.dedent(housekeeping_helper)
+          ''')
           text = text.replace(reconcile_def, housekeeping_helper + reconcile_def, 1)
 
-          old_reaped = '''    if housekeeping.get("cleaned") or housekeeping.get("orphan_databases_removed") or housekeeping.get("analysis_views_removed"):
-                  result["runtime_reaped"]={k:v for k,v in housekeeping.items() if v and k!="skipped"}
-          '''
-          old_reaped = textwrap.dedent(old_reaped).replace('if housekeeping', '    if housekeeping').replace('\nresult[', '\n        result[')
-          # Keep the assertion explicit instead of silently changing a drifted block.
           exact_old = '    if housekeeping.get("cleaned") or housekeeping.get("orphan_databases_removed") or housekeeping.get("analysis_views_removed"):\n        result["runtime_reaped"]={k:v for k,v in housekeeping.items() if v and k!="skipped"}\n'
           assert text.count(exact_old) == 1
           exact_new = '    reaped_counts=_runtime_reaped_counts(housekeeping)\n    if reaped_counts: result["runtime_reaped"]=reaped_counts\n'
           text = text.replace(exact_old, exact_new, 1)
 
-          old_changed = '''def _terminal_changed_count(terminal:dict[str,Any])->int|None:
+          old_changed = textwrap.dedent('''def _terminal_changed_count(terminal:dict[str,Any])->int|None:
               scope=terminal.get("scope_diff") if isinstance(terminal.get("scope_diff"),dict) else {}
               raw=scope.get("changed_count")
               try: return int(raw)
               except (TypeError,ValueError): return None
-          '''
-          old_changed = textwrap.dedent(old_changed)
+          ''')
           assert text.count(old_changed) == 1
-          new_changed = '''def _terminal_changed_count(terminal:dict[str,Any], attempt:dict[str,Any]|None=None)->int|None:
+          new_changed = textwrap.dedent('''def _terminal_changed_count(terminal:dict[str,Any], attempt:dict[str,Any]|None=None)->int|None:
               event_raw=str((attempt or {}).get("event_dir") or "")
               event=Path(event_raw) if event_raw else None
               return scope_snapshot.comparison_changed_count(terminal.get("scope_diff"),relative_to=event)
-          '''
-          text = text.replace(old_changed, textwrap.dedent(new_changed), 1)
+          ''')
+          text = text.replace(old_changed, new_changed, 1)
           assert text.count('_terminal_changed_count(terminal)!=0') == 1
           text = text.replace('_terminal_changed_count(terminal)!=0', '_terminal_changed_count(terminal,attempt)!=0', 1)
           assert text.count('_terminal_changed_count(terminal)==0') == 1
@@ -158,11 +150,14 @@ jobs:
           path.write_text(text, encoding='utf-8')
           PY
 
+          # Preserve the existing parent-facing reason token. The architecture changes
+          # the deadline boundary, not the stable diagnostic vocabulary before it.
+          sed -i 's/worker-cpu-still-changing-before-attempt-deadline/worker-cpu-still-changing/' scripts/parent_tick.py
+
           cat > tests/test_rc52_architecture.py <<'PY'
           import json
           import sys
           import tempfile
-          import time
           import unittest
           from pathlib import Path
           from types import SimpleNamespace
@@ -294,7 +289,7 @@ jobs:
         run: |
           git config user.name 'T-BAG RC52 verifier'
           git config user.email 'actions@users.noreply.github.com'
-          git add scripts/dsd_task.py tests/test_rc52_architecture.py
+          git add scripts/dsd_task.py scripts/parent_tick.py tests/test_rc52_architecture.py
           if git diff --cached --quiet; then
             echo 'No kernel changes to commit.'
             exit 0
