@@ -2,9 +2,8 @@
 """OpenCode host-version and TUI-config compatibility helpers.
 
 The server adapter is stable across supported hosts; only the optional TUI
-companion differs.  These helpers deliberately edit only the top-level
-``plugin`` value in tui.json/jsonc so unrelated owner config and comments stay
-byte-preserved.
+companion differs. These helpers edit only the top-level ``plugin`` value in
+`tui.json`/`tui.jsonc`, preserving unrelated owner text and comments.
 """
 from __future__ import annotations
 
@@ -45,7 +44,8 @@ def _skip_trivia(text: str, index: int) -> int:
             continue
         if text.startswith("//", index):
             newline = text.find("\n", index + 2)
-            return n if newline < 0 else _skip_trivia(text, newline + 1)
+            index = n if newline < 0 else newline + 1
+            continue
         if text.startswith("/*", index):
             end = text.find("*/", index + 2)
             if end < 0:
@@ -141,6 +141,39 @@ def _root_property(text: str, name: str) -> tuple[int, int] | None:
         raise ValueError("malformed TUI config object")
 
 
+def _root_close_info(text: str) -> tuple[int, bool, bool]:
+    i = _skip_trivia(text, 0)
+    if i >= len(text) or text[i] != "{":
+        raise ValueError("TUI config root must be an object")
+    i += 1
+    has_members = False
+    trailing_comma = False
+    while True:
+        i = _skip_trivia(text, i)
+        if i >= len(text):
+            raise ValueError("unterminated TUI config")
+        if text[i] == "}":
+            return i, has_members, trailing_comma
+        key_end = _string_end(text, i)
+        i = _skip_trivia(text, key_end)
+        if i >= len(text) or text[i] != ":":
+            raise ValueError("malformed TUI config property")
+        end = _value_end(text, i + 1)
+        has_members = True
+        i = _skip_trivia(text, end)
+        if i < len(text) and text[i] == ",":
+            trailing_comma = True
+            i += 1
+            probe = _skip_trivia(text, i)
+            if probe < len(text) and text[probe] == "}":
+                return probe, has_members, True
+            trailing_comma = False
+            continue
+        if i < len(text) and text[i] == "}":
+            return i, has_members, False
+        raise ValueError("malformed TUI config object")
+
+
 def _strip_jsonc(text: str) -> str:
     out: list[str] = []
     i = 0
@@ -167,37 +200,62 @@ def _strip_jsonc(text: str) -> str:
         out.append(text[i])
         i += 1
     cleaned = "".join(out)
-    # JSONC permits trailing commas. Remove only commas immediately before a
-    # closing array/object delimiter in the comment-free projection.
     chars = list(cleaned)
     i = 0
     while i < len(chars):
-        if chars[i] in "]}":
-            j = i - 1
-            while j >= 0 and chars[j].isspace():
-                j -= 1
-            if j >= 0 and chars[j] == ",":
-                chars[j] = " "
+        if chars[i] == '"':
+            i = _string_end(cleaned, i)
+            continue
+        if chars[i] == ",":
+            j = i + 1
+            while j < len(chars) and chars[j].isspace():
+                j += 1
+            if j < len(chars) and chars[j] in "]}":
+                chars[i] = " "
         i += 1
     return "".join(chars)
 
 
-def _plugin_specs(text: str) -> list[Any]:
-    value = _root_property(text, "plugin")
-    if value is None:
-        return []
-    parsed = json.loads(_strip_jsonc(text[value[0]:value[1]]))
-    if not isinstance(parsed, list):
-        raise ValueError("tui.json plugin must be an array")
-    return parsed
-
-
-def _entry_spec(value: Any) -> str | None:
+def _entry_spec_text(text: str) -> str | None:
+    value = json.loads(_strip_jsonc(text))
     if isinstance(value, str):
         return value
     if isinstance(value, list) and value and isinstance(value[0], str):
         return value[0]
     return None
+
+
+def _array_entries(text: str, start: int, end: int) -> list[tuple[int, int, int | None]]:
+    if text[start] != "[" or text[end - 1] != "]":
+        raise ValueError("expected JSONC array")
+    entries: list[tuple[int, int, int | None]] = []
+    i = start + 1
+    while True:
+        i = _skip_trivia(text, i)
+        if i >= end:
+            raise ValueError("unterminated JSONC array")
+        if text[i] == "]":
+            return entries
+        value_start = i
+        value_end = _value_end(text, value_start)
+        after = _skip_trivia(text, value_end)
+        comma = after if after < end and text[after] == "," else None
+        entries.append((value_start, value_end, comma))
+        if comma is not None:
+            i = comma + 1
+            continue
+        after = _skip_trivia(text, value_end)
+        if after < end and text[after] == "]":
+            return entries
+        raise ValueError("malformed JSONC array")
+
+
+def _plugin_entries(text: str) -> tuple[tuple[int, int] | None, list[tuple[int, int, int | None]]]:
+    value = _root_property(text, "plugin")
+    if value is None:
+        return None, []
+    start, end = value
+    return value, _array_entries(text, start, end)
 
 
 def ensure_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Path]:
@@ -211,26 +269,18 @@ def ensure_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Pa
         return True, path
 
     text = path.read_text(encoding="utf-8")
-    if any(_entry_spec(row) == spec for row in _plugin_specs(text)):
+    value, entries = _plugin_entries(text)
+    if any(_entry_spec_text(text[a:b]) == spec for a, b, _ in entries):
         return False, path
-    value = _root_property(text, "plugin")
     entry = json.dumps([spec, {}])
     if value is None:
-        root_end = _value_end(text, _skip_trivia(text, 0)) - 1
-        before = text[:root_end].rstrip()
-        comma = "" if before.endswith("{") else ","
-        replacement = f'{before}{comma}\n  "plugin": [\n    {entry}\n  ]\n' + text[root_end:]
+        close, has_members, trailing_comma = _root_close_info(text)
+        prefix = "" if not has_members or trailing_comma else ","
+        replacement = text[:close] + f'{prefix}\n  "plugin": [\n    {entry}\n  ]\n' + text[close:]
     else:
         start, end = value
-        if text[start] != "[":
-            raise ValueError("tui.json plugin must be an array")
         close = end - 1
-        j = close - 1
-        while j > start and text[j].isspace():
-            j -= 1
-        empty = j == start
-        trailing_comma = (not empty and text[j] == ",")
-        prefix = "" if empty or trailing_comma else ","
+        prefix = "" if not entries or entries[-1][2] is not None else ","
         replacement = text[:close] + f'{prefix}\n    {entry}\n  ' + text[close:]
     path.write_text(replacement, encoding="utf-8")
     return True, path
@@ -241,16 +291,22 @@ def remove_tui_plugin(project_root: Path, spec: str = V1_SPEC) -> tuple[bool, Pa
     if not path.exists():
         return False, None
     text = path.read_text(encoding="utf-8")
-    value = _root_property(text, "plugin")
+    value, entries = _plugin_entries(text)
     if value is None:
         return False, path
-    start, end = value
-    rows = _plugin_specs(text)
-    if not any(_entry_spec(row) == spec for row in rows):
+    match_index = None
+    for index, (start, end, _comma) in enumerate(entries):
+        if _entry_spec_text(text[start:end]) == spec:
+            match_index = index
+            break
+    if match_index is None:
         return False, path
-    kept = [row for row in rows if _entry_spec(row) != spec]
-    indent = "  "
-    rendered = json.dumps(kept, indent=2)
-    rendered = rendered.replace("\n", "\n" + indent)
-    path.write_text(text[:start] + rendered + text[end:], encoding="utf-8")
+    start, end, comma = entries[match_index]
+    if comma is not None:
+        cut_start, cut_end = start, comma + 1
+    elif match_index > 0 and entries[match_index - 1][2] is not None:
+        cut_start, cut_end = entries[match_index - 1][2], end
+    else:
+        cut_start, cut_end = start, end
+    path.write_text(text[:cut_start] + text[cut_end:], encoding="utf-8")
     return True, path
