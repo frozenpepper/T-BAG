@@ -15,6 +15,7 @@ from typing import Any
 from _contract import allowed_source_changes, generated_output_mappings, has_explicit_write_restriction, role_writes_project
 from _rules_snapshot import verify_snapshot
 from run_worker import classify_report_text
+import scope_snapshot
 
 
 def read_json(path: Path)->dict[str,Any]:
@@ -56,9 +57,8 @@ def gate(event: Path)->dict[str,Any]:
         terminal=read_json(terminal_path)
         for key in ("task_id","role","attempt","tier","model"):
             if terminal.get(key)!=reservation.get(key): errors.append(f"terminal {key} disagrees with launch reservation")
-        scope_raw=terminal.get("scope_diff")
-        if isinstance(scope_raw,str) and Path(scope_raw).is_file(): scope=read_json(Path(scope_raw))
-        else: errors.append("terminal scope comparison missing")
+        scope=scope_snapshot.resolve_comparison(terminal.get("scope_diff"),relative_to=event)
+        if scope is None: errors.append("terminal scope comparison missing")
     else:
         errors.append("terminal event missing")
 
