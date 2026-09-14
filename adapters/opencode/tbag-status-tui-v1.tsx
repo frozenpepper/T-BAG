@@ -15,6 +15,12 @@ function clampPercent(value: unknown) {
   return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0
 }
 
+function progressBar(value: unknown, width = 16) {
+  const pct = clampPercent(value)
+  const filled = Math.round((pct / 100) * width)
+  return `${"█".repeat(filled)}${"░".repeat(Math.max(0, width - filled))}`
+}
+
 function shortSession(value: unknown) {
   const text = String(value ?? "")
   return text ? (text.length > 12 ? `${text.slice(0, 9)}…` : text) : "no-session"
@@ -35,18 +41,6 @@ function statusColor(status: unknown) {
   if (value === "active" || value === "completed") return "green"
   if (value === "blocked" || value === "failed" || value === "recovery-required") return "red"
   return "yellow"
-}
-
-function SegmentedBar(props: { value: unknown; width?: number }) {
-  const width = () => props.width ?? 16
-  const filled = () => Math.round((clampPercent(props.value) / 100) * width())
-  return (
-    <text>
-      <For each={Array.from({ length: width() })}>
-        {(_, index) => <span style={{ fg: index() < filled() ? "green" : "gray" }}>█</span>}
-      </For>
-    </text>
-  )
 }
 
 function TierGlyph(props: { tier: unknown }) {
@@ -83,6 +77,7 @@ function sidebarPlugin(api: TuiPluginApi, snapshot: (sessionID?: string) => Snap
       sidebar_content(_ctx, value) {
         remember(value.session_id)
         const s = () => snapshot(value.session_id)
+        const attentionCount = () => s()?.attention?.length ?? 0
         return (
           <box flexDirection="column" marginTop={1}>
             <Show when={s()} fallback={<text>T-BAG status unavailable.</text>}>
@@ -90,12 +85,12 @@ function sidebarPlugin(api: TuiPluginApi, snapshot: (sessionID?: string) => Snap
                 T-BAG <span style={{ fg: statusColor(s()?.run?.status) }}>{String(s()?.run?.status ?? "?").toUpperCase()}</span>
                 {` · ${s()?.progress?.registered_percent ?? 0}% · ${s()?.worker_budget?.live ?? 0}/${s()?.worker_budget?.max ?? 0}`}
               </text>
-              <SegmentedBar value={s()?.progress?.registered_percent} width={12} />
+              <text>{progressBar(s()?.progress?.registered_percent, 12)}</text>
               <For each={(s()?.workers ?? []).slice(0, 4)}>
                 {(worker: any) => <text><TierGlyph tier={worker.tier} /> {`${worker.task_id} ${worker.role} ${duration(worker.elapsed_seconds)}`}</text>}
               </For>
-              <Show when={(s()?.attention?.length ?? 0) > 0}>
-                <text fg="red">{`⚠ ${s()?.attention.length} item${s()?.attention.length === 1 ? "" : "s"} need attention`}</text>
+              <Show when={attentionCount() > 0}>
+                <text fg="red">{`⚠ ${attentionCount()} item${attentionCount() === 1 ? "" : "s"} need attention`}</text>
               </Show>
               <text>/tbag for details</text>
             </Show>
@@ -174,7 +169,7 @@ const tui: TuiPlugin = async (api) => {
                 T-BAG · <span style={{ fg: statusColor(s()?.run?.status) }}>{String(s()?.run?.status ?? "unknown").toUpperCase()}</span>
                 {` · ${s()?.run?.id ?? "run"}`}
               </text>
-              <SegmentedBar value={s()?.progress?.registered_percent} width={22} />
+              <text>{progressBar(s()?.progress?.registered_percent, 22)}</text>
               <text>{`${s()?.progress?.registered_percent ?? 0}% registered work · ${s()?.progress?.registered_done ?? 0}/${s()?.progress?.registered_total ?? 0}`}</text>
               <text>{`Phases ${s()?.progress?.phases_done ?? 0}/${s()?.progress?.phases_total ?? 0} · slots ${s()?.worker_budget?.live ?? 0}/${s()?.worker_budget?.max ?? 0} · ${s()?.run?.parent_loop ?? "no tick yet"}`}</text>
               <text> </text>
