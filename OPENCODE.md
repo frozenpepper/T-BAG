@@ -14,9 +14,9 @@ The installer detects the local host generation with `opencode --version` and in
 
 The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. `live_capability_verified=false` is intentional until the running host proves activation.
 
-The only required custom tool is **`tbag_follow`**. If `tbag_follow` is already visible, the canonical protocol below is valid even when presentation is unavailable. A newer T-BAG release must not require a newly invented tool name in order to launch safely.
+The project plugin exposes **`tbag_follow`** as a live-plugin probe and optional observer re-arm tool. Current OpenCode parents do **not** call it to set up heartbeat supervision: the first normal `parent_tick.py tick` automatically enrolls that session/run, and a successful structured launch auto-arms its observer.
 
-If `tbag_follow` is absent, wake transport is degraded, not lifecycle correctness: launch normally detached, do not invent a waiter/scheduler, and let the next owner turn/manual tick rediscover completion. Reload the host to restore autonomous wakes.
+If `tbag_follow` is absent, treat the project plugin as not live (or incomplete): autonomous wake transport is unavailable; **wake transport is degraded, not lifecycle correctness.** Launch normally detached, do not invent a waiter/scheduler, and let the next owner turn/manual tick rediscover completion. Reload the host to restore autonomous wakes.
 
 ## Canonical OpenCode loop
 
@@ -24,26 +24,27 @@ There is exactly one parent protocol, including across adapter upgrades:
 
 1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Do not separately reconstruct reconcile/advance/monitor/update state.
 2. Process the tick packet until it reaches a launch/semantic/owner boundary. If it says `actions-ready`, execute only those authorized actions and tick again.
-3. For each new attempt run normal detached `dsd_attempt.py launch`, then **immediately call `tbag_follow`** when available. If it is unavailable, yield conversation-first; the next owner turn/manual tick is the fallback wake. This also registers the run for the adapter's low-frequency heartbeat when armed.
-4. `tbag_follow already_armed:true` is only returned for an observer entry whose process still appears live; it is not semantic progress. The next tick remains authoritative.
+3. For each new attempt run normal detached `dsd_attempt.py launch`, then yield. A live current adapter has already enrolled the heartbeat from the parent tick and will auto-arm the observer from the structured launch result.
+4. Call `tbag_follow` only when tick reports observer re-arm is needed, after adapter recovery/reload for a still-live attempt, or for transport diagnosis. `already_armed:true` is only transport state; the next tick remains authoritative.
 5. If the tick says `owner_update.due`, send the bounded purpose-first update and then `parent_tick.py ack-update --token ...`.
 6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
 7. Do not keep the conversation alive with Bash/Python sleeps or polling. Per-attempt completion requests an early tick; a periodic transport heartbeat requests another tick even when a wake was lost.
 
 The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth. A Human `--route analysis` opens Analyst authority only; the Analyst's later `replan` is the separate technical graph decision.
 
-## Safety auto-arm (new adapter, not protocol authority)
+## Automatic enrollment and observer arm
 
-The current adapter has one defensive hook: after a successful native Bash `dsd_attempt.py launch`, OpenCode's `tool.execute.after` hook attempts to arm that exact recorded attempt **before the launch output returns to the model**. This closes the small launch→follow race when the host supports the hook.
+The current adapter owns wake setup mechanically. Before a normal parent `parent_tick.py tick` or `dsd_attempt.py launch` executes, the plugin extracts `--run-root` and enrolls that OpenCode session/run in the low-frequency heartbeat. After a successful structured launch, `tool.execute.after` also arms the exact recorded attempt observer before the launch output returns to the model.
 
-It does not replace step 3. The parent still calls `tbag_follow` immediately. Therefore:
+Therefore:
 
-- older follow-only project adapters remain compatible;
-- headless/host modes where tool hooks are unavailable do not change the protocol;
-- auto-arm failure cannot hide or invalidate an already detached worker;
+- the orchestrator never performs a separate heartbeat-registration ritual;
+- `tbag_follow` remains available for explicit re-arm/diagnosis; older follow-only project adapters remain compatible;
+- headless/host modes where project hooks are unavailable degrade to manual owner-turn ticks;
+- auto-arm failure cannot hide or invalidate an already detached worker because heartbeat supervision remains active;
 - no semantic task authority moves into the plugin.
 
-Direct Bash/Python `dsd_attempt.py follow` remains forbidden because it can monopolize the conversational turn. The project-local `tbag_follow` tool backgrounds the same core observer and returns immediately.
+Direct Bash/Python `dsd_attempt.py follow` remains forbidden because it can monopolize the conversational turn. The project-local `tbag_follow` tool backgrounds the same core observer and returns immediately when an explicit re-arm is needed.
 
 Credential/config rotation is not assumed to hot-reload inside an already-running worker. If a worker stops making progress after rotation, use lifecycle retirement plus retained-session resume/retry; never make the parent inventory sibling processes or issue raw `ps`/`kill`.
 
@@ -53,7 +54,7 @@ Credential/config rotation is not assumed to hot-reload inside an already-runnin
 
 OpenCode session lifecycle events are used only as a thin transport interlock. If an observer finishes while the parent is still busy, the plugin coalesces one **in-memory wake bit** for that session and flushes it when OpenCode reports idle (or releases the busy turn on a terminal session error). A completion that races the wake-generated parent turn receives one final non-blocking flush when that turn releases.
 
-Wake state is disposable. Per-attempt wakes are only fast hints; the run heartbeat requests another parent tick when one is lost. The tick re-derives live/terminal/action state from durable T-BAG files. Session deletion suppresses obsolete delivery; a successor session registers its own heartbeat on `tbag_follow`.
+Wake state is disposable. Per-attempt wakes are only fast hints; the run heartbeat requests another parent tick when one is lost. The tick re-derives live/terminal/action state from durable T-BAG files. Session deletion suppresses obsolete delivery; a successor session's first normal parent tick enrolls its own heartbeat automatically.
 
 The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists semantic notification state.
 
@@ -87,8 +88,8 @@ Do **not** use:
 - model-authored polling/wait loops, sentinel-file schedulers, or background subagent relays. The built-in adapter heartbeat is allowed because it grants no task authority and only requests a deterministic parent tick;
 - a model-authored scheduler or a tool call kept open merely so the parent will be awakened later.
 
-Do not block merely because a newer optional adapter capability is absent. The stable contract is core detached launch + `tbag_follow`.
+Do not block merely because a newer optional adapter capability is absent. On the current adapter the stable contract is parent tick + detached launch with automatic wake enrollment; `tbag_follow` is an optional re-arm path, not setup ceremony.
 
 ## Compaction
 
-The project plugin injects tick-first orientation plus launch → follow → yield. It creates no parallel checkpoint stream.
+The project plugin injects tick-first orientation plus launch → yield; explicit `tbag_follow` appears only for re-arm/recovery. It creates no parallel checkpoint stream.

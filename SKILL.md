@@ -26,7 +26,7 @@ Every owner turn, resume or harness wake starts with **`parent_tick.py tick`**. 
 5. **Run the Grunt loop.** Implementer → fresh Reviewer. PASS → land; FAIL → Fixer resumes that Reviewer → fresh Review. Material out-of-brief obligations use Review `Follow-up obligations`; new phase launches pause until Analyst triage. ESCALATE → central escalation.
 6. **Escalate authority separately from runtime strength.** Grunt → Analyst → Human is the authority ladder. Optional stronger profiles stay cold until owner direction or exact `ESCALATE CAPABILITY`; stronger models never gain wider authority.
 7. **Continue from durable truth.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, confirmed silence and final-report/no-terminal hangs; lifecycle retirement preserves retained recovery state.
-8. **Gate phases; launch/arm/yield attempts.** Non-bootstrap phases require fresh Phase Gates. In OpenCode, `OPENCODE.md` is the sole protocol: normal detached core `launch`, immediately call `tbag_follow`, then yield. Observer wakes are fast hints; heartbeat ticks recover missed wakes. Never run core `follow` or model-authored wait/poll loops.
+8. **Gate phases; launch/yield attempts.** Non-bootstrap phases require fresh Phase Gates. In OpenCode, `OPENCODE.md` is the sole protocol: the first parent tick auto-enrolls heartbeat supervision and normal detached core `launch` auto-arms when possible; `tbag_follow` is only an explicit re-arm/diagnostic path. Observer wakes are fast hints; heartbeat ticks recover missed wakes. Never run core `follow` or model-authored wait/poll loops.
 
 ## Non-negotiable boundaries
 

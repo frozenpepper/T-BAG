@@ -73,6 +73,36 @@ function registerRunHeartbeat(sessionID, args) {
   })
   persistTransport(args.run_root)
 }
+
+function commandArg(command, name) {
+  const text = String(command || "")
+  const marker = `--${name}`
+  const index = text.indexOf(marker)
+  if (index < 0) return null
+  let rest = text.slice(index + marker.length).trimStart()
+  if (!rest) return null
+  const quote = rest[0]
+  if (quote === '"' || quote === "'") {
+    const end = rest.indexOf(quote, 1)
+    return end > 0 ? rest.slice(1, end) : null
+  }
+  return rest.split(/\s/, 1)[0] || null
+}
+
+function isParentTickCommand(command) {
+  return /parent_tick\.py["']?\s+tick(?:\s|$)/.test(String(command || ""))
+}
+
+function enrollHeartbeatFromCommand(sessionID, command) {
+  if (!sessionID) return false
+  if (!isParentTickCommand(command) && !isCoreAttemptCommand(command, "launch")) return false
+  const runRoot = commandArg(command, "run-root")
+  if (!runRoot) return false
+  deletedSessions.delete(sessionID)
+  busySessions.add(sessionID)
+  registerRunHeartbeat(sessionID, { run_root: runRoot })
+  return true
+}
 function runIsActive(runRoot) {
   try { return JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8")).status === "active" } catch (_) { return false }
 }
@@ -98,7 +128,7 @@ async function wakeParent(client, sessionID) {
           "[T-BAG lifecycle wake]",
           "One or more per-attempt observers finished while you were yielded.",
           "Run one parent_tick.py tick now. Treat its monitoring/actions/update/project-end packet as the canonical parent turn boundary.",
-          "For each new attempt: run the normal detached core dsd_attempt.py launch, immediately call tbag_follow with the exact returned tuple. A periodic transport heartbeat will request another tick even if an individual observer wake is lost.",
+          "For each new attempt: run the normal detached core dsd_attempt.py launch. The current adapter auto-enrolls the run heartbeat and auto-arms the observer from a structured launch; use tbag_follow only for explicit observer re-arm/recovery. A periodic transport heartbeat will request another tick even if an individual observer wake is lost.",
           "This message grants no semantic authority. Stay silent unless normal owner-communication rules require a reply.",
         ].join("\n"),
       }],
@@ -256,7 +286,7 @@ const TBagPlugin = async (ctx) => {
   return ({
   tool: {
     tbag_follow: tool({
-      description: "OpenCode T-BAG wake-arm primitive. Validate and observe exactly one already-launched recorded attempt, return immediately, and wake this same parent session when the observer exits. After every detached core launch, call this immediately with the exact returned run_root, phase_id, task_id, and event_dir; call it again to re-arm live attempts after resume/deadline/plugin restart. Idempotent for an already-armed exact attempt.",
+      description: "OpenCode T-BAG optional wake-arm/re-arm primitive. Validate and observe exactly one already-launched recorded attempt, return immediately, and wake this same parent session when the observer exits. Current adapters automatically enroll heartbeat supervision on parent_tick.py tick and auto-arm successful structured launches; call tbag_follow only when a tick requests observer re-arm, after adapter recovery, or for explicit transport diagnosis. Idempotent for an already-armed exact attempt.",
       args: followArgs,
       async execute(args, context) {
         const sessionID = context.sessionID
@@ -278,24 +308,26 @@ const TBagPlugin = async (ctx) => {
   },
 
   // Direct core launch remains the stable parent operation. Direct core follow is
-  // forbidden because it can monopolize the conversational turn; tbag_follow runs
-  // that same observer detached from the parent tool call.
+  // forbidden because it can monopolize the conversational turn. Merely executing
+  // the normal parent tick or launch auto-enrolls this session/run in heartbeat
+  // supervision; the parent never has to perform a separate heartbeat setup ritual.
   "tool.execute.before": async (input, output) => {
     if (input.tool !== "bash") return
     const command = String(output?.args?.command || "")
     if (isCoreAttemptCommand(command, "follow")) {
       throw new Error("OpenCode T-BAG parents must use non-blocking tbag_follow; Bash/Python dsd_attempt.py follow is forbidden")
     }
+    enrollHeartbeatFromCommand(input.sessionID, command)
   },
 
-  // Safety net only: a current adapter auto-arms an observer after a successful
-  // direct core launch. The documented parent protocol STILL calls tbag_follow
-  // immediately; that call is idempotent and keeps older follow-only adapters safe.
+  // A current adapter auto-arms an observer after a successful structured launch.
+  // tbag_follow remains an idempotent explicit re-arm/diagnostic path, not a
+  // prerequisite for heartbeat supervision or normal autonomous progress.
   "tool.execute.after": async (input, output) => {
     if (input.tool !== "bash" || !isCoreAttemptCommand(input?.args?.command, "launch")) return
     const launch = launchResultFromToolOutput(output)
     if (!launch) {
-      await logError(ctx.client, "T-BAG launch completed but adapter could not prove its structured launch result; parent must call tbag_follow from the returned launch fields")
+      await logError(ctx.client, "T-BAG launch completed but adapter could not prove its structured launch result; heartbeat supervision remains enrolled and the next tick can request an explicit tbag_follow re-arm if needed")
       return
     }
     const sessionID = input.sessionID
@@ -307,9 +339,10 @@ const TBagPlugin = async (ctx) => {
     try {
       armAttempt(ctx.client, sessionID, root, launch)
     } catch (error) {
-      // Never convert a successful detached launch into a failed tool result. The
-      // stable parent protocol's immediate tbag_follow call is the recovery path.
-      await logError(ctx.client, "T-BAG launch observer safety auto-arm failed; parent tbag_follow remains required", {
+      // Never convert a successful detached launch into a failed tool result.
+      // Heartbeat supervision is already enrolled; a later tick may request an
+      // explicit tbag_follow re-arm without blocking normal autonomous progress.
+      await logError(ctx.client, "T-BAG launch observer auto-arm failed; heartbeat remains active and tick may request tbag_follow re-arm", {
         task_id: launch.task_id,
         event_dir: launch.event_dir,
         error: String(error?.stack || error),
@@ -328,7 +361,7 @@ const TBagPlugin = async (ctx) => {
       return
     }
     const text = decode(result.stdout)
-    output.context.push(`\n## T-BAG durable continuation\n${text}\nOpenCode invariant: every resume/wake/heartbeat begins with one parent_tick.py tick. For every new attempt run the normal detached core dsd_attempt.py launch and immediately tbag_follow its exact tuple. Wakes are hints; tick owns monitoring, updates and project-end state. Never poll/wait in the conversational turn.\n`)
+    output.context.push(`\n## T-BAG durable continuation\n${text}\nOpenCode invariant: every resume/wake/heartbeat begins with one parent_tick.py tick; that tick auto-enrolls the current session/run in heartbeat supervision. For every new attempt run the normal detached core dsd_attempt.py launch; the adapter auto-arms structured launches. Use tbag_follow only when tick requests re-arm/recovery. Wakes are hints; tick owns monitoring, updates and project-end state. Never poll/wait in the conversational turn.\n`)
   },
   })
 }

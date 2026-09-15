@@ -37,10 +37,11 @@ class RuntimeAndEvalTests(unittest.TestCase):
         sys.path.insert(0,str(SCRIPTS))
         import detect_harness
         caps=detect_harness.capabilities('opencode')
-        self.assertEqual(caps['required_live_tool'],'tbag_follow')
+        self.assertEqual(caps['live_probe_tool'],'tbag_follow')
         self.assertFalse(caps['live_capability_verified'])
         self.assertEqual(caps['compaction_resume'],'requires-live-project-plugin')
-        self.assertEqual(caps['autonomous_supervision'],'requires-live-tbag_follow')
+        self.assertIn('first-parent-tick-auto-enrolls-heartbeat',caps['autonomous_supervision'])
+        self.assertNotIn('required_live_tool',caps)
 
     def test_behavioral_eval_corpus_is_valid_and_covers_core_failures(self):
         cp=subprocess.run([sys.executable,str(SCRIPTS/'check_behavioral_evals.py')],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)

@@ -88,10 +88,10 @@ def capabilities(harness: str) -> dict[str, object]:
     elif harness == "opencode":
         base.update({
             "compaction_resume": "requires-live-project-plugin",
-            "autonomous_supervision": "requires-live-tbag_follow",
-            "interactive_supervision": "detached-core-launch-then-tbag-follow",
+            "autonomous_supervision": "requires-live-project-plugin; first-parent-tick-auto-enrolls-heartbeat",
+            "interactive_supervision": "detached-core-launch; tbag_follow-is-optional-rearm",
             "requires_project_adapter": True,
-            "required_live_tool": "tbag_follow",
+            "live_probe_tool": "tbag_follow",
             "live_capability_verified": False,
             "adapter": "OPENCODE.md",
         })

@@ -97,6 +97,18 @@ assert.deepEqual(Object.keys(plugin.tool), ["tbag_follow"], "tbag_follow is the 
 const context = { sessionID: "ses-main", directory: "/project", worktree: "/project" }
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
+// A normal parent tick is the autonomy enrollment event. No explicit tbag_follow
+// call is required to create the session/run heartbeat registration.
+const enrolledRun = path.join(tmp, "auto-run")
+fs.mkdirSync(enrolledRun, { recursive: true })
+fs.writeFileSync(path.join(enrolledRun, "run.json"), JSON.stringify({ status: "active" }))
+await plugin["tool.execute.before"](
+  { tool: "bash", sessionID: "ses-auto", callID: "tick-auto" },
+  { args: { command: `python3 TBag/tools/parent_tick.py tick --run-root "${enrolledRun}"` } },
+)
+const transport = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
+assert.ok(transport.parent_sessions.some((x) => x.session_id === "ses-auto" && x.run_root === enrolledRun), "parent tick must auto-enroll heartbeat supervision")
+
 function launchPayload(task, suffix = task) {
   return {
     status: "started",
@@ -126,8 +138,8 @@ assert.equal(spawnCalls.filter((x) => x[2] === "follow").length, 1)
 assert.equal(syncCalls.filter((x) => x[2] === "inspect").length, 1, "safety auto-arm must validate the recorded launch before observing it")
 assert.ok(!spawnCalls[0].includes("--timeout"), "adapter must preserve core role-aware timeout")
 
-// Parent always performs the stable explicit follow step. On a current adapter it
-// is idempotent and must not spawn/inspect a second observer for the exact tuple.
+// Explicit tbag_follow is now an optional re-arm/diagnostic path. It remains
+// idempotent and must not spawn/inspect a second observer for an auto-armed tuple.
 const explicit = JSON.parse(await plugin.tool.tbag_follow.execute(first, context))
 assert.equal(explicit.armed, true)
 assert.equal(explicit.already_armed, true)
@@ -145,6 +157,7 @@ await tick()
 assert.equal(prompts.length, 1)
 assert.match(prompts[0].body.parts[0].text, /parent_tick\.py tick/)
 assert.match(prompts[0].body.parts[0].text, /tbag_follow/)
+assert.doesNotMatch(prompts[0].body.parts[0].text, /immediately call tbag_follow/)
 assert.doesNotMatch(prompts[0].body.parts[0].text, /tbag_launch/)
 
 // Follow-only compatibility: without any auto-arm hook, tbag_follow alone validates
@@ -156,7 +169,7 @@ assert.equal(syncCalls.filter((x) => x[2] === "inspect").length, 2)
 assert.equal(spawnCalls.filter((x) => x[2] === "follow").length, 2)
 
 // Auto-arm failure never turns a successful detached launch into a tool failure;
-// the stable explicit tbag_follow step recovers it.
+// heartbeat remains enrolled and the optional explicit tbag_follow path can recover it.
 failNextObserverSpawn = true
 const partial = launchPayload("T2")
 await plugin["tool.execute.after"](launchHookInput("ses-partial", "T2"), toolOutput(partial))
