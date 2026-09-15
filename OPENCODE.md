@@ -16,7 +16,7 @@ The installer proves the **file on disk**, not the live OpenCode tool registry; 
 
 The only required custom tool is **`tbag_follow`**. If `tbag_follow` is already visible, the canonical protocol below is valid even when presentation is unavailable. A newer T-BAG release must not require a newly invented tool name in order to launch safely.
 
-If `tbag_follow` is absent, do not improvise a foreground waiter or scheduler. Stay conversation-first and ask for/rely on a host reload before autonomous long-running orchestration.
+If `tbag_follow` is absent, wake transport is degraded, not lifecycle correctness: launch normally detached, do not invent a waiter/scheduler, and let the next owner turn/manual tick rediscover completion. Reload the host to restore autonomous wakes.
 
 ## Canonical OpenCode loop
 
@@ -24,7 +24,7 @@ There is exactly one parent protocol, including across adapter upgrades:
 
 1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Do not separately reconstruct reconcile/advance/monitor/update state.
 2. Process the tick packet until it reaches a launch/semantic/owner boundary. If it says `actions-ready`, execute only those authorized actions and tick again.
-3. For each new attempt run normal detached `dsd_attempt.py launch`, then **immediately call `tbag_follow`** with its exact returned tuple. This also registers the run for the adapter's low-frequency heartbeat.
+3. For each new attempt run normal detached `dsd_attempt.py launch`, then **immediately call `tbag_follow`** when available. If it is unavailable, yield conversation-first; the next owner turn/manual tick is the fallback wake. This also registers the run for the adapter's low-frequency heartbeat when armed.
 4. `tbag_follow already_armed:true` is only returned for an observer entry whose process still appears live; it is not semantic progress. The next tick remains authoritative.
 5. If the tick says `owner_update.due`, send the bounded purpose-first update and then `parent_tick.py ack-update --token ...`.
 6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
