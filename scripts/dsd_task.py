@@ -190,7 +190,11 @@ def review_followup_items(report: Path) -> list[str]:
         if stripped.startswith(("Attempt:","Baseline:","Next technical step:")): break
         if stripped in {"None","None.","- None","- None."} and not items: return []
         if stripped.startswith("- ") and stripped[2:].strip():
-            items.append(stripped[2:].strip()); continue
+            item=stripped[2:].strip()
+            # "None" is the structural null marker even when the Reviewer adds an
+            # explanatory sentence. Do not turn "None. T23 owns this" into work.
+            if not items and re.match(r"^None(?:[.!?:;]|\s*[—–-])(?:\s|$)",item,flags=re.IGNORECASE): return []
+            items.append(item); continue
         # Markdown-wrapped bullet continuations are structural when indented.
         if items and (raw.startswith(" ") or raw.startswith("\t")):
             items[-1]+=" "+stripped; continue
@@ -2027,6 +2031,12 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
     statement over durable state and exact worker routing tokens.
     """
     run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]; blocked_actions=[]; blocked_keys=set()
+    reducible_actions={
+        "gate-finished-attempt","route-capability-escalation","record-review-outcome",
+        "record-plan-review-outcome","record-context-review-outcome","record-verification-result",
+        "record-phase-gate","record-analyst-disposition","accept-specialist-result",
+        "accept-reviewed-task","integrate-accepted-task","prepare-followup-triage","prepare-phase-gate",
+    }
     def action_key(item: dict[str, Any]) -> str:
         return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
     for index in range(max_steps):
@@ -2037,9 +2047,12 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             result={"applied":applied,"stopped":"quiescent","state":state}
             if blocked_actions: result["blocked_actions"]=blocked_actions
             return result
-        action=next((item for item in actions if action_key(item) not in blocked_keys),None)
-        if action is None:
+        available=[item for item in actions if action_key(item) not in blocked_keys]
+        if not available:
             return {"applied":applied,"stopped":"control-error","blocked_actions":blocked_actions,"state":state}
+        # Reduce every independent mechanical transition before yielding at a launch
+        # or semantic boundary. Ordering in reconciliation must not create head-of-line blocking.
+        action=next((item for item in available if str(item.get("action") or "") in reducible_actions),available[0])
         name=str(action.get("action") or ""); phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
         try:
             if name=="gate-finished-attempt":
@@ -2091,6 +2104,10 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"])); a.outcome=None
                 result=command_analysis_result(a)
+            elif name=="accept-specialist-result":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"]))
+                result=command_accept(a)
             elif name=="accept-reviewed-task":
                 task=load_task(run,phase,tid)
                 if task.get("role")=="goal-planner":
@@ -2823,18 +2840,23 @@ def command_accept(args: argparse.Namespace) -> dict[str, Any]:
         kind=str(task.get("kind") or "")
         status=str(task.get("status") or "")
         if kind=="implementation" and status!="review-passed": raise ValueError(f"implementation acceptance requires current review-passed state; current status is {status!r}")
+        if kind in {"analysis","verification"} and report is None:
+            raise ValueError(f"{kind} task acceptance requires --report so dependent workers can consume the accepted specialist result")
+        if report is not None and not report.is_file(): raise ValueError(f"accepted report missing: {report}")
+        analysis_attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["analysis"],report) if kind=="analysis" and report else None
+        analysis_role=str(analysis_attempt.get("role") or "") if analysis_attempt else ""
         if kind=="analysis" and task.get("role") in {"plan-reviewer","context-reviewer"}:
             raise ValueError("Plan/Context Reviewer tasks are reusable review conduits; record their semantic outcome with the dedicated review command, do not accept the task itself")
-        if kind=="analysis" and task.get("role")=="phase-auditor":
+        # Phase-Auditor is a task container as well as an attempt role. After a red
+        # gate it may host Discovery; only an actual Phase-Auditor attempt must use
+        # phase-gate. Findings-only Discovery closes through ordinary accept --report.
+        if kind=="analysis" and task.get("role")=="phase-auditor" and analysis_role=="phase-auditor":
             raise ValueError("Phase-Auditor results use phase-gate so PASS/BLOCKED remains explicit and a human-readable gate report is saved in the run plan folder")
         if kind=="analysis" and task.get("role")=="goal-planner":
             if status!="review-passed": raise ValueError(f"Goal-Planner acceptance requires current review-passed state; current status is {status!r}")
         elif kind in {"analysis","verification"} and status!="active": raise ValueError(f"{kind} acceptance requires a completed/gated specialist attempt in active task state; current status is {status!r}")
-        if kind in {"analysis","verification"} and report is None:
-            raise ValueError(f"{kind} task acceptance requires --report so dependent workers can consume the accepted specialist result")
-        if report is not None and not report.is_file(): raise ValueError(f"accepted report missing: {report}")
         if kind=="analysis":
-            attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["analysis"],report) if report else None
+            attempt=analysis_attempt
             if attempt is None or attempt.get("tier")!="analyst": raise ValueError("analysis acceptance report must be the report from a gated Analyst attempt for this task")
             # Role selects Analyst expertise, not a mandatory artifact shape. A task
             # graph is required only by transitions that actually consume one

@@ -10,7 +10,7 @@ When a lifecycle decision is required, open the report with exactly one disposit
 - **`ESCALATE`** — genuine Human authority is required.
 - **`ESCALATE CAPABILITY`** — the task and authority are sound, but this runtime cannot responsibly finish the analysis.
 
-A standalone findings-only Analyst task does not need to invent a lifecycle disposition. If no existing task/plan transition is being decided, report the findings plainly and let the result close as findings.
+Findings-only evidence does not need an invented lifecycle disposition. If the honest result is evidence with no executable `RESUME`/`REPLAN`/`ESCALATE` transition—even while investigating existing blocked work—report it plainly and let the result close as findings.
 
 `REPLAN` is not a synonym for “I have suggestions”: it requires an actual task-graph change. `RESUME` is not permission to waive a red predicate. If a lower-tier escalation triggered the analysis, treat that report as evidence, independently validate the blocker, and escalate to the Human only when the remaining decision truly belongs there.
 
