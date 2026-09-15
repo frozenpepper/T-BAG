@@ -1,0 +1,233 @@
+from pathlib import Path
+
+
+def replace(path, old, new):
+    p = Path(path)
+    text = p.read_text()
+    if old not in text:
+        raise SystemExit(f"expected source block missing in {path}: {old[:100]!r}")
+    if text.count(old) != 1:
+        raise SystemExit(f"expected exactly one source block in {path}, found {text.count(old)}")
+    p.write_text(text.replace(old, new))
+
+
+p = "scripts/dsd_task.py"
+replace(
+    p,
+    '''        if stripped in {"None","None.","- None","- None."} and not items: return []
+        if stripped.startswith("- ") and stripped[2:].strip():
+            items.append(stripped[2:].strip()); continue
+''',
+    '''        if stripped in {"None","None.","- None","- None."} and not items: return []
+        if stripped.startswith("- ") and stripped[2:].strip():
+            item=stripped[2:].strip()
+            # "None" is the structural null marker even when the Reviewer adds an
+            # explanatory sentence. Do not turn "None. T23 owns this" into work.
+            if not items and re.match(r"^None(?:[.!?:;]|\\s*[—–-])(?:\\s|$)",item,flags=re.IGNORECASE): return []
+            items.append(item); continue
+''',
+)
+
+replace(
+    p,
+    '''        if kind=="analysis" and task.get("role") in {"plan-reviewer","context-reviewer"}:
+            raise ValueError("Plan/Context Reviewer tasks are reusable review conduits; record their semantic outcome with the dedicated review command, do not accept the task itself")
+        if kind=="analysis" and task.get("role")=="phase-auditor":
+            raise ValueError("Phase-Auditor results use phase-gate so PASS/BLOCKED remains explicit and a human-readable gate report is saved in the run plan folder")
+        if kind=="analysis" and task.get("role")=="goal-planner":
+            if status!="review-passed": raise ValueError(f"Goal-Planner acceptance requires current review-passed state; current status is {status!r}")
+        elif kind in {"analysis","verification"} and status!="active": raise ValueError(f"{kind} acceptance requires a completed/gated specialist attempt in active task state; current status is {status!r}")
+        if kind in {"analysis","verification"} and report is None:
+            raise ValueError(f"{kind} task acceptance requires --report so dependent workers can consume the accepted specialist result")
+        if report is not None and not report.is_file(): raise ValueError(f"accepted report missing: {report}")
+        if kind=="analysis":
+            attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["analysis"],report) if report else None
+            if attempt is None or attempt.get("tier")!="analyst": raise ValueError("analysis acceptance report must be the report from a gated Analyst attempt for this task")
+''',
+    '''        if kind in {"analysis","verification"} and report is None:
+            raise ValueError(f"{kind} task acceptance requires --report so dependent workers can consume the accepted specialist result")
+        if report is not None and not report.is_file(): raise ValueError(f"accepted report missing: {report}")
+        analysis_attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["analysis"],report) if kind=="analysis" and report else None
+        analysis_role=str(analysis_attempt.get("role") or "") if analysis_attempt else ""
+        if kind=="analysis" and task.get("role") in {"plan-reviewer","context-reviewer"}:
+            raise ValueError("Plan/Context Reviewer tasks are reusable review conduits; record their semantic outcome with the dedicated review command, do not accept the task itself")
+        # Phase-Auditor is a task container as well as an attempt role. After a red
+        # gate it may host Discovery; only an actual Phase-Auditor attempt must use
+        # phase-gate. Findings-only Discovery closes through ordinary accept --report.
+        if kind=="analysis" and task.get("role")=="phase-auditor" and analysis_role=="phase-auditor":
+            raise ValueError("Phase-Auditor results use phase-gate so PASS/BLOCKED remains explicit and a human-readable gate report is saved in the run plan folder")
+        if kind=="analysis" and task.get("role")=="goal-planner":
+            if status!="review-passed": raise ValueError(f"Goal-Planner acceptance requires current review-passed state; current status is {status!r}")
+        elif kind in {"analysis","verification"} and status!="active": raise ValueError(f"{kind} acceptance requires a completed/gated specialist attempt in active task state; current status is {status!r}")
+        if kind=="analysis":
+            attempt=analysis_attempt
+            if attempt is None or attempt.get("tier")!="analyst": raise ValueError("analysis acceptance report must be the report from a gated Analyst attempt for this task")
+''',
+)
+
+replace(
+    p,
+    '''    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]; blocked_actions=[]; blocked_keys=set()
+    def action_key(item: dict[str, Any]) -> str:
+        return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
+''',
+    '''    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]; blocked_actions=[]; blocked_keys=set()
+    reducible_actions={
+        "gate-finished-attempt","route-capability-escalation","record-review-outcome",
+        "record-plan-review-outcome","record-context-review-outcome","record-verification-result",
+        "record-phase-gate","record-analyst-disposition","accept-specialist-result",
+        "accept-reviewed-task","integrate-accepted-task","prepare-followup-triage","prepare-phase-gate",
+    }
+    def action_key(item: dict[str, Any]) -> str:
+        return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
+''',
+)
+
+replace(
+    p,
+    '''        action=next((item for item in actions if action_key(item) not in blocked_keys),None)
+        if action is None:
+            return {"applied":applied,"stopped":"control-error","blocked_actions":blocked_actions,"state":state}
+''',
+    '''        available=[item for item in actions if action_key(item) not in blocked_keys]
+        if not available:
+            return {"applied":applied,"stopped":"control-error","blocked_actions":blocked_actions,"state":state}
+        # Reduce every independent mechanical transition before yielding at a launch
+        # or semantic boundary. Ordering in reconciliation must not create head-of-line blocking.
+        action=next((item for item in available if str(item.get("action") or "") in reducible_actions),available[0])
+''',
+)
+
+replace(
+    p,
+    '''            elif name=="record-analyst-disposition":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"])); a.outcome=None
+                result=command_analysis_result(a)
+            elif name=="accept-reviewed-task":
+''',
+    '''            elif name=="record-analyst-disposition":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"])); a.outcome=None
+                result=command_analysis_result(a)
+            elif name=="accept-specialist-result":
+                class A: pass
+                a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.report=Path(str(action["report"]))
+                result=command_accept(a)
+            elif name=="accept-reviewed-task":
+''',
+)
+
+replace(
+    "worker/ANALYST-ESCALATION.md",
+    "A standalone findings-only Analyst task does not need to invent a lifecycle disposition. If no existing task/plan transition is being decided, report the findings plainly and let the result close as findings.\n",
+    "Findings-only evidence does not need an invented lifecycle disposition. If the honest result is evidence with no executable `RESUME`/`REPLAN`/`ESCALATE` transition—even while investigating existing blocked work—report it plainly and let the result close as findings.\n",
+)
+
+replace(
+    "OPENCODE.md",
+    "If `tbag_follow` is absent, do not improvise a foreground waiter or scheduler. Stay conversation-first and ask for/rely on a host reload before autonomous long-running orchestration.\n",
+    "If `tbag_follow` is absent, wake transport is degraded, not lifecycle correctness: launch normally detached, do not invent a waiter/scheduler, and let the next owner turn/manual tick rediscover completion. Reload the host to restore autonomous wakes.\n",
+)
+replace(
+    "OPENCODE.md",
+    "3. For each new attempt run normal detached `dsd_attempt.py launch`, then **immediately call `tbag_follow`** with its exact returned tuple. This also registers the run for the adapter's low-frequency heartbeat.\n",
+    "3. For each new attempt run normal detached `dsd_attempt.py launch`, then **immediately call `tbag_follow`** when available. If it is unavailable, yield conversation-first; the next owner turn/manual tick is the fallback wake. This also registers the run for the adapter's low-frequency heartbeat when armed.\n",
+)
+
+Path("tests/test_rc53_ceremony.py").write_text(r'''import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+ROOT=Path(__file__).resolve().parents[1]
+SCRIPTS=ROOT/'scripts'
+sys.path.insert(0,str(SCRIPTS))
+import dsd_task
+
+
+class FollowupNullMarkerTests(unittest.TestCase):
+    def parse(self, body):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'report.md'
+            p.write_text('PASS\n\n## Follow-up obligations\n'+body+'\n')
+            return dsd_task.review_followup_items(p)
+
+    def test_none_with_explanatory_prose_is_not_an_obligation(self):
+        self.assertEqual(self.parse('- None. Next step belongs to T23, not this review.'),[])
+        self.assertEqual(self.parse('- None — T23 owns the next verification.'),[])
+
+    def test_real_none_prefixed_sentence_remains_an_obligation(self):
+        self.assertEqual(self.parse('- None of the migration docs cover the fallback.'),['None of the migration docs cover the fallback.'])
+
+
+class AttemptRoleAuthorityTests(unittest.TestCase):
+    def make_run(self, root, attempt_role):
+        run=root/'run'
+        taskroot=run/'phases'/'p'/'tasks'/'GATE'
+        event=taskroot/'attempts'/f'{attempt_role}-1'
+        event.mkdir(parents=True)
+        report=event/'report.md'
+        report.write_text('Findings only; no lifecycle transition is requested.\n')
+        task={
+            'format':dsd_task.FORMAT,'phase_id':'p','task_id':'GATE','kind':'analysis',
+            'role':'phase-auditor','tier':'analyst','brief':str(taskroot/'brief.md'),
+            'dependencies':[],'requires_integration':False,'status':'active',
+            'attempts':[{'role':attempt_role,'tier':'analyst','status':'gated','event_dir':str(event)}],
+            'review_rounds':0,'review_history':[],'created_at':dsd_task.now(),
+        }
+        (taskroot/'brief.md').write_text('# gate\n')
+        dsd_task.write_json(taskroot/'task.json',task)
+        return run,report,taskroot/'task.json'
+
+    def test_discovery_under_phase_gate_closes_as_findings(self):
+        with tempfile.TemporaryDirectory() as td:
+            run,report,state=self.make_run(Path(td),'discovery')
+            task=dsd_task.load_json(state)
+            self.assertEqual(dsd_task._reconcile_action(run,'p',task)['action'],'accept-specialist-result')
+            out=dsd_task.command_accept(SimpleNamespace(run_root=run,phase_id='p',task_id='GATE',report=report))
+            self.assertEqual(out['status'],'accepted')
+            self.assertEqual(dsd_task.load_json(state)['accepted_report'],str(report.resolve()))
+
+    def test_actual_phase_auditor_attempt_still_requires_phase_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            run,report,_=self.make_run(Path(td),'phase-auditor')
+            with self.assertRaisesRegex(ValueError,'Phase-Auditor results use phase-gate'):
+                dsd_task.command_accept(SimpleNamespace(run_root=run,phase_id='p',task_id='GATE',report=report))
+
+
+class AdvanceReducerTests(unittest.TestCase):
+    def test_mechanical_action_runs_past_earlier_launch_boundary(self):
+        run=Path('/tmp/rc53-run')
+        launch={'action':'launch-ready-task','phase_id':'p','task_id':'A'}
+        mechanical={'action':'prepare-followup-triage','phase_id':'p','task_id':'B'}
+        states=[{'first_useful_actions':[launch,mechanical]},{'first_useful_actions':[launch]}]
+        with mock.patch.object(dsd_task,'command_reconcile_run',side_effect=states), mock.patch.object(dsd_task,'command_prepare_followup_triage',return_value={'ok':True}) as triage:
+            out=dsd_task.command_advance(SimpleNamespace(run_root=run,phase_id=None,max_steps=12))
+        triage.assert_called_once()
+        self.assertEqual(out['stopped'],'semantic-or-launch-boundary')
+        self.assertEqual(out['next_action']['task_id'],'A')
+        self.assertEqual(out['applied'][0]['task_id'],'B')
+
+    def test_accept_specialist_result_is_mechanical(self):
+        run=Path('/tmp/rc53-run')
+        action={'action':'accept-specialist-result','phase_id':'p','task_id':'G','report':'/tmp/report.md'}
+        states=[{'first_useful_actions':[action]},{'first_useful_actions':[]}]
+        with mock.patch.object(dsd_task,'command_reconcile_run',side_effect=states), mock.patch.object(dsd_task,'command_accept',return_value={'status':'accepted'}) as accept:
+            out=dsd_task.command_advance(SimpleNamespace(run_root=run,phase_id=None,max_steps=12))
+        accept.assert_called_once()
+        self.assertEqual(out['stopped'],'quiescent')
+        self.assertEqual(out['applied'][0]['action'],'accept-specialist-result')
+
+
+class TransportFallbackDocsTests(unittest.TestCase):
+    def test_missing_follow_is_documented_as_degraded_transport(self):
+        text=(ROOT/'OPENCODE.md').read_text()
+        self.assertIn('wake transport is degraded, not lifecycle correctness',text)
+        self.assertIn('next owner turn/manual tick',text)
+
+
+if __name__=='__main__': unittest.main()
+''')
