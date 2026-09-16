@@ -12,7 +12,7 @@ python3 <skill>/scripts/install_harness_adapter.py --harness opencode --project-
 
 The installer detects the local host generation with `opencode --version` and installs the matching **presentation companion** while keeping the stable `tbag.js` transport adapter unchanged. OpenCode 1.x receives the v1 `@opencode-ai/plugin/tui` companion plus an explicit entry merged into `.opencode/tui.json` or existing `tui.jsonc`; OpenCode 2.x receives the separate `tbag-ui/` companion. T-BAG does not add `solid-js`, `@opentui/solid`, or OpenCode plugin packages to the project: the host owns those runtime dependencies.
 
-The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. `live_capability_verified=false` is intentional until the running host proves activation.
+The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. Server transport is versioned too: OpenCode 1 receives the legacy V1 hook adapter; OpenCode 2 receives the native `id` + `setup(ctx)` adapter. The two implementations are not interchangeable. `live_capability_verified=false` is intentional until the running host proves activation.
 
 The project plugin may expose **`tbag_follow`** as a diagnostic tool, but normal autonomy does not depend on that custom tool being present. The first normal `parent_tick.py tick` enrolls heartbeat supervision; every tick also lets the adapter rediscover and re-arm missing live observers from durable attempt state.
 

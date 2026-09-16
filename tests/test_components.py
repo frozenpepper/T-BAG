@@ -505,10 +505,16 @@ class ComponentsTests(unittest.TestCase):
                 if harness=='opencode':
                     self.assertEqual(data['interactive_supervision'],'detached-core-launch; optional-tbag-follow-rearm')
                     self.assertEqual(data['autonomous_supervision'],'first-parent-tick-auto-enrolls-heartbeat-plus-launch-auto-arm')
-                    self.assertEqual(data['live_probe_tool'],'tbag_follow'); self.assertNotIn('required_live_tool',data); self.assertFalse(data['live_capability_verified'])
+                    self.assertNotIn('required_live_tool',data); self.assertFalse(data['live_capability_verified'])
                     self.assertTrue(data['disk_matches_source']); self.assertEqual(data['source_sha256'],data['installed_sha256'])
                     plugin=project/'.opencode'/'plugins'/'tbag.js'; self.assertTrue(plugin.is_file())
-                    text=plugin.read_text(); self.assertIn('tbag_follow: tool({',text); self.assertNotIn('tbag_launch: tool({',text)
+                    text=plugin.read_text()
+                    if data.get('opencode_major')==2:
+                        self.assertIsNone(data['live_probe_tool']); self.assertEqual(data['transport_generation'],'v2')
+                        self.assertIn('id: "tbag.transport"',text); self.assertIn('async setup(ctx)',text); self.assertNotIn('tbag_follow: tool({',text)
+                    else:
+                        self.assertEqual(data['live_probe_tool'],'tbag_follow'); self.assertEqual(data['transport_generation'],'v1')
+                        self.assertIn('tbag_follow: tool({',text); self.assertNotIn('tbag_launch: tool({',text)
 
     def test_reinstall_prunes_obsolete_managed_compaction_hooks(self):
         project=self.root/'adapter-prune'; project.mkdir(); git(project,'init','-q')
@@ -533,14 +539,20 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(cp.returncode,0,cp.stderr); data=json.loads(cp.stdout)
         self.assertEqual(data['interactive_supervision'],'detached-core-launch; optional-tbag-follow-rearm')
         self.assertEqual(data['autonomous_supervision'],'first-parent-tick-auto-enrolls-heartbeat-plus-launch-auto-arm')
-        self.assertEqual(data['live_probe_tool'],'tbag_follow'); self.assertNotIn('required_live_tool',data); self.assertFalse(data['live_capability_verified'])
+        self.assertNotIn('required_live_tool',data); self.assertFalse(data['live_capability_verified'])
         self.assertTrue(data['changed']); self.assertTrue(data['disk_matches_source']); self.assertEqual(data['source_sha256'],data['installed_sha256'])
         self.assertTrue(Path(data['backup']).is_file())
         self.assertEqual(data['activation'],'restart-required-to-load-refreshed-adapter')
         self.assertTrue(data['legacy_plugin_removed']); self.assertFalse(legacy.exists())
         plugin=plugins/'tbag.js'; self.assertTrue(plugin.is_file())
-        text=plugin.read_text(); self.assertIn('tbag_follow: tool({',text); self.assertNotIn('tbag_launch: tool({',text); self.assertIn('client.session.prompt',text); self.assertNotIn('tbag_supervise',text)
-        self.assertIn('proves only the project adapter file on disk',data['manual_step']); self.assertIn('current OpenCode tool registry',data['manual_step'])
+        text=plugin.read_text(); self.assertIn('ctx.session.prompt' if data.get('opencode_major')==2 else 'client.session.prompt',text); self.assertNotIn('tbag_supervise',text)
+        if data.get('opencode_major')==2:
+            self.assertIsNone(data['live_probe_tool']); self.assertEqual(data['transport_generation'],'v2')
+            self.assertIn('id: "tbag.transport"',text); self.assertIn('async setup(ctx)',text); self.assertNotIn('tbag_follow: tool({',text)
+        else:
+            self.assertEqual(data['live_probe_tool'],'tbag_follow'); self.assertEqual(data['transport_generation'],'v1')
+            self.assertIn('tbag_follow: tool({',text); self.assertNotIn('tbag_launch: tool({',text)
+        self.assertIn('proves only the project adapter file on disk',data['manual_step']); self.assertIn('current OpenCode plugin registry',data['manual_step'])
 
         # A second refresh is idempotent and still refuses to claim live-host state.
         cp2=subprocess.run([sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','opencode','--project-root',str(project),'--skill-root',str(ROOT)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

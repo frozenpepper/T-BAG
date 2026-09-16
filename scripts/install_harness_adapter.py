@@ -238,11 +238,13 @@ def install_plugin_file(project_root: Path, harness: str, destination: Path, sou
 
 
 def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
+    version, major = detect_opencode_version()
+    transport_source = "tbag-v2.js" if major == 2 else "tbag.js"
+    transport_generation = "v2" if major == 2 else "v1"
     result = install_plugin_file(
         project_root, "opencode", Path(".opencode/plugins/tbag.js"),
-        skill_root / "adapters" / "opencode" / "tbag.js",
+        skill_root / "adapters" / "opencode" / transport_source,
     )
-    version, major = detect_opencode_version()
     ui_results: list[dict[str, Any]] = []
     tui_config: str | None = None
     tui_config_changed = False
@@ -296,13 +298,14 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
     if major == 1:
         presentation_note = "OpenCode 1.x requires the T-BAG TUI file to be listed in .opencode/tui.json or tui.jsonc; the installer has merged that registration. After restart, /tbag and the sidebar should appear. In the built-in Plugins dialog, tbag.status.v1 should be listed enabled+active."
     elif major == 2:
-        presentation_note = "OpenCode 2.x uses the separately shipped tbag-ui companion. Restart/reload after changes and confirm its presentation plugin is active."
+        presentation_note = "OpenCode 2.x uses the native setup()-based T-BAG server adapter plus the separately shipped tbag-ui companion. Restart/reload after changes and confirm both plugins are active."
     else:
         presentation_note = "OpenCode version detection failed or returned an unsupported major version, so T-BAG installed only the stable server transport adapter and did not guess a TUI API generation."
 
     result.update({
         "opencode_version": version,
         "opencode_major": major,
+        "transport_generation": transport_generation,
         "tui_generation": tui_generation,
         "tui_plugin": [x.get("plugin") for x in ui_results],
         "tui_config": tui_config,
@@ -311,12 +314,12 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         "status_surface": status_surface,
         "interactive_supervision": "detached-core-launch; optional-tbag-follow-rearm",
         "autonomous_supervision": "first-parent-tick-auto-enrolls-heartbeat-plus-launch-auto-arm",
-        "live_probe_tool": "tbag_follow",
+        "live_probe_tool": None if major == 2 else "tbag_follow",
         "live_capability_verified": False,
         "activation": "restart-required-to-load-refreshed-adapter" if changed else "disk-current-live-registry-unverified",
         "legacy_plugin_removed": legacy_removed,
         "stale_v1_companion_removed": stale_v1_removed,
-        "manual_step": "The installer proves only the project adapter file on disk plus project TUI config; it cannot inspect the current OpenCode tool registry or prove either plugin is live. " + presentation_note + " Once the plugin is live, the first normal TBag/tools/parent_tick.py tick automatically enrolls the current session/run in heartbeat supervision; no separate heartbeat setup is required. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
+        "manual_step": "The installer proves only the project adapter file on disk plus project TUI config; it cannot inspect the current OpenCode plugin registry or prove transport/presentation live. " + presentation_note + " Once the server adapter is live, the first normal TBag/tools/parent_tick.py tick automatically enrolls the current session/run in heartbeat supervision; no separate heartbeat setup is required. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
     })
     return result
 
