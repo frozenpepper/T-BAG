@@ -338,7 +338,6 @@ def acquire_analysis_view(run: Path, fixture_bindings: list[dict[str, Any]] | No
 
 
 def task_can_use_analysis_view(task: dict[str, Any], role: str, task_text: str, primary: Path | None = None) -> bool:
-    if task.get("requires_integration"): return False
     if role not in ALWAYS_READ_ONLY_ROLES: return False
     fixtures=required_worktree_fixtures(task_text)
     if not fixtures: return True
@@ -670,6 +669,18 @@ def refresh_task_fixtures(run: Path, phase: str, task: str) -> list[str]:
             _copy_one_required_fixture(snapshot,wt,rel); refreshed.append(rel)
         return refreshed
 
+
+def _reclaim_unrecorded_workspace_setup(primary:Path, worktree:Path, branches:list[str])->None:
+    """Remove an interrupted pre-attempt setup that has no workspace ownership record."""
+    if worktree.exists():
+        _make_tree_owner_writable(worktree)
+        run_cmd(["git","worktree","remove","--force",str(worktree)],primary,check=False)
+        if worktree.exists(): shutil.rmtree(worktree,ignore_errors=False)
+    run_cmd(["git","worktree","prune"],primary,check=False)
+    for branch in branches:
+        exists=run_cmd(["git","show-ref","--verify","--quiet",f"refs/heads/{branch}"],primary,check=False).returncode==0
+        if exists: run_cmd(["git","branch","-D",branch],primary,check=False)
+
 def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
     info=dsd_task.load_run(run); task=dsd_task.load_task(run,phase,tid)
@@ -696,10 +707,12 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     ns="/".join(["dsd",safe_component(info["run_id"]),safe_component(phase),safe_component(tid)])
     base_branch=ns+"-base"; task_branch=ns
     worktree=runtime/"worktrees"/safe_component(phase)/safe_component(tid); db=runtime/"opencode-db"/safe_component(phase)/f"{safe_component(tid)}.sqlite"
-    if worktree.exists(): raise ValueError(f"runtime worktree path already exists: {worktree}")
-    for branch in (base_branch,task_branch):
-        if run_cmd(["git","show-ref","--verify","--quiet",f"refs/heads/{branch}"],primary,check=False).returncode==0:
-            raise ValueError(f"T-BAG branch already exists: {branch}")
+    setup_branches=(base_branch,task_branch)
+    orphan_setup=worktree.exists() or any(run_cmd(["git","show-ref","--verify","--quiet",f"refs/heads/{branch}"],primary,check=False).returncode==0 for branch in setup_branches)
+    if orphan_setup:
+        # No workspace.json exists at this point, therefore no attempt ever owned this
+        # setup. It is T-BAG-created preparation residue, not user/project authority.
+        _reclaim_unrecorded_workspace_setup(primary,worktree,list(setup_branches))
     worktree.parent.mkdir(parents=True,exist_ok=True); db.parent.mkdir(parents=True,exist_ok=True)
     try:
         run_cmd(["git","worktree","prune"],primary,check=False)
@@ -1225,7 +1238,11 @@ def _command_cleanup_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     if mode=="isolated-worktree":
         run_cmd(["git","worktree","remove","--force",str(wt)],primary,check=False)
         if wt.exists():
-            raise ValueError(f"Git worktree removal did not reclaim {wt}; refusing to delete branch authority underneath it")
+            # Cleanup has already proved this workspace mechanically disposable. A
+            # missing/corrupt Git admin record must not strand T-BAG-owned bytes.
+            _make_tree_owner_writable(wt)
+            shutil.rmtree(wt,ignore_errors=False)
+        run_cmd(["git","worktree","prune"],primary,check=False)
         all_refs=git_text(primary,"for-each-ref","--format=%(refname:short)","refs/heads").splitlines()
         checkpoint_prefix="/".join(["dsd-checkpoint", safe_component(dsd_task.load_run(run)["run_id"]), safe_component(phase), safe_component(tid)])+"/"
         for ref in all_refs:

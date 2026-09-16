@@ -4,6 +4,8 @@ import { readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs"
 // OpenCode owns wake delivery; T-BAG durable task/run files own orchestration truth.
 // This adapter keeps only disposable per-session/per-attempt transport state.
 const follows = new Map()
+const preparations = new Map()
+const transportErrors = new Map()
 const runHeartbeats = new Map()
 let observerGeneration = 0
 const HEARTBEAT_MS = Math.max(60_000, Number(process.env.TBAG_PARENT_HEARTBEAT_MS || 600_000))
@@ -27,7 +29,8 @@ function persistTransport(runRoot) {
       }))
     const path = transportPath(runRoot); const tmp = `${path}.tmp-${process.pid}`
     mkdirSync(`${runRoot}/.transport`, { recursive: true })
-    writeFileSync(tmp, JSON.stringify({ format: "tbag-opencode-transport-v1", adapter_pid: process.pid, updated_at: new Date().toISOString(), parent_sessions: parents, observers }, null, 2) + "\n")
+    const prep = [...preparations.values()].filter((item) => item.run_root === runRoot).map((item) => ({ session_id:item.sessionID, task_id:item.task_id, phase_id:item.phase_id, pid:item.pid, started_at_ms:item.startedAt }))
+    writeFileSync(tmp, JSON.stringify({ format: "tbag-opencode-transport-v1", adapter_pid: process.pid, updated_at: new Date().toISOString(), parent_sessions: parents, observers, preparations: prep, last_arm_error: transportErrors.get(runRoot) || null }, null, 2) + "\n")
     renameSync(tmp, path)
   } catch (_) { /* presentation/diagnostic state may never break orchestration */ }
 }
@@ -251,16 +254,71 @@ function isCoreAttemptCommand(command, subcommand) {
   return new RegExp(`dsd_attempt\\.py["']?\\s+${subcommand}(?:\\s|$)`).test(String(command || ""))
 }
 
-function launchResultFromToolOutput(output) {
-  const text = String(output?.output || "").trim()
-  if (!text) return null
-  try {
-    const value = JSON.parse(text)
-    if (value?.status !== "started" || !value?.run_root || !value?.phase_id || !value?.task_id || !value?.event_dir) return null
-    return value
-  } catch (_) {
-    return null
+function structuredObjects(text) {
+  const source = String(text || "")
+  const out = []
+  let start = -1, depth = 0, quoted = false, escaped = false
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === '"') quoted = false
+      continue
+    }
+    if (ch === '"') { quoted = true; continue }
+    if (ch === '{') { if (depth === 0) start = i; depth++; continue }
+    if (ch === '}' && depth > 0) {
+      depth--
+      if (depth === 0 && start >= 0) {
+        try { const value = JSON.parse(source.slice(start, i + 1)); if (value && typeof value === "object" && !Array.isArray(value)) out.push(value) } catch (_) {}
+        start = -1
+      }
+    }
   }
+  return out
+}
+
+function launchResultsFromToolOutput(output) {
+  return structuredObjects(output?.output).filter((value) =>
+    ["started", "preparing"].includes(value?.status) && value?.run_root && value?.phase_id && value?.task_id
+  )
+}
+
+function backgroundLaunchCommand(command) {
+  return String(command || "").replace(/(dsd_attempt\.py["']?\s+launch)(?!\s+--background-prepare)/g, "$1 --background-prepare")
+}
+
+function preparationKey(sessionID, item) { return [sessionID,item.run_root,item.phase_id,item.task_id,item.preparation_pid].join("\\u0000") }
+function pidAlive(pid) { try { if (!Number.isInteger(pid) || pid <= 0) return false; process.kill(pid, 0); return true } catch (_) { return false } }
+function watchPreparation(client, sessionID, item) {
+  if (!Number.isInteger(item?.preparation_pid)) return
+  const key=preparationKey(sessionID,item)
+  if (preparations.has(key)) return
+  const entry={sessionID,run_root:item.run_root,phase_id:item.phase_id,task_id:item.task_id,pid:item.preparation_pid,startedAt:Date.now(),timer:null}
+  entry.timer=setInterval(() => {
+    if (pidAlive(entry.pid)) return
+    clearInterval(entry.timer); preparations.delete(key); persistTransport(entry.run_root); queueWake(client,sessionID)
+  }, 500)
+  entry.timer.unref?.(); preparations.set(key,entry); persistTransport(entry.run_root)
+}
+
+function repairObserversFromTick(client, sessionID, root, command, output) {
+  const runRoot=commandArg(command,"run-root")
+  if (!runRoot) return
+  for (const packet of structuredObjects(output?.output)) {
+    const live=Array.isArray(packet?.live_attempts) ? packet.live_attempts : []
+    for (const item of live) {
+      if (!item?.phase_id || !item?.task_id || !item?.event_dir) continue
+      try {
+        armAttempt(client,sessionID,root,{run_root:runRoot,phase_id:item.phase_id,task_id:item.task_id,event_dir:item.event_dir})
+        transportErrors.delete(runRoot)
+      } catch (error) {
+        transportErrors.set(runRoot,{at:new Date().toISOString(),task_id:item.task_id,event_dir:item.event_dir,error:String(error?.stack || error)})
+      }
+    }
+  }
+  persistTransport(runRoot)
 }
 
 const followArgs = {
@@ -313,40 +371,42 @@ const TBagPlugin = async (ctx) => {
   // supervision; the parent never has to perform a separate heartbeat setup ritual.
   "tool.execute.before": async (input, output) => {
     if (input.tool !== "bash") return
-    const command = String(output?.args?.command || "")
-    if (isCoreAttemptCommand(command, "follow")) {
-      throw new Error("OpenCode T-BAG parents must use non-blocking tbag_follow; Bash/Python dsd_attempt.py follow is forbidden")
+    const original = String(output?.args?.command || "")
+    if (isCoreAttemptCommand(original, "follow")) {
+      throw new Error("OpenCode T-BAG parents must not foreground dsd_attempt.py follow")
     }
-    enrollHeartbeatFromCommand(input.sessionID, command)
+    enrollHeartbeatFromCommand(input.sessionID, original)
+    const backgrounded = backgroundLaunchCommand(original)
+    if (backgrounded !== original) output.args.command = backgrounded
   },
 
   // A current adapter auto-arms an observer after a successful structured launch.
   // tbag_follow remains an idempotent explicit re-arm/diagnostic path, not a
   // prerequisite for heartbeat supervision or normal autonomous progress.
   "tool.execute.after": async (input, output) => {
-    if (input.tool !== "bash" || !isCoreAttemptCommand(input?.args?.command, "launch")) return
-    const launch = launchResultFromToolOutput(output)
-    if (!launch) {
-      await logError(ctx.client, "T-BAG launch completed but adapter could not prove its structured launch result; heartbeat supervision remains enrolled and the next tick can request an explicit tbag_follow re-arm if needed")
+    if (input.tool !== "bash") return
+    const command=String(input?.args?.command || "")
+    const sessionID=input.sessionID
+    const root=ctx.worktree || ctx.directory
+    if (isParentTickCommand(command) && sessionID && root) repairObserversFromTick(ctx.client,sessionID,root,command,output)
+    if (!isCoreAttemptCommand(command,"launch")) return
+    const results=launchResultsFromToolOutput(output)
+    if (!results.length) {
+      const runRoot=commandArg(command,"run-root")
+      if (runRoot) { transportErrors.set(runRoot,{at:new Date().toISOString(),error:"launch output contained no structured T-BAG launch/preparation result"}); persistTransport(runRoot) }
+      await logError(ctx.client,"T-BAG launch output contained no structured result; heartbeat/tick reconciliation remains authoritative")
       return
     }
-    const sessionID = input.sessionID
-    const root = ctx.worktree || ctx.directory
-    if (!sessionID || !root) return
-    deletedSessions.delete(sessionID)
-    busySessions.add(sessionID)
-    registerRunHeartbeat(sessionID, launch)
-    try {
-      armAttempt(ctx.client, sessionID, root, launch)
-    } catch (error) {
-      // Never convert a successful detached launch into a failed tool result.
-      // Heartbeat supervision is already enrolled; a later tick may request an
-      // explicit tbag_follow re-arm without blocking normal autonomous progress.
-      await logError(ctx.client, "T-BAG launch observer auto-arm failed; heartbeat remains active and tick may request tbag_follow re-arm", {
-        task_id: launch.task_id,
-        event_dir: launch.event_dir,
-        error: String(error?.stack || error),
-      })
+    for (const launch of results) {
+      if (!sessionID || !root) continue
+      deletedSessions.delete(sessionID); busySessions.add(sessionID); registerRunHeartbeat(sessionID,launch)
+      if (launch.status === "preparing") { watchPreparation(ctx.client,sessionID,launch); continue }
+      try {
+        armAttempt(ctx.client,sessionID,root,launch); transportErrors.delete(launch.run_root); persistTransport(launch.run_root)
+      } catch (error) {
+        transportErrors.set(launch.run_root,{at:new Date().toISOString(),task_id:launch.task_id,event_dir:launch.event_dir,error:String(error?.stack || error)}); persistTransport(launch.run_root)
+        await logError(ctx.client,"T-BAG launch observer auto-arm failed; next tick will retry automatically",{task_id:launch.task_id,event_dir:launch.event_dir,error:String(error?.stack || error)})
+      }
     }
   },
 

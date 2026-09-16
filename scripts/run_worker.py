@@ -61,13 +61,12 @@ def atomic_json(path: Path, data: dict[str,Any])->None:
     tmp.write_text(json.dumps(data,indent=2,sort_keys=True)+"\n",encoding="utf-8"); os.replace(tmp,path)
 
 
-def launch_gate_root() -> Path:
-    """Machine-global admission state for the brief CLI bootstrap window.
-
-    The collision being protected can live in user-global CLI state, so this must not
-    be scoped to one T-BAG run or project. The files contain only timing metadata.
-    """
-    return (Path.home()/".cache"/"t-bag"/"launch-start-gate").resolve()
+def launch_gate_root(run_root: Path) -> Path:
+    """Project-local launch admission shared by this project's T-BAG runs."""
+    run_root=run_root.resolve()
+    data=json.loads((run_root/"run.json").read_text(encoding="utf-8"))
+    project_root=Path(str(data["project_root"])).resolve()
+    return (project_root/"TBag"/"runtime"/"launch-start-gate").resolve()
 
 
 def _finite_interval(value: Any, *, default: float = 0.0) -> float:
@@ -102,7 +101,8 @@ def staggered_popen(cmd: list[str], *, interval_seconds: float, gate_root: Path 
     """
     interval=_finite_interval(interval_seconds,default=-1.0)
     if interval < 0: raise ValueError("launch start interval must be a finite number >= 0")
-    root=(gate_root or launch_gate_root()).resolve(); root.mkdir(parents=True,exist_ok=True)
+    if gate_root is None: raise ValueError("project-local launch gate path is required")
+    root=gate_root.resolve(); root.mkdir(parents=True,exist_ok=True)
     lock_path=root/"admission.lock"; state_path=root/"last-start.json"
     with lock_path.open("a+") as handle:
         fcntl.flock(handle.fileno(),fcntl.LOCK_EX)
@@ -397,6 +397,8 @@ def terminal_error(args: argparse.Namespace,p:dict[str,Path],error:str,exit_code
 
 def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     p["log"].parent.mkdir(parents=True,exist_ok=True); env=os.environ.copy(); started=None
+    scratch=p["event_dir"]/"scratch"; scratch.mkdir(parents=True,exist_ok=True)
+    env.update({"TMPDIR":str(scratch),"TMP":str(scratch),"TEMP":str(scratch)})
     try: cmd,env,title,launch_cwd=worker_command(args,p,env)
     except FileNotFoundError as exc: return terminal_error(args,p,str(exc),127,reserved_at)
     except (OSError,ValueError) as exc: return terminal_error(args,p,str(exc),2,reserved_at)
@@ -405,7 +407,7 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     try:
         out=p["log"].open("xb",buffering=0)
         if stderr_path is not None: err=stderr_path.open("xb",buffering=0)
-        proc=staggered_popen(cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,start_new_session=True)
+        proc=staggered_popen(cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),gate_root=launch_gate_root(p["run_root"]),cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,start_new_session=True)
         started=now()
     except Exception as exc:
         if out is not None: out.close()
@@ -443,7 +445,7 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
         stderr_start=err.tell() if err is not None else 0
         try:
             proc=staggered_popen(
-                cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),
+                cmd,interval_seconds=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),gate_root=launch_gate_root(p["run_root"]),
                 cwd=launch_cwd,env=env,stdout=out,stderr=err if err is not None else subprocess.STDOUT,start_new_session=True,
             )
         except Exception as exc:

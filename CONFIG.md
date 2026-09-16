@@ -130,3 +130,6 @@ The task control plane stores driver separately from model. First-class technica
 That list is not the semantic capability boundary of the skill. If the owner asks for an unusual available CLI/tool and a capable parent can preserve T-BAG's task/report/scope/session contract, the semantic instruction remains meaningful. Repeated paths should be promoted into a first-class adapter after field evidence rather than forcing every future parent to rediscover them. The built-in `dsd_attempt.py launch` path accepts only wired adapters because it promises specific lifecycle evidence; a missing adapter must never silently bypass those invariants.
 
 All first-class drivers enter through core launch. Parent-harness wake adapters observe the recorded attempt but do not replace launch authority. A missing default lane runtime fails with `MISSING_RUNTIME_CONFIG`.
+## Runtime storage
+
+By default T-BAG runtime state (worktrees, worker databases, shared analysis views and launch admission state) lives under `<project>/TBag/runtime/<run-id>`. Attempt outputs and scratch live under the project run tree. T-BAG does not use system `/tmp` or home-cache directories as owned storage. `init-run --runtime-root ...` is the explicit owner authorization for an external runtime location.

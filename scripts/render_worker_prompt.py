@@ -89,7 +89,7 @@ def main() -> int:
     lines += [f"{i}. {p}" for i, p in enumerate(reads, 1)]
     for label, paths in groups:
         lines += [f"{label}:", *[f"- {p}" for p in paths]]
-    lines += [f"Attempt directory: {attempt_dir}", "All attempt-output paths below are relative to that directory, never the project cwd/view."]
+    lines += [f"Attempt directory: {attempt_dir}", "All attempt-output paths below are relative to that directory, never the project cwd/view.", f"Scratch/temp directory: {attempt_dir/'scratch'} (TMPDIR/TMP/TEMP point here). Never place T-BAG evidence or work products in system /tmp or outside the project-owned run tree."]
     if args.role == "goal-planner":
         lines += [
             "Attempt outputs allowed beside the report:",

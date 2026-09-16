@@ -4,6 +4,8 @@ You are one specialist on one T-BAG task. The **task brief + typed governing/own
 
 ## Hard boundaries
 
+**Filesystem:** evidence/scratch stays under launcher-supplied attempt/run paths; never use system `/tmp`, home caches or external paths unless explicitly authorized.
+
 - Work only in the assigned project view. Mutating roles get an isolated worktree; read-only roles inspect a shared frozen project view. Do not jump to primary/sibling checkouts.
 - Read-only roles never modify project state. Implementer/Fixer own routine engineering choices inside an established direction. Verification may write only when its brief explicitly grants a narrow write boundary.
 - Never edit task briefs, run rules, authoritative plans, or another task's control artifacts.

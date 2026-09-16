@@ -405,10 +405,9 @@ def validate_launch_role(task:dict[str,Any], role:str, *, continuing:bool=False)
     if role==base:
         if status=="recovery-required":
             raise ValueError("task requires Analyst Recovery before the base role may continue")
-        attempts=[a for a in task.get("attempts",[]) if isinstance(a,dict)]
-        latest=attempts[-1] if attempts else {}
-        if latest.get("status") in {"report-recovery","report-resume","mutating-report-resume"} and not continuing and (latest.get("session_id") or latest.get("resume_session")):
-            raise ValueError("latest attempt has resumable context; resume the recorded same-role session instead of discarding it")
+        # Resume is a useful automated preference, never a prison. A caller that
+        # explicitly asks for --resume-last/--resume-session gets continuity; an
+        # ordinary cold launch is allowed to discard stale conversational context.
         return
     if role=="reviewer":
         if not task.get("requires_integration") or status!="awaiting-review":
@@ -431,6 +430,28 @@ def copy_context_snapshot(source_event: Path, dest_root: Path) -> None:
     for rel,source in files.items():
         dest=dest_root/rel; dest.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(source,dest)
 
+
+
+def launch_blocker(run:Path, phase:str, tid:str, role:str, *, continuing:bool=False)->str|None:
+    """Return the same cheap deterministic blocker used before a real launch.
+
+    This deliberately excludes workspace construction/provider I/O. It exists so the
+    parent never advertises an action that the lifecycle guards already know cannot run.
+    """
+    try:
+        task=dsd_task.load_task(run,phase,tid)
+        validate_launch_role(task,role,continuing=continuing)
+        unresolved=[a for a in task.get("attempts",[]) if isinstance(a,dict) and dsd_task.attempt_is_unresolved(a)]
+        dead_unresolved=[a for a in unresolved if not dsd_task.attempt_is_live(a)]
+        if dead_unresolved and role!="recovery":
+            raise ValueError(f"UNRESOLVED_ATTEMPT: prior attempt has no terminal event: {dead_unresolved[-1].get('event_dir')}; run sweep-stale first")
+        if role not in {"reviewer","fixer","recovery"}:
+            ok,missing=dsd_task.readiness(run,phase,task)
+            if not ok:
+                raise ValueError(f"task dependencies not satisfied/integrated: {missing}")
+    except (OSError,ValueError,KeyError) as exc:
+        return str(exc)
+    return None
 
 def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
@@ -456,14 +477,8 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     continuing=bool(args.resume_last or args.resume_session)
     if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"} and continuing:
         raise ValueError(f"{role} must always start in a fresh session; independent review may not resume prior worker/reviewer context")
-    validate_launch_role(task,role,continuing=continuing)
-    unresolved=[a for a in task.get("attempts",[]) if isinstance(a,dict) and dsd_task.attempt_is_unresolved(a)]
-    dead_unresolved=[a for a in unresolved if not dsd_task.attempt_is_live(a)]
-    if dead_unresolved and role!="recovery":
-        raise ValueError(f"UNRESOLVED_ATTEMPT: prior attempt has no terminal event: {dead_unresolved[-1].get('event_dir')}; run sweep-stale first so T-BAG can mechanically decide safe retry versus Recovery")
-    if role not in {"reviewer","fixer","recovery"}:
-        ok,missing=dsd_task.readiness(run,phase,task)
-        if not ok: raise ValueError(f"task dependencies not satisfied/integrated: {missing}")
+    blocker=launch_blocker(run,phase,tid,role,continuing=continuing)
+    if blocker: raise ValueError(blocker)
     if role=="implementer":
         if status=="awaiting-review" and not continuing:
             raise ValueError("implementation turn is awaiting Review; use --resume-last only when the same task is genuinely unfinished, otherwise launch the Reviewer")
@@ -586,7 +601,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
 
 
 
-def command_launch(args:argparse.Namespace)->dict[str,Any]:
+def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
     workspace_warning=None
     # Prepare the potentially expensive Git project view/worktree outside the global launch-slot
@@ -625,6 +640,48 @@ def command_launch(args:argparse.Namespace)->dict[str,Any]:
         result=_command_launch(args)
         if workspace_warning: result["workspace_warning"]=workspace_warning
         return result
+
+
+def _launch_preparation_path(run:Path, phase:str, tid:str)->Path:
+    return dsd_task.task_root(run,phase,tid)/"launch-preparation.json"
+
+def _launch_preparation_log(run:Path, phase:str, tid:str)->Path:
+    return dsd_task.task_root(run,phase,tid)/"launch-preparation.log"
+
+def _background_launch(args:argparse.Namespace)->dict[str,Any]:
+    run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
+    task=dsd_task.load_task(run,phase,tid); role=getattr(args,"role",None) or str(task.get("role") or "")
+    blocker=launch_blocker(run,phase,tid,role,continuing=bool(args.resume_last or args.resume_session))
+    if blocker: raise ValueError(blocker)
+    marker=_launch_preparation_path(run,phase,tid); marker.parent.mkdir(parents=True,exist_ok=True)
+    if marker.is_file():
+        try: prior=dsd_task.load_json(marker)
+        except Exception: prior={}
+        pid=prior.get("pid")
+        if isinstance(pid,int) and pid_alive(pid):
+            return {"status":"preparing","already_preparing":True,"run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"preparation_pid":pid,"preparation":str(marker)}
+        marker.unlink(missing_ok=True)
+    child_args=[item for item in sys.argv[1:] if item!="--background-prepare"]
+    log=_launch_preparation_log(run,phase,tid)
+    handle=log.open("ab",buffering=0)
+    env=os.environ.copy(); env["TBAG_LAUNCH_PREPARATION_MARKER"]=str(marker)
+    try:
+        proc=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),*child_args],stdout=handle,stderr=subprocess.STDOUT,start_new_session=True,env=env)
+    finally:
+        handle.close()
+    dsd_task.write_json(marker,{"format":"tbag-launch-preparation-v1","run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"pid":proc.pid,"started_at":dsd_task.now(),"log":str(log)})
+    return {"status":"preparing","run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"preparation_pid":proc.pid,"preparation":str(marker),"log":str(log)}
+
+def command_launch(args:argparse.Namespace)->dict[str,Any]:
+    if getattr(args,"background_prepare",False):
+        return _background_launch(args)
+    marker=os.environ.get("TBAG_LAUNCH_PREPARATION_MARKER")
+    try:
+        return _command_launch_foreground(args)
+    finally:
+        if marker:
+            try: Path(marker).unlink(missing_ok=True)
+            except OSError: pass
 
 def resolve_event(run:Path,phase:str,tid:str,event_arg:Path|None)->Path:
     if event_arg: return event_arg.resolve()
@@ -931,7 +988,7 @@ def command_follow(args:argparse.Namespace)->dict[str,Any]:
 
 def parser()->argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
-    p=sub.add_parser("launch"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--role",choices=sorted(ROLE_NAMES)); p.add_argument("--tier",choices=("analyst","grunt"),help=argparse.SUPPRESS); p.add_argument("--driver"); p.add_argument("--model"); p.add_argument("--runtime-profile"); p.add_argument("--worker-rules"); p.add_argument("--db"); p.add_argument("--attempt",type=int); p.add_argument("--authority-input",dest="input",action="append",default=[]); p.add_argument("--input",dest="input",action="append",help=argparse.SUPPRESS); p.add_argument("--resume-session"); p.add_argument("--resume-last",action="store_true"); p.add_argument("--auto-flag",default="--auto")
+    p=sub.add_parser("launch"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--role",choices=sorted(ROLE_NAMES)); p.add_argument("--tier",choices=("analyst","grunt"),help=argparse.SUPPRESS); p.add_argument("--driver"); p.add_argument("--model"); p.add_argument("--runtime-profile"); p.add_argument("--worker-rules"); p.add_argument("--db"); p.add_argument("--attempt",type=int); p.add_argument("--authority-input",dest="input",action="append",default=[]); p.add_argument("--input",dest="input",action="append",help=argparse.SUPPRESS); p.add_argument("--resume-session"); p.add_argument("--resume-last",action="store_true"); p.add_argument("--background-prepare",action="store_true",help=argparse.SUPPRESS); p.add_argument("--auto-flag",default="--auto")
     p=sub.add_parser("gate"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",action="append",required=True); p.add_argument("--event-dir",type=Path)
     for name in ("inspect","follow","retire"):
         p=sub.add_parser(name); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--event-dir",type=Path)

@@ -88,8 +88,8 @@ class AdvanceReducerTests(unittest.TestCase):
 class TransportFallbackDocsTests(unittest.TestCase):
     def test_missing_follow_is_documented_as_degraded_transport(self):
         text=(ROOT/'OPENCODE.md').read_text()
-        self.assertIn('wake transport is degraded, not lifecycle correctness',text)
-        self.assertIn('next owner turn/manual tick',text)
+        self.assertIn('normal autonomy does not depend on that custom tool',text)
+        self.assertIn('observer state is repaired automatically after a normal tick',text)
 
 
 if __name__=='__main__': unittest.main()

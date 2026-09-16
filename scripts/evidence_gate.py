@@ -58,7 +58,9 @@ def gate(event: Path)->dict[str,Any]:
         for key in ("task_id","role","attempt","tier","model"):
             if terminal.get(key)!=reservation.get(key): errors.append(f"terminal {key} disagrees with launch reservation")
         scope=scope_snapshot.resolve_comparison(terminal.get("scope_diff"),relative_to=event)
-        if scope is None: errors.append("terminal scope comparison missing")
+        scope_error=str(terminal.get("scope_error") or "").strip()
+        if scope is None:
+            errors.append(f"terminal scope comparison failed: {scope_error}" if scope_error else "terminal scope comparison missing")
     else:
         errors.append("terminal event missing")
 
@@ -119,6 +121,7 @@ def gate(event: Path)->dict[str,Any]:
         "disposition":disposition,"errors":errors,"warnings":warnings,"task_id":reservation.get("task_id"),"role":role,
         "tier":reservation.get("tier"),"model":reservation.get("model"),"event_dir":str(event),"task":str(task),"report":str(report),
         "report_state":report_state,"writes_project":writes,"scope":scope,"generated_admissions":generated_admissions,"terminal_event":str(terminal_path) if terminal_path.is_file() else None,
+        "first_error":errors[0] if errors else None,"failure_kind":"environment" if isinstance(terminal,dict) and terminal.get("scope_error") and scope is None else ("integrity" if errors else None),
         "exit_code":terminal.get("exit_code") if isinstance(terminal,dict) else None,"session_id":terminal.get("session_id") if isinstance(terminal,dict) else None,
     }
 

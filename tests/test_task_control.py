@@ -399,8 +399,8 @@ class TaskControlTests(unittest.TestCase):
 
     def test_in_progress_report_prefers_recorded_session_but_allows_cold_retry_when_transport_lost_it(self):
         task={"kind":"implementation","role":"implementer","status":"active","attempts":[{"role":"implementer","status":"mutating-report-resume","session_id":"ses-1"}]}
-        with self.assertRaisesRegex(ValueError,"resume the recorded same-role session"):
-            dsd_attempt.validate_launch_role(task,"implementer",continuing=False)
+        dsd_attempt.validate_launch_role(task,"implementer",continuing=False)
+        self.assertEqual(dsd_attempt.resolve_resume_session(task,"implementer","active",None,True),"ses-1")
         dsd_attempt.validate_launch_role(task,"implementer",continuing=True)
         task["attempts"][-1].pop("session_id")
         dsd_attempt.validate_launch_role(task,"implementer",continuing=False)

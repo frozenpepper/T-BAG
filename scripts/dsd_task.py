@@ -639,8 +639,12 @@ def require_escalation_enabled(run: Path) -> None:
 
 
 def _default_runtime_root(project: Path, run_id: str) -> Path:
-    project_key = slug(str(project).replace(os.sep, "__"))
-    return (Path.home() / ".cache" / CACHE_DIR / "projects" / project_key / slug(run_id)).resolve()
+    """Keep T-BAG-owned runtime beside its durable project control tree.
+
+    An explicit --runtime-root remains an owner-authorized escape hatch. The default
+    never writes worktrees/databases into home caches or system temporary storage.
+    """
+    return (project.resolve() / CONTROL_DIR / "runtime" / slug(run_id)).resolve()
 
 
 def command_init(args: argparse.Namespace) -> dict[str, Any]:
@@ -2782,7 +2786,15 @@ def command_verification_result(args: argparse.Namespace) -> dict[str, Any]:
         attempt=matching_gated_attempt(task,BASE_ROLES_BY_KIND["verification"],report)
         if attempt is None: raise ValueError("verification-result report must come from a gated Verification/Evidence-Clerk attempt")
         require_current_attempt(task,attempt,reason="verification result")
-        outcome=declared_report_outcome(report,str(attempt.get("role") or task.get("role") or "verification"),required=True)
+        role=str(attempt.get("role") or task.get("role") or "verification")
+        declared=declared_report_outcome(report,role,required=False)
+        fallback=getattr(args,"outcome",None)
+        if declared is not None and fallback is not None and declared!=fallback:
+            raise ValueError(f"verification report declares {declared!r}; --outcome {fallback!r} may not override worker authority")
+        outcome=declared or fallback
+        if outcome is None:
+            declared_report_outcome(report,role,required=True)
+            raise AssertionError("required routing outcome did not raise")
         if outcome=="capability": raise ValueError("Verification requested ESCALATE CAPABILITY; route capability escalation instead")
         task["accepted_outcome"]=outcome
         task["last_verification"]={"outcome":outcome,"report":str(report),"attempt":str(attempt.get("event_dir")),"recorded_at":now()}
@@ -2934,7 +2946,7 @@ def parser() -> argparse.ArgumentParser:
         elif name=="review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="plan-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="context-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
-        elif name=="verification-result": p.add_argument("--report",type=Path,required=True)
+        elif name=="verification-result": p.add_argument("--outcome",choices=("pass","blocked","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="analysis-result": p.add_argument("--outcome",choices=("resume","replan","replan-resume","escalate"),help="legacy/tokenless report fallback; Analyst disposition token is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="escalate": p.add_argument("--report",type=Path,required=True)
         elif name=="resolve-escalation": p.add_argument("--decision",type=Path,required=True); p.add_argument("--route",choices=("resume","analysis","accept"),default="resume")

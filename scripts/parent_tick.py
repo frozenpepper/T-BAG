@@ -226,6 +226,33 @@ def compact_advance(result: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+
+_LAUNCH_ACTION_ROLES={
+    "launch-recovery":"recovery",
+    "launch-analyst-discovery":"discovery",
+    "launch-fixer":"fixer",
+    "launch-fresh-reviewer":"reviewer",
+    "launch-or-reuse-fresh-plan-reviewer":"plan-reviewer",
+}
+
+def _launch_action_blocker(run:Path, action:dict[str,Any])->str|None:
+    name=str(action.get("action") or "")
+    if name not in set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session"}:
+        return None
+    phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
+    if not phase or not tid: return "launch action is missing phase/task identity"
+    if name=="launch-ready-task":
+        try: role=str(dsd_task.load_task(run,phase,tid).get("role") or "")
+        except Exception as exc: return str(exc)
+    elif name=="resume-recorded-session":
+        role=str(action.get("role") or "")
+        if not role:
+            try: role=str(dsd_task.load_task(run,phase,tid).get("role") or "")
+            except Exception as exc: return str(exc)
+    else:
+        role=_LAUNCH_ACTION_ROLES[name]
+    return dsd_attempt.launch_blocker(run,phase,tid,role,continuing=name=="resume-recorded-session")
+
 def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     run = args.run_root.resolve()
     loop = load_loop(run)
@@ -323,6 +350,14 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     blocked_keys={str(item.get("key") or "") for item in blocked_actions if isinstance(item,dict)}
     pending_all=list(state.get("first_useful_actions") or [])
     pending=[item for item in pending_all if action_key(item) not in blocked_keys]
+    launchable=[]
+    for item in pending:
+        blocker=_launch_action_blocker(run,item)
+        if blocker:
+            blocked_actions.append({**item,"key":action_key(item),"reason":blocker,"waiting_on":"launch-precondition"})
+        else:
+            launchable.append(item)
+    pending=launchable
     live_now = list(state.get("live_attempts") or [])
     if run_status != "active":
         classification = f"run-{run_status}"
@@ -367,6 +402,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
 
     out: dict[str, Any] = {
         "format": FORMAT,
+        "generated_at": now(),
         "run_id": state.get("run_id"),
         "run_status": run_status,
         "classification": classification,
@@ -377,7 +413,6 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     advance_packet=compact_advance(advance_result)
     if advance_packet: out["advance"] = advance_packet
     if poison_result and poison_result.get("count"): out["poisoned_sessions_routed"] = poison_result
-    if observer_rearm: out["observer_rearm_required"] = observer_rearm
     if blocked_actions: out["blocked_actions"] = blocked_actions
     if pending: out["actions"] = pending
     if live_now: out["live_attempts"] = live_now

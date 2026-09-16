@@ -239,8 +239,20 @@ await assert.rejects(
     { tool: "bash", sessionID: "ses-main", callID: "follow-bad" },
     { args: { command: "python3 'TBag/tools/dsd_attempt.py' follow --run-root /run --phase-id P --task-id T1" } },
   ),
-  /tbag_follow/,
+  /foreground dsd_attempt\.py follow/,
 )
+
+
+// RC55: before hook backgrounds launch preparation without asking the parent to learn
+// another command, and combined stdout may contain more than one structured launch.
+const bgCall={ tool:"bash", sessionID:"ses-bg", callID:"bg", args:{ command:"python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id B1" } }
+const bgOut={ args:{...bgCall.args} }
+await plugin["tool.execute.before"](bgCall,bgOut)
+assert.match(bgOut.args.command,/--background-prepare/)
+const combined=[JSON.stringify(launchPayload("M1")),"noise",JSON.stringify(launchPayload("M2"))].join("\n")
+const beforeMulti=spawnCalls.filter((x)=>x[2]==="follow").length
+await plugin["tool.execute.after"]({tool:"bash",sessionID:"ses-multi",callID:"multi",args:{command:"python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id M1; python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id M2"}},{title:"bash",output:combined,metadata:{}})
+assert.equal(spawnCalls.filter((x)=>x[2]==="follow").length,beforeMulti+2,"combined launch stdout must arm every structured launch")
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log("OPENCODE_PLUGIN_RUNTIME_PASS")

@@ -14,9 +14,9 @@ The installer detects the local host generation with `opencode --version` and in
 
 The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. `live_capability_verified=false` is intentional until the running host proves activation.
 
-The project plugin exposes **`tbag_follow`** as a live-plugin probe and optional observer re-arm tool. Current OpenCode parents do **not** call it to set up heartbeat supervision: the first normal `parent_tick.py tick` automatically enrolls that session/run, and a successful structured launch auto-arms its observer.
+The project plugin may expose **`tbag_follow`** as a diagnostic tool, but normal autonomy does not depend on that custom tool being present. The first normal `parent_tick.py tick` enrolls heartbeat supervision; every tick also lets the adapter rediscover and re-arm missing live observers from durable attempt state.
 
-If `tbag_follow` is absent, treat the project plugin as not live (or incomplete): autonomous wake transport is unavailable; **wake transport is degraded, not lifecycle correctness.** Launch normally detached, do not invent a waiter/scheduler, and let the next owner turn/manual tick rediscover completion. Reload the host to restore autonomous wakes.
+If `tbag_follow` is absent, do not invent a workaround or treat it as a lifecycle blocker. Ordinary Bash hooks can still be live. Tick/launch hooks plus durable state are the normal path; reload the host only when adapter hooks themselves are demonstrably stale.
 
 ## Canonical OpenCode loop
 
@@ -24,8 +24,8 @@ There is exactly one parent protocol, including across adapter upgrades:
 
 1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Do not separately reconstruct reconcile/advance/monitor/update state.
 2. Process the tick packet until it reaches a launch/semantic/owner boundary. If it says `actions-ready`, execute only those authorized actions and tick again.
-3. For each new attempt run normal detached `dsd_attempt.py launch`, then yield. A live current adapter has already enrolled the heartbeat from the parent tick and will auto-arm the observer from the structured launch result.
-4. Call `tbag_follow` only when tick reports observer re-arm is needed, after adapter recovery/reload for a still-live attempt, or for transport diagnosis. `already_armed:true` is only transport state; the next tick remains authoritative.
+3. For each new attempt run normal `dsd_attempt.py launch`, then yield. The OpenCode adapter transparently backgrounds expensive workspace preparation, watches that preparation, and arms the resulting worker observer. Multiple launch commands may share one Bash call; structured results are parsed independently.
+4. Missing observer state is repaired automatically after a normal tick. `tbag_follow`, when the host exposes it, is diagnostics only and is never a required lifecycle step.
 5. If the tick says `owner_update.due`, send the bounded purpose-first update and then `parent_tick.py ack-update --token ...`.
 6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
 7. Do not keep the conversation alive with Bash/Python sleeps or polling. Per-attempt completion requests an early tick; a periodic transport heartbeat requests another tick even when a wake was lost.
@@ -39,12 +39,12 @@ The current adapter owns wake setup mechanically. Before a normal parent `parent
 Therefore:
 
 - the orchestrator never performs a separate heartbeat-registration ritual;
-- `tbag_follow` remains available for explicit re-arm/diagnosis; older follow-only project adapters remain compatible;
+- `tbag_follow` may remain available for diagnosis, but observer repair is tick-driven and does not require it;
 - headless/host modes where project hooks are unavailable degrade to manual owner-turn ticks;
 - auto-arm failure cannot hide or invalidate an already detached worker because heartbeat supervision remains active;
 - no semantic task authority moves into the plugin.
 
-Direct Bash/Python `dsd_attempt.py follow` remains forbidden because it can monopolize the conversational turn. The project-local `tbag_follow` tool backgrounds the same core observer and returns immediately when an explicit re-arm is needed.
+Direct Bash/Python `dsd_attempt.py follow` remains forbidden because it can monopolize the conversational turn. Observer repair belongs to the adapter and normal tick path, not to model-authored waiting or re-arm ceremony.
 
 Credential/config rotation is not assumed to hot-reload inside an already-running worker. If a worker stops making progress after rotation, use lifecycle retirement plus retained-session resume/retry; never make the parent inventory sibling processes or issue raw `ps`/`kill`.
 
