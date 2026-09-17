@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """OpenCode host-version and TUI-config compatibility helpers.
 
-The server adapter is stable across supported hosts; only the optional TUI
-companion differs. These helpers edit only the top-level ``plugin`` value in
-`tui.json`/`tui.jsonc`, preserving unrelated owner text and comments.
+Server transport and presentation both differ between OpenCode 1 and 2. Host
+detection prefers the active OpenCode parent when it exposes ``OPENCODE_PID``;
+configuration helpers edit only the top-level ``plugin`` value in `tui.json` /
+`tui.jsonc`, preserving unrelated owner text and comments.
 """
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -16,19 +19,94 @@ V1_SPEC = "./plugins/tbag-status-tui-v1.tsx"
 LEGACY_V1_SPECS = ("./plugins/tbag-status-tui.tsx",)
 
 
-def detect_opencode_version() -> tuple[str | None, int | None]:
+def _generation_hint(text: str) -> int | None:
+    """Infer only explicit OpenCode distribution identity, never installation priority."""
+    normalized = str(text or "").lower().replace("\\", "/")
+    if "opencode2" in normalized or "/@opencode/cli/" in normalized:
+        return 2
+    if "/opencode-ai/" in normalized:
+        return 1
     try:
-        text = subprocess.check_output(
-            ["opencode", "--version"], text=True, stderr=subprocess.STDOUT, timeout=10
-        ).strip()
-    except Exception:
-        return None, None
+        args = shlex.split(text)
+    except ValueError:
+        args = str(text or "").split()
+    for arg in args:
+        name = Path(arg).name.lower()
+        if name.startswith("opencode2"):
+            return 2
+        if name in {"opencode", "opencode.exe"}:
+            return 1
+    return None
+
+
+def _parse_version(text: str, generation_hint: int | None = None) -> tuple[str | None, int | None]:
+    hint = generation_hint if generation_hint in {1, 2} else _generation_hint(text)
     for raw in text.replace("/", " ").split():
         token = raw.strip().lstrip("vV")
         parts = token.split(".")
         if parts and parts[0].isdigit() and (len(parts) == 1 or parts[1].isdigit()):
-            return token, int(parts[0])
-    return text or None, None
+            return token, hint if hint in {1, 2} else int(parts[0])
+    return text or None, hint
+
+
+def _active_opencode_command() -> str | None:
+    """Return only the exact host process advertised by OpenCode itself.
+
+    Both supported generations export OPENCODE_PID to child processes. Querying that
+    one PID avoids both a global process scan and the dual-install ambiguity where
+    PATH `opencode` is V1 while the actual parent is `opencode2`.
+    """
+    raw_pid = os.environ.get("OPENCODE_PID", "").strip()
+    if not raw_pid.isdigit() or int(raw_pid) <= 0:
+        return None
+    try:
+        text = subprocess.check_output(
+            ["ps", "-p", raw_pid, "-o", "command="],
+            text=True, stderr=subprocess.STDOUT, timeout=10,
+        ).strip()
+    except Exception:
+        return None
+    return text or None
+
+
+def _host_probe_executable(command: str, generation: int) -> str:
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        args = command.split()
+    for arg in args:
+        name = Path(arg).name.lower()
+        if generation == 2 and name.startswith("opencode2"):
+            return arg
+        if generation == 1 and name in {"opencode", "opencode.exe"}:
+            return arg
+    return "opencode2" if generation == 2 else "opencode"
+
+
+def _probe_version(executable: str, generation_hint: int | None = None) -> tuple[str | None, int | None]:
+    try:
+        text = subprocess.check_output(
+            [executable, "--version"], text=True, stderr=subprocess.STDOUT, timeout=10
+        ).strip()
+    except Exception:
+        return None, generation_hint if generation_hint in {1, 2} else None
+    return _parse_version(text, generation_hint)
+
+
+def detect_opencode_version() -> tuple[str | None, int | None]:
+    active = _active_opencode_command()
+    active_generation = _generation_hint(active or "")
+    if active and active_generation in {1, 2}:
+        executable = _host_probe_executable(active, active_generation)
+        return _probe_version(executable, active_generation)
+
+    # Outside an OpenCode-owned child process, preserve the historical PATH contract.
+    # Only fall back to opencode2 when `opencode` itself is absent; never choose the
+    # highest installed generation in an ambiguous dual-install shell.
+    version, major = _probe_version("opencode")
+    if version is not None or major is not None:
+        return version, major
+    return _probe_version("opencode2", 2)
 
 
 def tui_config_path(project_root: Path) -> Path:
