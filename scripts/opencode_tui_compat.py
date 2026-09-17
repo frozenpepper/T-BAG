@@ -2,9 +2,10 @@
 """OpenCode host-version and TUI-config compatibility helpers.
 
 Server transport and presentation both differ between OpenCode 1 and 2. Host
-detection prefers the active OpenCode parent when it exposes ``OPENCODE_PID``;
-configuration helpers edit only the top-level ``plugin`` value in `tui.json` /
-`tui.jsonc`, preserving unrelated owner text and comments.
+detection prefers ``OPENCODE_PID`` when exported and otherwise walks only the
+current process ancestry for an explicit OpenCode identity. Configuration helpers
+edit only the top-level ``plugin`` value in `tui.json` / `tui.jsonc`, preserving
+unrelated owner text and comments.
 """
 from __future__ import annotations
 
@@ -69,6 +70,50 @@ def _active_opencode_command() -> str | None:
     return text or None
 
 
+def _process_parent_and_command(pid: int) -> tuple[int | None, str | None]:
+    """Read one known process only; return its parent PID and command.
+
+    This deliberately avoids global process discovery. macOS and Linux both expose
+    these fields through ``ps -p <pid>``. Any failure simply makes ancestry evidence
+    unavailable and leaves the historical PATH probe as fallback.
+    """
+    if pid <= 0:
+        return None, None
+    try:
+        text = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "ppid=", "-o", "command="],
+            text=True, stderr=subprocess.STDOUT, timeout=10,
+        ).strip()
+    except Exception:
+        return None, None
+    line = next((candidate.strip() for candidate in text.splitlines() if candidate.strip()), "")
+    if not line:
+        return None, None
+    parts = line.split(None, 1)
+    if not parts or not parts[0].isdigit():
+        return None, None
+    parent = int(parts[0])
+    command = parts[1].strip() if len(parts) > 1 else ""
+    return parent, command or None
+
+
+def _ancestry_opencode_command(max_hops: int = 6) -> str | None:
+    """Find an explicit OpenCode host only in this process's bounded ancestry."""
+    pid = os.getppid()
+    seen: set[int] = set()
+    for _ in range(max_hops):
+        if pid <= 1 or pid in seen:
+            break
+        seen.add(pid)
+        parent, command = _process_parent_and_command(pid)
+        if command and _generation_hint(command) in {1, 2}:
+            return command
+        if parent is None or parent <= 0 or parent == pid:
+            break
+        pid = parent
+    return None
+
+
 def _host_probe_executable(command: str, generation: int) -> str:
     try:
         args = shlex.split(command)
@@ -99,6 +144,12 @@ def detect_opencode_version() -> tuple[str | None, int | None]:
     if active and active_generation in {1, 2}:
         executable = _host_probe_executable(active, active_generation)
         return _probe_version(executable, active_generation)
+
+    ancestor = _ancestry_opencode_command()
+    ancestor_generation = _generation_hint(ancestor or "")
+    if ancestor and ancestor_generation in {1, 2}:
+        executable = _host_probe_executable(ancestor, ancestor_generation)
+        return _probe_version(executable, ancestor_generation)
 
     # Outside an OpenCode-owned child process, preserve the historical PATH contract.
     # Only fall back to opencode2 when `opencode` itself is absent; never choose the
