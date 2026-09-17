@@ -38,6 +38,7 @@ Every owner turn, resume or harness wake starts with **`parent_tick.py tick`**. 
 - **Succession:** supersession/deferral does not erase obligations. Bulk closure requires an explicit successor or Human cancellation.
 - **Context:** workers receive frozen common rules, technical method when applicable, one role, optional Project Protocol, selected skills, brief and typed inputs. Rich parent history stays parent-only. The parent is a router, not a reader: never pipe raw logs/reports or full process commands into context; consume bounded JSON/routing surfaces directly instead of reformatting them through helper scripts.
 - **Cleanup/blast radius:** runtime cleanup is lifecycle-owned; the parent never inventories or raw-deletes cache paths. T-BAG reaps only mechanically disposable state inside the current run's owned runtime. `~/.cache/t-bag` is shared; never `rm -rf` it.
+- **Project-local scratch:** T-BAG-created diagnostics, repro/smoke projects, SDK probes, temporary artifacts, reports and handoff intermediates stay under the current project's `TBag/` tree. Never create new T-BAG work in `$TMPDIR`, `/tmp`, `/private/var/...` or another external location unless the Human explicitly names that destination. Legacy recorded runtime roots remain readable but do not authorize new external scratch.
 
 ## Owner communication
 

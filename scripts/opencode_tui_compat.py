@@ -20,22 +20,29 @@ V1_SPEC = "./plugins/tbag-status-tui-v1.tsx"
 LEGACY_V1_SPECS = ("./plugins/tbag-status-tui.tsx",)
 
 
-def _generation_hint(text: str) -> int | None:
-    """Infer only explicit OpenCode distribution identity, never installation priority."""
-    normalized = str(text or "").lower().replace("\\", "/")
-    if "opencode2" in normalized or "/@opencode/cli/" in normalized:
-        return 2
-    if "/opencode-ai/" in normalized:
-        return 1
+def _executable_identity_candidates(text: str) -> list[str]:
+    """Return executable-bearing argv positions only, never arbitrary payload args."""
     try:
         args = shlex.split(text)
     except ValueError:
         args = str(text or "").split()
-    for arg in args:
-        name = Path(arg).name.lower()
-        if name.startswith("opencode2"):
+    if not args:
+        return []
+    candidates = [args[0]]
+    launcher = Path(args[0]).name.lower()
+    if launcher in {"node", "node.exe", "bun", "bun.exe"} and len(args) > 1:
+        candidates.append(args[1])
+    return candidates
+
+
+def _generation_hint(text: str) -> int | None:
+    """Infer explicit OpenCode executable identity, never argv payload or install priority."""
+    for candidate in _executable_identity_candidates(text):
+        normalized = candidate.lower().replace("\\", "/")
+        name = Path(candidate).name.lower()
+        if name.startswith("opencode2") or "/@opencode/cli/" in normalized:
             return 2
-        if name in {"opencode", "opencode.exe"}:
+        if name in {"opencode", "opencode.exe"} or "/opencode-ai/" in normalized:
             return 1
     return None
 
@@ -115,16 +122,13 @@ def _ancestry_opencode_command(max_hops: int = 6) -> str | None:
 
 
 def _host_probe_executable(command: str, generation: int) -> str:
-    try:
-        args = shlex.split(command)
-    except ValueError:
-        args = command.split()
-    for arg in args:
-        name = Path(arg).name.lower()
-        if generation == 2 and name.startswith("opencode2"):
-            return arg
-        if generation == 1 and name in {"opencode", "opencode.exe"}:
-            return arg
+    for candidate in _executable_identity_candidates(command):
+        normalized = candidate.lower().replace("\\", "/")
+        name = Path(candidate).name.lower()
+        if generation == 2 and (name.startswith("opencode2") or "/@opencode/cli/" in normalized):
+            return candidate
+        if generation == 1 and (name in {"opencode", "opencode.exe"} or "/opencode-ai/" in normalized):
+            return candidate
     return "opencode2" if generation == 2 else "opencode"
 
 

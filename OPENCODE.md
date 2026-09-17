@@ -10,7 +10,9 @@ Refresh the project-local adapter once when an OpenCode parent starts or resumes
 python3 <skill>/scripts/install_harness_adapter.py --harness opencode --project-root <project>
 ```
 
-Host generation detection first follows the running parent via `OPENCODE_PID`. If that beta/runner does not export the variable, T-BAG walks only the current process ancestry (maximum six known-PID hops) and stops at the first explicit OpenCode distribution identity. This lets a V2 parent win even when PATH `opencode` still names a co-installed V1 binary without performing a global process scan. Outside an OpenCode-owned ancestry, the historical `opencode --version` PATH behavior is preserved; `opencode2` is only the fallback when `opencode` is absent.
+Host generation detection first follows the running parent via `OPENCODE_PID`. If that beta/runner does not export the variable, T-BAG walks only the current process ancestry (maximum six known-PID hops) and stops at the first explicit OpenCode **executable identity**. Wrapper-shell arguments are never host identity, so `--harness opencode` cannot misclassify a V2 parent. This lets V2 win over a co-installed PATH V1 without a global process scan. Outside an OpenCode-owned ancestry, historical `opencode --version` behavior remains primary; `opencode2` is only the fallback when `opencode` is absent.
+
+Parent diagnostics also obey the top-level `SKILL.md` project-local scratch boundary: T-BAG repro projects, SDK probes, smoke fixtures, reports and handoff intermediates stay under the project's `TBag/` tree, never host system temp unless the Human explicitly requested an external destination.
 
 The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. Server transport is versioned too: OpenCode 1 receives the legacy V1 hook adapter; OpenCode 2 receives the native `id` + `setup(ctx)` adapter. The two implementations are not interchangeable. `live_capability_verified=false` is intentional until the running host proves activation.
 
