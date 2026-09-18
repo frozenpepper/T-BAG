@@ -2749,7 +2749,13 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
     if followup_cancel is not None:
         source_id,finding_ids,escalation_report=followup_cancel
         triage_review_findings(run,phase,source_id,finding_ids,resolution="human-cancelled",report=escalation_report if escalation_report.is_file() else None,status="cancelled",decision=snapshot)
+    run_reactivated=False
+    if str(load_run(run).get("status") or "active")=="human-blocked":
+        class RunStatusArgs: pass
+        resume=RunStatusArgs(); resume.run_root=run; resume.status="active"; resume.reason="Human decision recorded"
+        command_set_run_status(resume); run_reactivated=True
     result={"task_id":tid,"status":task["status"],"decision":str(snapshot.resolve()),"route":route}
+    if run_reactivated: result["run_status"]="active"
     if route=="accept": result["acceptance_basis"]="explicit-human-authority"
     if followup_cancel is not None: result["cancelled_findings"]=followup_cancel[1]
     return result

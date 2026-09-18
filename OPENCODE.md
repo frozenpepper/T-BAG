@@ -30,7 +30,7 @@ There is exactly one parent protocol, including across adapter upgrades:
 4. Missing observer state is repaired automatically after a normal tick. `tbag_follow`, when the host exposes it, is diagnostics only and is never a required lifecycle step.
 5. If the tick says `owner_update.due`, send the bounded purpose-first update and then `parent_tick.py ack-update --token ...`.
 6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
-7. Do not keep the conversation alive with Bash/Python sleeps or polling. Per-attempt completion requests an early tick; a periodic transport heartbeat requests another tick even when a wake was lost.
+7. Do not keep the conversation alive with Bash/Python sleeps or polling. Observer completion is the fastest hint; independently, a **60-second deterministic completion pulse** reads durable state without prompting the parent and wakes it only when a worker attempt actually finished. A separate, slower **health heartbeat** wakes the parent for a general orchestration checkup while autonomous work/recovery remains active.
 
 The model still chooses semantic work. The adapter only supplies disposable wake timing; `parent_tick.py` + durable run state own orchestration truth. A Human `--route analysis` opens Analyst authority only; the Analyst's later `replan` is the separate technical graph decision.
 
@@ -56,7 +56,7 @@ Credential/config rotation is not assumed to hot-reload inside an already-runnin
 
 OpenCode session lifecycle events are used only as a thin transport interlock. If an observer finishes while the parent is still busy, the plugin coalesces one **in-memory wake bit** for that session and flushes it when OpenCode reports idle (or releases the busy turn on a terminal session error). A completion that races the wake-generated parent turn receives one final non-blocking flush when that turn releases.
 
-Wake state is disposable. Per-attempt wakes are only fast hints; the run heartbeat requests another parent tick when one is lost. The tick re-derives live/terminal/action state from durable T-BAG files. Session deletion suppresses obsolete delivery; a successor session's first normal parent tick enrolls its own heartbeat automatically.
+Wake state is disposable. Per-attempt wakes are only fast hints; the 60-second completion pulse recovers a lost completion wake without spending parent-model tokens, and the slower health lane recovers broader orchestration drift. `human-blocked` and `paused-by-user` suspend both lanes; `completed` and `abandoned` end them. Recording a Human escalation decision automatically reactivates `human-blocked`; an explicit pause requires explicit `set-run-status active`. A subsequent tick/worker launch re-enrolls transport automatically.
 
 The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists semantic notification state.
 

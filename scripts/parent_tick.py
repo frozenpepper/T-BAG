@@ -23,6 +23,7 @@ import dsd_attempt
 import dsd_task
 
 FORMAT = "tbag-parent-loop-v1"
+PULSE_FORMAT = "tbag-parent-pulse-v1"
 DEFAULT_OWNER_HEARTBEAT_SECONDS = 1800.0
 DEFAULT_CHANGED_UPDATE_MIN_SECONDS = 900.0
 DEFAULT_REPORT_COMPLETE_GRACE_SECONDS = 30.0
@@ -144,6 +145,52 @@ def completion_candidate(state: dict[str, Any]) -> bool:
     ))
 
 
+def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
+    """Cheap read-only heartbeat probe.
+
+    Safe to run every minute: no task advancement, launch, retirement, or model call.
+    Transport wakes the parent only when durable state says a worker attempt finished.
+    """
+    run = args.run_root.resolve()
+    info = dsd_task.load_run(run)
+    status = str(info.get("status") or "active")
+    base: dict[str, Any] = {
+        "format": PULSE_FORMAT,
+        "generated_at": now(),
+        "run_id": info.get("run_id"),
+        "run_status": status,
+        "wake_parent": False,
+    }
+    if status in {"completed", "abandoned"}:
+        return {**base, "heartbeat_state": "ended", "reason": f"run-{status}"}
+    if status == "paused-by-user":
+        return {**base, "heartbeat_state": "paused", "reason": "run-paused-by-user"}
+    if status == "human-blocked":
+        return {**base, "heartbeat_state": "waiting", "reason": "human-decision-pending"}
+
+    state = reconcile(run, getattr(args, "phase_id", None), sweep=False)
+    actions = [x for x in (state.get("first_useful_actions") or []) if isinstance(x, dict)]
+    finished = [x for x in actions if str(x.get("action") or "") == "gate-finished-attempt"]
+    live = list(state.get("live_attempts") or [])
+    if finished:
+        return {
+            **base,
+            "heartbeat_state": "running",
+            "wake_parent": True,
+            "reason": "attempt-finished",
+            "completed_attempts": [{
+                "phase_id": item.get("phase_id"),
+                "task_id": item.get("task_id"),
+                "event_dir": item.get("event_dir"),
+            } for item in finished],
+        }
+    if live:
+        return {**base, "heartbeat_state": "running", "reason": "workers-still-running", "live_count": len(live)}
+    if state.get("human_blocks"):
+        return {**base, "heartbeat_state": "waiting", "reason": "human-decision-pending"}
+    return {**base, "heartbeat_state": "idle-recovery", "reason": "no-live-worker-needs-periodic-health-check"}
+
+
 def owner_signature(state: dict[str, Any], monitors: list[dict[str, Any]], classification: str) -> str:
     payload = {
         "run_status": state.get("run_status"),
@@ -176,8 +223,10 @@ def update_due(
     last_signature = str(loop.get("last_owner_update_signature") or "")
     last_reasons = sorted(str(x) for x in (loop.get("last_owner_update_reasons") or []) if str(x))
     urgent: list[str] = []
-    if str(state.get("run_status") or "active") != "active": urgent.append("run-terminal-state")
-    if state.get("human_blocks"): urgent.append("owner-decision-required")
+    durable_status = str(state.get("run_status") or "active")
+    if durable_status in {"completed", "abandoned"}: urgent.append("run-terminal-state")
+    elif durable_status == "paused-by-user": urgent.append("run-paused")
+    if state.get("human_blocks") or durable_status == "human-blocked": urgent.append("owner-decision-required")
     if classification == "completion-candidate": urgent.append("project-end-candidate")
     if any(x.get("retirement_requested") for x in monitors): urgent.append("worker-retired")
     if any(x.get("attention") == "silent-long-running" for x in monitors): urgent.append("worker-stall")
@@ -381,6 +430,18 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         classification = "active-idle"
         turn = "intervene"
 
+    run_status_transition = None
+    if classification == "awaiting-owner" and run_status == "active":
+        run_status_transition = dsd_task.command_set_run_status(args_for(
+            run_root=run,
+            status="human-blocked",
+            reason="awaiting Human decision",
+        ))
+        run_status = "human-blocked"
+        state["run_status"] = run_status
+        classification = "run-human-blocked"
+        turn = "owner"
+
     owner = update_due(
         loop,
         state,
@@ -410,6 +471,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "worker_budget": state.get("worker_budget"),
         "owner_update": owner,
     }
+    if run_status_transition: out["run_status_transition"] = run_status_transition
     advance_packet=compact_advance(advance_result)
     if advance_packet: out["advance"] = advance_packet
     if poison_result and poison_result.get("count"): out["poisoned_sessions_routed"] = poison_result
@@ -457,6 +519,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--changed-update-min-seconds", type=float, default=DEFAULT_CHANGED_UPDATE_MIN_SECONDS)
     p.add_argument("--report-complete-grace-seconds", type=float, default=DEFAULT_REPORT_COMPLETE_GRACE_SECONDS)
     p.add_argument("--stall-confirm-seconds", type=float, default=DEFAULT_STALL_CONFIRM_SECONDS)
+    p = sub.add_parser("pulse"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id")
     p = sub.add_parser("ack-update"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--token", required=True)
     p = sub.add_parser("finish"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id"); p.add_argument("--reason", required=True)
     return ap
@@ -466,6 +529,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "tick": result = command_tick(args)
+        elif args.command == "pulse": result = command_pulse(args)
         elif args.command == "ack-update": result = command_ack_update(args)
         elif args.command == "finish": result = command_finish(args)
         else: raise ValueError(args.command)

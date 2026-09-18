@@ -1,11 +1,12 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 
 const source = path.resolve(process.argv[2])
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tbag-opencode-plugin-test-"))
+const scratchRoot = path.join(process.cwd(), "TBag", "scratch")
+fs.mkdirSync(scratchRoot, { recursive: true })
+const tmp = fs.mkdtempSync(path.join(scratchRoot, "opencode-plugin-test-"))
 fs.writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ type: "module" }))
 const pkg = path.join(tmp, "node_modules", "@opencode-ai", "plugin")
 fs.mkdirSync(pkg, { recursive: true })
@@ -95,6 +96,9 @@ assert.equal(typeof module.default, "function")
 const plugin = await module.default(ctx)
 assert.deepEqual(Object.keys(plugin.tool), ["tbag_follow"], "tbag_follow is the only stable custom tool")
 const context = { sessionID: "ses-main", directory: "/project", worktree: "/project" }
+const runRoot = path.join(tmp, "run")
+fs.mkdirSync(runRoot, { recursive: true })
+fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 // A normal parent tick is the autonomy enrollment event. No explicit tbag_follow
@@ -112,11 +116,11 @@ assert.ok(transport.parent_sessions.some((x) => x.session_id === "ses-auto" && x
 function launchPayload(task, suffix = task) {
   return {
     status: "started",
-    run_root: "/run",
+    run_root: runRoot,
     phase_id: "P",
     task_id: task,
     role: "implementer",
-    event_dir: `/run/attempts/${suffix}`,
+    event_dir: path.join(runRoot, "attempts", suffix),
   }
 }
 function launchHookInput(sessionID, task) {
@@ -124,7 +128,7 @@ function launchHookInput(sessionID, task) {
     tool: "bash",
     sessionID,
     callID: `call-${task}`,
-    args: { command: `python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id ${task}` },
+    args: { command: `python3 TBag/tools/dsd_attempt.py launch --run-root "${runRoot}" --phase-id P --task-id ${task}` },
   }
 }
 function toolOutput(payload) {
@@ -156,7 +160,7 @@ await plugin.event({ event: { type: "session.idle", properties: { sessionID: "se
 await tick()
 assert.equal(prompts.length, 1)
 assert.match(prompts[0].body.parts[0].text, /parent_tick\.py tick/)
-assert.match(prompts[0].body.parts[0].text, /tbag_follow/)
+assert.match(prompts[0].body.parts[0].text, /T-BAG completion wake/)
 assert.doesNotMatch(prompts[0].body.parts[0].text, /immediately call tbag_follow/)
 assert.doesNotMatch(prompts[0].body.parts[0].text, /tbag_launch/)
 
@@ -218,6 +222,20 @@ await plugin.event({ event: { type: "session.status", properties: { sessionID: "
 await tick()
 assert.equal(prompts.length, wakeFailBefore + 2, "later host transition may retry the disposable wake")
 
+// Quiescent durable states suppress even a real observer completion. This is the
+// token-saving contract: waiting/paused/ended means no generated parent turn.
+const quiet = launchPayload("TQUIET")
+await plugin.tool.tbag_follow.execute(quiet, { ...context, sessionID: "ses-quiet" })
+const quietObserver = observers.at(-1)
+fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "human-blocked" }))
+const quietPromptsBefore = prompts.length
+quietObserver.resolve(0)
+await tick()
+await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses-quiet" } } })
+await tick()
+assert.equal(prompts.length, quietPromptsBefore, "human-blocked run must suppress observer wake delivery")
+fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
+
 // Current OpenCode session.deleted payload carries the deleted session under info.id.
 // Late observer completion must not attempt to wake that deleted parent.
 const doomed = launchPayload("TDELETE")
@@ -232,12 +250,12 @@ assert.equal(prompts.length, deletePromptsBefore)
 // Direct normal core launch is legal; only foreground core follow is blocked.
 await plugin["tool.execute.before"](
   { tool: "bash", sessionID: "ses-main", callID: "launch-ok" },
-  { args: { command: 'python3 "TBag/tools/dsd_attempt.py" launch --run-root /run --phase-id P --task-id T3' } },
+  { args: { command: `python3 "TBag/tools/dsd_attempt.py" launch --run-root "${runRoot}" --phase-id P --task-id T3` } },
 )
 await assert.rejects(
   () => plugin["tool.execute.before"](
     { tool: "bash", sessionID: "ses-main", callID: "follow-bad" },
-    { args: { command: "python3 'TBag/tools/dsd_attempt.py' follow --run-root /run --phase-id P --task-id T1" } },
+    { args: { command: `python3 'TBag/tools/dsd_attempt.py' follow --run-root "${runRoot}" --phase-id P --task-id T1` } },
   ),
   /foreground dsd_attempt\.py follow/,
 )
@@ -245,13 +263,13 @@ await assert.rejects(
 
 // RC55: before hook backgrounds launch preparation without asking the parent to learn
 // another command, and combined stdout may contain more than one structured launch.
-const bgCall={ tool:"bash", sessionID:"ses-bg", callID:"bg", args:{ command:"python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id B1" } }
+const bgCall={ tool:"bash", sessionID:"ses-bg", callID:"bg", args:{ command:`python3 TBag/tools/dsd_attempt.py launch --run-root "${runRoot}" --phase-id P --task-id B1` } }
 const bgOut={ args:{...bgCall.args} }
 await plugin["tool.execute.before"](bgCall,bgOut)
 assert.match(bgOut.args.command,/--background-prepare/)
 const combined=[JSON.stringify(launchPayload("M1")),"noise",JSON.stringify(launchPayload("M2"))].join("\n")
 const beforeMulti=spawnCalls.filter((x)=>x[2]==="follow").length
-await plugin["tool.execute.after"]({tool:"bash",sessionID:"ses-multi",callID:"multi",args:{command:"python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id M1; python3 TBag/tools/dsd_attempt.py launch --run-root /run --phase-id P --task-id M2"}},{title:"bash",output:combined,metadata:{}})
+await plugin["tool.execute.after"]({tool:"bash",sessionID:"ses-multi",callID:"multi",args:{command:`python3 TBag/tools/dsd_attempt.py launch --run-root "${runRoot}" --phase-id P --task-id M1; python3 TBag/tools/dsd_attempt.py launch --run-root "${runRoot}" --phase-id P --task-id M2`}},{title:"bash",output:combined,metadata:{}})
 assert.equal(spawnCalls.filter((x)=>x[2]==="follow").length,beforeMulti+2,"combined launch stdout must arm every structured launch")
 
 fs.rmSync(tmp, { recursive: true, force: true })

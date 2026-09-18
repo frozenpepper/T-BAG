@@ -313,13 +313,13 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         "tui_config_backup": str(tui_config_backup) if tui_config_backup else None,
         "status_surface": status_surface,
         "interactive_supervision": "detached-core-launch; optional-tbag-follow-rearm",
-        "autonomous_supervision": "first-parent-tick-auto-enrolls-heartbeat-plus-launch-auto-arm",
+        "autonomous_supervision": "two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm",
         "live_probe_tool": None if major == 2 else "tbag_follow",
         "live_capability_verified": False,
         "activation": "restart-required-to-load-refreshed-adapter" if changed else "disk-current-live-registry-unverified",
         "legacy_plugin_removed": legacy_removed,
         "stale_v1_companion_removed": stale_v1_removed,
-        "manual_step": "The installer proves only the project adapter file on disk plus project TUI config; it cannot inspect the current OpenCode plugin registry or prove transport/presentation live. " + presentation_note + " Once the server adapter is live, the first normal TBag/tools/parent_tick.py tick automatically enrolls the current session/run in heartbeat supervision; no separate heartbeat setup is required. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
+        "manual_step": "The installer proves only the project adapter file on disk plus project TUI config; it cannot inspect the current OpenCode plugin registry or prove transport/presentation live. " + presentation_note + " Once the server adapter is live, a normal parent tick/launch enrolls two-lane supervision: a 60-second deterministic completion pulse plus a slower parent health heartbeat; no separate heartbeat setup is required. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
     })
     return result
 
