@@ -30,9 +30,11 @@ class RC55SimplificationTests(unittest.TestCase):
 
     def test_opencode_adapter_has_no_whole_stdout_json_parse_contract(self):
         source=(ROOT/"adapters/opencode/tbag.js").read_text()
-        self.assertIn("function structuredObjects",source)
+        core=(ROOT/"adapters/tbag-opencode-transport-core.js").read_text()
+        self.assertIn("function structuredObjects",core)
         self.assertIn("backgroundLaunchCommand",source)
         self.assertIn("repairObserversFromTick",source)
+        self.assertIn("../tbag-opencode-transport-core.js",source)
         self.assertNotIn("function launchResultFromToolOutput",source)
 
 if __name__ == '__main__': unittest.main()

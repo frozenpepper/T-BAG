@@ -59,5 +59,18 @@ class RC59FieldFixTests(unittest.TestCase):
         self.assertIn("--harness opencode", opencode)
 
 
+    def test_carry_index_temp_is_project_local(self):
+        source=(ROOT/"scripts"/"dsd_task.py").read_text()
+        self.assertIn('TemporaryDirectory(prefix="carry-index-",dir=str(scratch_root))',source)
+        self.assertNotIn('TemporaryDirectory(prefix="carry-index-")',source)
+
+    def test_v2_uses_execution_lifecycle_not_v1_idle_as_primary(self):
+        source=(ROOT/"adapters"/"opencode"/"tbag-v2.js").read_text()
+        self.assertIn('"session.execution.started"',source)
+        self.assertIn('"session.execution.succeeded"',source)
+        self.assertIn('"session.execution.failed"',source)
+        self.assertIn('"session.execution.interrupted"',source)
+
+
 if __name__ == "__main__":
     unittest.main()

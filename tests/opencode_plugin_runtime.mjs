@@ -22,8 +22,11 @@ export const tool = Object.assign((definition) => definition, {
   },
 })
 `)
-const pluginCopy = path.join(tmp, "tbag.js")
+const pluginDir = path.join(tmp, "plugins")
+fs.mkdirSync(pluginDir, { recursive: true })
+const pluginCopy = path.join(pluginDir, "tbag.js")
 fs.copyFileSync(source, pluginCopy)
+fs.copyFileSync(path.resolve(path.dirname(source), "..", "tbag-opencode-transport-core.js"), path.join(tmp, "tbag-opencode-transport-core.js"))
 
 const encoder = new TextEncoder()
 const syncCalls = []
@@ -234,6 +237,8 @@ await tick()
 await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses-quiet" } } })
 await tick()
 assert.equal(prompts.length, quietPromptsBefore, "human-blocked run must suppress observer wake delivery")
+const quietRegistry = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.ok(!quietRegistry.parent_sessions.some((x) => x.session_id === "ses-quiet"), "human-blocked run must be unenrolled immediately")
 fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
 
 // Current OpenCode session.deleted payload carries the deleted session under info.id.

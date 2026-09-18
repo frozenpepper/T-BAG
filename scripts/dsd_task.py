@@ -954,7 +954,8 @@ def snapshot_carry_delta(run: Path, phase: str, source_task: str, destination: P
 def inspect_carry_delta(run: Path, phase: str, source_task: str) -> dict[str, Any]:
     """Inspect predecessor movement since its task baseline without mutating durable state."""
     ws=_carry_workspace(run,phase,source_task); worktree=Path(ws["worktree"]).resolve(); baseline=str(ws["baseline_branch"])
-    with tempfile.TemporaryDirectory(prefix="carry-index-") as tmp:
+    scratch_root=run/"scratch"; scratch_root.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="carry-index-",dir=str(scratch_root)) as tmp:
         index=Path(tmp)/"index"; env=os.environ.copy(); env["GIT_INDEX_FILE"]=str(index)
         def git_bytes(*argv: str, check: bool=True) -> subprocess.CompletedProcess[bytes]:
             cp=subprocess.run(["git",*argv],cwd=worktree,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)

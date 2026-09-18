@@ -146,10 +146,10 @@ def completion_candidate(state: dict[str, Any]) -> bool:
 
 
 def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
-    """Cheap read-only heartbeat probe.
+    """Cheap read-only transport probe: did a started attempt stop executing?
 
-    Safe to run every minute: no task advancement, launch, retirement, or model call.
-    Transport wakes the parent only when durable state says a worker attempt finished.
+    This intentionally does *not* reconcile scheduling, readiness, Human blocks,
+    recovery policy, or project completion. Those semantics belong to ``tick``.
     """
     run = args.run_root.resolve()
     info = dsd_task.load_run(run)
@@ -168,27 +168,48 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
     if status == "human-blocked":
         return {**base, "heartbeat_state": "waiting", "reason": "human-decision-pending"}
 
-    state = reconcile(run, getattr(args, "phase_id", None), sweep=False)
-    actions = [x for x in (state.get("first_useful_actions") or []) if isinstance(x, dict)]
-    finished = [x for x in actions if str(x.get("action") or "") == "gate-finished-attempt"]
-    live = list(state.get("live_attempts") or [])
-    if finished:
+    live: list[dict[str, Any]] = []
+    stopped: list[dict[str, Any]] = []
+    for task in dsd_task.iter_run_tasks(run):
+        attempts = [item for item in task.get("attempts", []) if isinstance(item, dict)]
+        if not attempts:
+            continue
+        attempt = attempts[-1]
+        if str(attempt.get("status") or "") != "started":
+            continue
+        event = Path(str(attempt.get("event_dir") or ""))
+        terminal = bool(event.is_dir() and (event / "terminal.json").is_file())
+        item = {
+            "phase_id": task.get("phase_id"),
+            "task_id": task.get("task_id"),
+            "event_dir": attempt.get("event_dir"),
+            "terminal_present": terminal,
+        }
+        if terminal or not dsd_task.attempt_is_live(attempt):
+            stopped.append(item)
+        else:
+            live.append(item)
+
+    if stopped:
         return {
             **base,
             "heartbeat_state": "running",
             "wake_parent": True,
-            "reason": "attempt-finished",
-            "completed_attempts": [{
-                "phase_id": item.get("phase_id"),
-                "task_id": item.get("task_id"),
-                "event_dir": item.get("event_dir"),
-            } for item in finished],
+            "reason": "attempt-stopped",
+            "stopped_attempts": stopped,
         }
     if live:
-        return {**base, "heartbeat_state": "running", "reason": "workers-still-running", "live_count": len(live)}
-    if state.get("human_blocks"):
-        return {**base, "heartbeat_state": "waiting", "reason": "human-decision-pending"}
-    return {**base, "heartbeat_state": "idle-recovery", "reason": "no-live-worker-needs-periodic-health-check"}
+        return {
+            **base,
+            "heartbeat_state": "running",
+            "reason": "workers-still-running",
+            "live_count": len(live),
+        }
+    return {
+        **base,
+        "heartbeat_state": "idle-recovery",
+        "reason": "no-started-attempt-is-running",
+    }
 
 
 def owner_signature(state: dict[str, Any], monitors: list[dict[str, Any]], classification: str) -> str:
@@ -411,9 +432,6 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     if run_status != "active":
         classification = f"run-{run_status}"
         turn = "terminal" if run_status in {"completed", "abandoned"} else "owner"
-    elif state.get("human_blocks") and not pending and not live_now:
-        classification = "awaiting-owner"
-        turn = "owner"
     elif completion_candidate(state):
         classification = "completion-candidate"
         turn = "finish-or-replan"
@@ -426,6 +444,9 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif live_now:
         classification = "workers-running"
         turn = "yield"
+    elif state.get("human_blocks"):
+        classification = "awaiting-owner"
+        turn = "owner"
     else:
         classification = "active-idle"
         turn = "intervene"

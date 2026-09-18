@@ -16,7 +16,7 @@ Parent diagnostics also obey the top-level `SKILL.md` project-local scratch boun
 
 The installer proves the **file on disk**, not the live OpenCode tool registry; it additionally reports the project TUI config it changed. Restart/reload OpenCode after adapter or companion changes. Server transport is versioned too: OpenCode 1 receives the legacy V1 hook adapter; OpenCode 2 receives the native `id` + `setup(ctx)` adapter. The two implementations are not interchangeable. `live_capability_verified=false` is intentional until the running host proves activation.
 
-The project plugin may expose **`tbag_follow`** as a diagnostic tool, but normal autonomy does not depend on that custom tool being present. The first normal `parent_tick.py tick` enrolls heartbeat supervision; every tick also lets the adapter rediscover and re-arm missing live observers from durable attempt state.
+The V1 project plugin may expose **`tbag_follow`** as a diagnostic tool, but normal autonomy does not depend on that custom tool being present. A normal active `parent_tick.py tick` or worker launch enrolls supervision; every tick also lets the adapter rediscover and re-arm missing live observers from durable attempt state. V2 uses its native setup/domain-hook adapter and `session.execution.*` lifecycle.
 
 If `tbag_follow` is absent, do not invent a workaround or treat it as a lifecycle blocker. Ordinary Bash hooks can still be live. Tick/launch hooks plus durable state are the normal path; reload the host only when adapter hooks themselves are demonstrably stale.
 
@@ -36,7 +36,7 @@ The model still chooses semantic work. The adapter only supplies disposable wake
 
 ## Automatic enrollment and observer arm
 
-The current adapter owns wake setup mechanically. Before a normal parent `parent_tick.py tick` or `dsd_attempt.py launch` executes, the plugin extracts `--run-root` and enrolls that OpenCode session/run in the low-frequency heartbeat. After a successful structured launch, `tool.execute.after` also arms the exact recorded attempt observer before the launch output returns to the model.
+The current adapter owns wake setup mechanically. Before a normal active parent `parent_tick.py tick` or `dsd_attempt.py launch` executes, the plugin extracts `--run-root` and enrolls that OpenCode session/run in supervision. After a successful structured launch, `tool.execute.after` also arms the exact recorded attempt observer before the launch output returns to the model.
 
 Therefore:
 
@@ -56,7 +56,7 @@ Credential/config rotation is not assumed to hot-reload inside an already-runnin
 
 OpenCode session lifecycle events are used only as a thin transport interlock. If an observer finishes while the parent is still busy, the plugin coalesces one **in-memory wake bit** for that session and flushes it when OpenCode reports idle (or releases the busy turn on a terminal session error). A completion that races the wake-generated parent turn receives one final non-blocking flush when that turn releases.
 
-Wake state is disposable. Per-attempt wakes are only fast hints; the 60-second completion pulse recovers a lost completion wake without spending parent-model tokens, and the slower health lane recovers broader orchestration drift. `human-blocked` and `paused-by-user` suspend both lanes; `completed` and `abandoned` end them. Recording a Human escalation decision automatically reactivates `human-blocked`; an explicit pause requires explicit `set-run-status active`. A subsequent tick/worker launch re-enrolls transport automatically.
+Wake state is disposable. Per-attempt wakes are the primary completion edge; the 60-second deterministic attempt-liveness pulse recovers a lost completion wake without spending parent-model tokens, and the slower health lane recovers broader orchestration drift. `human-blocked` and `paused-by-user` suspend both lanes; `completed` and `abandoned` end them. Recording a Human escalation decision automatically reactivates `human-blocked`; an explicit pause requires explicit `set-run-status active`. A subsequent tick/worker launch re-enrolls transport automatically.
 
 The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists semantic notification state.
 

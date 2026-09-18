@@ -4,7 +4,7 @@ Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HA
 
 **Normal rule:** semantic routing belongs to the worker report. `parent_tick.py tick` records explicit routing tokens automatically. Manual result commands record that same decision; `--outcome ...` is only a compatibility fallback for an older/tokenless report.
 
-**OpenCode parent:** run the normal parent tick and detached core launch. The live plugin auto-enrolls heartbeat supervision on tick and auto-arms structured launches; use `tbag_follow` only when tick requests re-arm/recovery.
+**OpenCode parent:** tick + detached launch. Auto-arm gives immediate completion wake; 60s deterministic + slower health fallbacks recover misses. Waiting/paused/ended runs are unenrolled. V1 `tbag_follow` is diagnostics/re-arm only.
 
 ## Parent tick / turn boundary
 

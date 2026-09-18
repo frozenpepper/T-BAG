@@ -1,4 +1,18 @@
-import { readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs"
+import { mkdirSync, writeFileSync, renameSync } from "node:fs"
+import {
+  COMPLETION_PULSE_MS,
+  HEALTH_HEARTBEAT_MS,
+  backgroundLaunchCommand,
+  commandArg,
+  createHeartbeatRegistry,
+  createWakeQueue,
+  decode,
+  isCoreAttemptCommand,
+  isParentTickCommand,
+  startHeartbeatTimers,
+  structuredObjects,
+  wakeText,
+} from "../tbag-opencode-transport-core.js"
 
 // OpenCode 2 server adapter. Durable T-BAG state remains authoritative; this file
 // owns only disposable wake/observer transport for the current host process.
@@ -12,12 +26,6 @@ const pendingWakeKinds = new Map()
 const wakeInflightSessions = new Set()
 const deletedSessions = new Set()
 let observerGeneration = 0
-const COMPLETION_PULSE_MS = Math.max(60_000, Number(process.env.TBAG_COMPLETION_PULSE_MS || 60_000))
-const HEALTH_HEARTBEAT_MS = Math.max(
-  COMPLETION_PULSE_MS,
-  Number(process.env.TBAG_PARENT_HEALTH_HEARTBEAT_MS || process.env.TBAG_PARENT_HEARTBEAT_MS || 900_000),
-)
-
 function projectRoot(ctx) {
   return ctx.location?.project?.canonical || ctx.location?.project?.directory || ctx.location?.directory
 }
@@ -63,6 +71,20 @@ function persistTransport(runRoot) {
   }
 }
 
+const {
+  durableHeartbeatState,
+  registerRunHeartbeat,
+  removeRunHeartbeat,
+  sessionHasRunnableHeartbeat,
+  pruneQuiescentHeartbeats,
+  syncHeartbeatFromTick,
+} = createHeartbeatRegistry({
+  runHeartbeats,
+  pendingWakeSessions,
+  pendingWakeKinds,
+  persistTransport,
+})
+
 function followKey(sessionID, args) {
   return [sessionID, args.run_root, args.phase_id, args.task_id, args.event_dir].join("\u0000")
 }
@@ -75,10 +97,6 @@ function attemptCli(root, args, command) {
     "--task-id", args.task_id,
     ...(args.event_dir ? ["--event-dir", args.event_dir] : []),
   ]
-}
-
-function decode(value) {
-  return new TextDecoder().decode(value || new Uint8Array()).trim()
 }
 
 function checkedSync(argv, label) {
@@ -95,80 +113,14 @@ function validateAttempt(root, args) {
   try { return JSON.parse(text) } catch (_) { return { state: "unknown" } }
 }
 
-function heartbeatKey(sessionID, runRoot) { return `${sessionID}\u0000${runRoot}` }
-
-function heartbeatStateForStatus(status) {
-  if (status === "human-blocked") return "waiting"
-  if (status === "paused-by-user") return "paused"
-  if (status === "completed" || status === "abandoned") return "ended"
-  return "running"
-}
-
-function durableHeartbeatState(runRoot) {
-  try {
-    const status = JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8")).status
-    return heartbeatStateForStatus(status)
-  } catch (_) {
-    return "idle-recovery"
-  }
-}
-
-function registerRunHeartbeat(sessionID, args) {
-  if (!sessionID || !args?.run_root) return
-  const key = heartbeatKey(sessionID, args.run_root)
-  const prior = runHeartbeats.get(key)
-  const stamp = Date.now()
-  runHeartbeats.set(key, {
-    sessionID,
-    run_root: args.run_root,
-    lastQueuedAt: stamp,
-    lastCompletionProbeAt: prior?.lastCompletionProbeAt || 0,
-    lastHealthWakeAt: stamp,
-    heartbeatState: durableHeartbeatState(args.run_root),
-  })
-  persistTransport(args.run_root)
-}
-
-function commandArg(command, name) {
-  const text = String(command || "")
-  const marker = `--${name}`
-  const index = text.indexOf(marker)
-  if (index < 0) return null
-  let rest = text.slice(index + marker.length).trimStart()
-  if (!rest) return null
-  const quote = rest[0]
-  if (quote === '"' || quote === "'") {
-    const end = rest.indexOf(quote, 1)
-    return end > 0 ? rest.slice(1, end) : null
-  }
-  return rest.split(/\s/, 1)[0] || null
-}
-
-function isCoreAttemptCommand(command, subcommand) {
-  return new RegExp(`dsd_attempt\\.py["']?\\s+${subcommand}(?:\\s|$)`).test(String(command || ""))
-}
-
-function isParentTickCommand(command) {
-  return /parent_tick\.py["']?\s+tick(?:\s|$)/.test(String(command || ""))
-}
-
-function backgroundLaunchCommand(command) {
-  return String(command || "").replace(/(dsd_attempt\.py["']?\s+launch)(?!\s+--background-prepare)/g, "$1 --background-prepare")
-}
-
 function enrollHeartbeatFromCommand(sessionID, command) {
   if (!sessionID) return false
   if (!isParentTickCommand(command) && !isCoreAttemptCommand(command, "launch")) return false
   const runRoot = commandArg(command, "run-root")
   if (!runRoot) return false
   deletedSessions.delete(sessionID)
-  busySessions.add(sessionID)
   registerRunHeartbeat(sessionID, { run_root: runRoot })
   return true
-}
-
-function runIsActive(runRoot) {
-  return durableHeartbeatState(runRoot) === "running"
 }
 
 function pulseRun(root, runRoot) {
@@ -185,14 +137,6 @@ function pulseRun(root, runRoot) {
   }
 }
 
-function sessionHasRunnableHeartbeat(sessionID) {
-  return [...runHeartbeats.values()].some((item) =>
-    item.sessionID === sessionID
-    && ["running", "idle-recovery"].includes(item.heartbeatState)
-    && runIsActive(item.run_root)
-  )
-}
-
 function spawnObserver(root, args) {
   return Bun.spawn(attemptCli(root, args, "follow"), { stdout: "ignore", stderr: "ignore" })
 }
@@ -201,70 +145,21 @@ function logError(message, extra = {}) {
   try { console.error(`[T-BAG] ${message}`, extra) } catch (_) {}
 }
 
-function wakeText(kind = "completion") {
-  if (kind === "health") {
-    return [
-      "[T-BAG health heartbeat]",
-      "This is a periodic orchestration checkup; no worker completion is implied.",
-      "Run one parent_tick.py tick now and use that packet as the canonical parent turn boundary.",
-      "If the tick says workers-running, yield again. Do not manufacture work or user updates.",
-    ].join("\n")
-  }
-  return [
-    "[T-BAG completion wake]",
-    "A worker/lifecycle transition was detected by an observer or the deterministic completion pulse.",
-    "Run one parent_tick.py tick now and use that packet as the canonical parent turn boundary.",
-    "For new attempts run the normal detached dsd_attempt.py launch, then yield.",
-  ].join("\n")
-}
-
 async function wakeParent(ctx, sessionID, kind) {
   await ctx.session.prompt({ sessionID, text: wakeText(kind) })
 }
 
-async function flushPendingWake(ctx, sessionID) {
-  if (deletedSessions.has(sessionID)) {
-    pendingWakeSessions.delete(sessionID)
-    return
-  }
-  if (!pendingWakeSessions.has(sessionID)) return
-  if (busySessions.has(sessionID) || wakeInflightSessions.has(sessionID)) return
-  if (!sessionHasRunnableHeartbeat(sessionID)) {
-    pendingWakeSessions.delete(sessionID)
-    pendingWakeKinds.delete(sessionID)
-    return
-  }
-
-  const kind = pendingWakeKinds.get(sessionID) || "completion"
-  pendingWakeSessions.delete(sessionID)
-  pendingWakeKinds.delete(sessionID)
-  wakeInflightSessions.add(sessionID)
-  let delivered = false
-  try {
-    await wakeParent(ctx, sessionID, kind)
-    delivered = true
-  } catch (error) {
-    pendingWakeSessions.add(sessionID)
-    if (!pendingWakeKinds.has(sessionID)) pendingWakeKinds.set(sessionID, kind)
-    logError("parent wake failed; durable state will reconcile on the next owner turn", {
-      session_id: sessionID,
-      error: String(error?.stack || error),
-    })
-  } finally {
-    wakeInflightSessions.delete(sessionID)
-    if (delivered && pendingWakeSessions.has(sessionID) && !busySessions.has(sessionID) && !deletedSessions.has(sessionID)) {
-      void flushPendingWake(ctx, sessionID)
-    }
-  }
-}
-
-function queueWake(ctx, sessionID, kind = "completion") {
-  if (!sessionID || deletedSessions.has(sessionID)) return
-  const prior = pendingWakeKinds.get(sessionID)
-  if (kind === "completion" || !prior) pendingWakeKinds.set(sessionID, kind)
-  pendingWakeSessions.add(sessionID)
-  void flushPendingWake(ctx, sessionID)
-}
+const { flushPendingWake, queueWake } = createWakeQueue({
+  pendingWakeSessions,
+  pendingWakeKinds,
+  wakeInflightSessions,
+  deletedSessions,
+  busySessions,
+  pruneQuiescentHeartbeats,
+  sessionHasRunnableHeartbeat,
+  wakeParent,
+  logError: (_ctx, message, extra) => logError(message, extra),
+})
 
 function armAttempt(ctx, sessionID, root, args, validate = true) {
   const key = followKey(sessionID, args)
@@ -295,34 +190,6 @@ function armAttempt(ctx, sessionID, root, args, validate = true) {
     }
   })()
   return { armed: true, already_armed: false, observer_healthy: true, observer_generation: entry.generation }
-}
-
-function structuredObjects(text) {
-  const source = String(text || "")
-  const out = []
-  let start = -1, depth = 0, quoted = false, escaped = false
-  for (let i = 0; i < source.length; i++) {
-    const ch = source[i]
-    if (quoted) {
-      if (escaped) escaped = false
-      else if (ch === "\\") escaped = true
-      else if (ch === '"') quoted = false
-      continue
-    }
-    if (ch === '"') { quoted = true; continue }
-    if (ch === '{') { if (depth === 0) start = i; depth++; continue }
-    if (ch === '}' && depth > 0) {
-      depth--
-      if (depth === 0 && start >= 0) {
-        try {
-          const value = JSON.parse(source.slice(start, i + 1))
-          if (value && typeof value === "object" && !Array.isArray(value)) out.push(value)
-        } catch (_) {}
-        start = -1
-      }
-    }
-  }
-  return out
 }
 
 function resultText(result) {
@@ -412,21 +279,6 @@ function repairObserversFromTick(ctx, sessionID, root, command, text) {
   persistTransport(runRoot)
 }
 
-function syncHeartbeatFromTick(sessionID, command, text) {
-  const runRoot = commandArg(command, "run-root")
-  if (!runRoot || !sessionID) return
-  const item = runHeartbeats.get(heartbeatKey(sessionID, runRoot))
-  if (!item) return
-  const packet = structuredObjects(text).find((value) => value?.format === "tbag-parent-loop-v1")
-  if (!packet) return
-  const statusState = heartbeatStateForStatus(packet.run_status)
-  if (statusState !== "running") item.heartbeatState = statusState
-  else if (packet.classification === "awaiting-owner") item.heartbeatState = "waiting"
-  else if (["active-idle", "completion-candidate", "recovery-required"].includes(packet.classification)) item.heartbeatState = "idle-recovery"
-  else item.heartbeatState = "running"
-  persistTransport(runRoot)
-}
-
 function eventSessionID(event) {
   const data = event?.data || event?.properties || {}
   return data.sessionID || data.session_id || data.info?.id || data.session?.id || null
@@ -458,15 +310,25 @@ function markSessionStatus(ctx, event) {
     return
   }
 
+  if (event.type === "session.execution.started") {
+    busySessions.add(sessionID)
+    return
+  }
+  if (["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted"].includes(event.type)) {
+    busySessions.delete(sessionID)
+    void flushPendingWake(ctx, sessionID)
+    return
+  }
+
+  // Compatibility with early V2/V1-shaped hosts. Current V2 does not rely on it.
   const status = data.status?.type || data.status
   if (event.type === "session.idle" || status === "idle" || event.type === "session.error") {
     busySessions.delete(sessionID)
     void flushPendingWake(ctx, sessionID)
     return
   }
-  if (event.type === "session.status") busySessions.add(sessionID)
+  if (event.type === "session.status" && status && status !== "idle") busySessions.add(sessionID)
 }
-
 function checkpointInstruction(root) {
   const script = `${root}/TBag/tools/context_checkpoint.py`
   const result = Bun.spawnSync(["python3", script, "--project-root", root, "instruction"], { stdout: "pipe", stderr: "pipe" })
@@ -489,57 +351,17 @@ const TBagV2Plugin = {
     if (!root) throw new Error("T-BAG OpenCode 2 adapter cannot resolve the project root")
 
     const controller = new AbortController()
-    const completionTimer = setInterval(() => {
-      for (const [key, item] of runHeartbeats) {
-        if (deletedSessions.has(item.sessionID)) {
-          runHeartbeats.delete(key)
-          persistTransport(item.run_root)
-          continue
-        }
-        const durable = durableHeartbeatState(item.run_root)
-        if (durable !== "running") {
-          item.heartbeatState = durable
-          persistTransport(item.run_root)
-          continue
-        }
-        if (item.heartbeatState !== "running") continue
-        const pulse = pulseRun(root, item.run_root)
-        item.lastCompletionProbeAt = Date.now()
-        item.heartbeatState = pulse.heartbeat_state || "idle-recovery"
-        if (pulse.error) {
-          transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse failed: ${pulse.error}` })
-        } else if (pulse.wake_parent === true) {
-          transportErrors.delete(item.run_root)
-          queueWake(ctx, item.sessionID, "completion")
-        }
-        persistTransport(item.run_root)
-      }
-    }, COMPLETION_PULSE_MS)
-    completionTimer.unref?.()
-
-    const healthTimer = setInterval(() => {
-      const stamp = Date.now()
-      for (const [key, item] of runHeartbeats) {
-        if (deletedSessions.has(item.sessionID)) {
-          runHeartbeats.delete(key)
-          persistTransport(item.run_root)
-          continue
-        }
-        const durable = durableHeartbeatState(item.run_root)
-        if (durable !== "running") {
-          item.heartbeatState = durable
-          persistTransport(item.run_root)
-          continue
-        }
-        if (!["running", "idle-recovery"].includes(item.heartbeatState)) continue
-        if (stamp - item.lastHealthWakeAt < HEALTH_HEARTBEAT_MS) continue
-        item.lastHealthWakeAt = stamp
-        item.lastQueuedAt = stamp
-        persistTransport(item.run_root)
-        queueWake(ctx, item.sessionID, "health")
-      }
-    }, COMPLETION_PULSE_MS)
-    healthTimer.unref?.()
+    const heartbeatTimers = startHeartbeatTimers({
+      host: ctx,
+      runHeartbeats,
+      deletedSessions,
+      durableHeartbeatState,
+      removeRunHeartbeat,
+      pulseRun: (runRoot) => pulseRun(root, runRoot),
+      persistTransport,
+      transportErrors,
+      queueWake,
+    })
 
     await ctx.tool.hook("execute.before", (event) => {
       if (event.tool !== "bash") return
@@ -576,7 +398,6 @@ const TBagV2Plugin = {
       for (const launch of results) {
         if (!sessionID) continue
         deletedSessions.delete(sessionID)
-        busySessions.add(sessionID)
         registerRunHeartbeat(sessionID, launch)
         if (launch.status === "preparing") {
           watchPreparation(ctx, sessionID, launch)
@@ -616,8 +437,7 @@ const TBagV2Plugin = {
 
     return () => {
       controller.abort()
-      clearInterval(completionTimer)
-      clearInterval(healthTimer)
+      heartbeatTimers.stop()
       for (const item of preparations.values()) if (item.timer) clearInterval(item.timer)
       preparations.clear()
     }

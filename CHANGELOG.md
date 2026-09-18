@@ -2,6 +2,14 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC61 — wake-path repair and transport-only completion pulse
+
+- Updated the OpenCode 2 parent adapter to the current `session.execution.started/succeeded/failed/interrupted` lifecycle. Tool hooks no longer manufacture a permanent busy bit, so observer completion still wakes when a beta host's `ctx.event.subscribe()` is silent.
+- Reduced the 60-second completion pulse to one transport fact: whether a latest `started` attempt is still executing. A stopped process wakes the parent even when terminal bookkeeping is missing; scheduler/readiness/Human-block semantics remain solely in the parent tick.
+- Waiting, paused and ended runs now unenroll from heartbeat transport instead of being revisited forever. Active runs with no started attempt retain only the slower health recovery lane.
+- Moved carry-delta Git-index scratch under the project run tree and added field-shaped V2 lifecycle tests, including silent-event fallback and Human-wait wake suppression.
+
+
 ## v2.2.0 RC47 — shared harness status surfaces
 
 - Added one host-neutral `tbag_render.py` presentation layer over the existing read-only `tbag_status.py` snapshot. It renders registered-plan/phase progress, active Analyst and Grunt sessions, task purpose, model/session/process/observer/deadline state, gates and attention without gaining lifecycle authority.

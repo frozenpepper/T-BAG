@@ -9,7 +9,7 @@ Durable T-BAG state is the source of truth. Every owner turn, resume or wake re-
 Harness integrations only answer two practical questions: **when should the parent wake up?** and **how should the human see status?** They never gain semantic authority.
 
 - **Claude Code:** one native background `follow` observer per live attempt; a 5-second native status line shows the run-wide read-only dashboard.
-- **OpenCode:** the first normal parent tick auto-enrolls the session/run heartbeat; detached `launch` auto-arms its observer when possible, while `tbag_follow` is only re-arm/diagnostic fallback. The TUI renders the same snapshot and exposes `/tbag`.
+- **OpenCode:** observer completion is primary; a 60-second deterministic probe and slower health wake recover misses. Waiting/paused/ended runs are unenrolled. See `OPENCODE.md`.
 - **Codex:** hooks restore orientation; `tbag_render.py status|watch` provides the live dashboard in a companion terminal pane.
 - **Kilo:** use only its documented adapter surface; if a native wake surface is unavailable, degrade conversation-first rather than inventing a polling daemon.
 

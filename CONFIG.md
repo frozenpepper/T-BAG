@@ -125,7 +125,7 @@ Valid states are `active`, `completed`, `human-blocked`, `paused-by-user`, and `
 
 ## Adapter boundary
 
-The task control plane stores driver separately from model. First-class technical-worker adapters in this release are **OpenCode, OpenCode 2, Codex and Claude Code**. They exist because common mechanics should be precomputed once rather than repeatedly reconstructed by the parent. OpenCode 2 is worker-only for now: its beta plugin/server APIs are breaking changes, so parent-harness support is not claimed by copying the stable OpenCode adapter.
+The task control plane stores driver separately from model. First-class technical-worker adapters in this release are **OpenCode, OpenCode 2, Codex and Claude Code**. They exist because common mechanics should be precomputed once rather than repeatedly reconstructed by the parent. OpenCode 1 and OpenCode 2 also have separate parent-harness adapters: V2 uses its native `setup()`/domain-hook API and execution lifecycle rather than pretending the V1 plugin contract is portable.
 
 That list is not the semantic capability boundary of the skill. If the owner asks for an unusual available CLI/tool and a capable parent can preserve T-BAG's task/report/scope/session contract, the semantic instruction remains meaningful. Repeated paths should be promoted into a first-class adapter after field evidence rather than forcing every future parent to rediscover them. The built-in `dsd_attempt.py launch` path accepts only wired adapters because it promises specific lifecycle evidence; a missing adapter must never silently bypass those invariants.
 

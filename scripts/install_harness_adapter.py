@@ -245,6 +245,10 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         project_root, "opencode", Path(".opencode/plugins/tbag.js"),
         skill_root / "adapters" / "opencode" / transport_source,
     )
+    transport_core = install_plugin_file(
+        project_root, "opencode", Path(".opencode/tbag-opencode-transport-core.js"),
+        skill_root / "adapters" / "tbag-opencode-transport-core.js",
+    )
     ui_results: list[dict[str, Any]] = []
     tui_config: str | None = None
     tui_config_changed = False
@@ -288,6 +292,7 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
     legacy.unlink(missing_ok=True)
     changed = bool(
         result.get("changed")
+        or transport_core.get("changed")
         or any(x.get("changed") for x in ui_results)
         or tui_config_changed
         or stale_v1_removed
@@ -306,6 +311,8 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         "opencode_version": version,
         "opencode_major": major,
         "transport_generation": transport_generation,
+        "transport_core": transport_core.get("plugin"),
+        "transport_core_disk_matches_source": transport_core.get("disk_matches_source"),
         "tui_generation": tui_generation,
         "tui_plugin": [x.get("plugin") for x in ui_results],
         "tui_config": tui_config,

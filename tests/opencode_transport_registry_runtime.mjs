@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 
 const source=path.resolve(process.argv[2])
-const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"tbag-opencode-transport-"))
+const scratchRoot=path.join(process.cwd(),"TBag","scratch"); fs.mkdirSync(scratchRoot,{recursive:true})
+const tmp=fs.mkdtempSync(path.join(scratchRoot,"opencode-transport-"))
 fs.writeFileSync(path.join(tmp,"package.json"),JSON.stringify({type:"module"}))
 const pkg=path.join(tmp,"node_modules","@opencode-ai","plugin")
 fs.mkdirSync(pkg,{recursive:true})
@@ -14,7 +14,9 @@ fs.writeFileSync(path.join(pkg,"index.js"),`
 const scalar=()=>({describe(){return this},optional(){return this}})
 export const tool=Object.assign((definition)=>definition,{schema:{string:scalar,number:scalar,boolean:scalar,array:()=>scalar()}})
 `)
-const pluginCopy=path.join(tmp,"tbag.js"); fs.copyFileSync(source,pluginCopy)
+const pluginDir=path.join(tmp,"plugins"); fs.mkdirSync(pluginDir,{recursive:true})
+const pluginCopy=path.join(pluginDir,"tbag.js"); fs.copyFileSync(source,pluginCopy)
+fs.copyFileSync(path.resolve(path.dirname(source),"..","tbag-opencode-transport-core.js"),path.join(tmp,"tbag-opencode-transport-core.js"))
 const run=path.join(tmp,"run"); fs.mkdirSync(run,{recursive:true}); fs.writeFileSync(path.join(run,"run.json"),JSON.stringify({status:"active"}))
 
 const encoder=new TextEncoder(); let observerResolve

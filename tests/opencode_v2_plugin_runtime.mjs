@@ -1,41 +1,136 @@
 import assert from "node:assert/strict"
+import fs from "node:fs"
+import path from "node:path"
 import { pathToFileURL } from "node:url"
 
-const pluginPath = process.argv[2]
+const pluginPath = path.resolve(process.argv[2])
 assert.ok(pluginPath, "plugin path required")
-const mod = await import(pathToFileURL(pluginPath).href + `?rc56=${Date.now()}`)
-const plugin = mod.default
-assert.equal(plugin.id, "tbag.transport")
-assert.equal(typeof plugin.setup, "function")
+const scratchRoot = path.join(process.cwd(), "TBag", "scratch")
+fs.mkdirSync(scratchRoot, { recursive: true })
+const tmp = fs.mkdtempSync(path.join(scratchRoot, "opencode-v2-runtime-"))
+const runRoot = path.join(tmp, "run")
+fs.mkdirSync(runRoot, { recursive: true })
+fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
 
+const encoder = new TextEncoder()
+const observers = []
+function deferredObserver() {
+  let resolveExit
+  const exited = new Promise((resolve) => { resolveExit = resolve })
+  const item = {
+    pid: 424242 + observers.length,
+    exitCode: null,
+    exited,
+    resolve() { this.exitCode = 0; resolveExit(0) },
+  }
+  observers.push(item)
+  return item
+}
+globalThis.Bun = {
+  spawnSync(argv) {
+    if (argv[2] === "inspect") return { exitCode: 0, stdout: encoder.encode('{"state":"running"}'), stderr: encoder.encode("") }
+    if (argv[2] === "pulse") return { exitCode: 0, stdout: encoder.encode('{"format":"tbag-parent-pulse-v1","heartbeat_state":"running","wake_parent":false}'), stderr: encoder.encode("") }
+    if (argv.some((x) => String(x).includes("context_checkpoint.py"))) return { exitCode: 4, stdout: encoder.encode(""), stderr: encoder.encode("") }
+    throw new Error(`unexpected spawnSync: ${argv.join(" ")}`)
+  },
+  spawn() { return deferredObserver() },
+}
+
+function eventQueue() {
+  const queued = []
+  const waiters = []
+  let done = false
+  return {
+    push(value) {
+      const waiter = waiters.shift()
+      if (waiter) waiter({ value, done: false })
+      else queued.push(value)
+    },
+    close() {
+      done = true
+      while (waiters.length) waiters.shift()({ value: undefined, done: true })
+    },
+    stream: {
+      [Symbol.asyncIterator]() { return this },
+      next() {
+        if (queued.length) return Promise.resolve({ value: queued.shift(), done: false })
+        if (done) return Promise.resolve({ value: undefined, done: true })
+        return new Promise((resolve) => waiters.push(resolve))
+      },
+    },
+  }
+}
+
+const events = eventQueue()
 const toolHooks = new Map()
 const sessionHooks = new Map()
-let subscribed = false
-const registration = { dispose: async () => {} }
+const prompts = []
 const ctx = {
-  location: { directory: process.cwd(), project: { canonical: process.cwd() } },
-  tool: {
-    hook: async (name, fn) => { toolHooks.set(name, fn); return registration },
-  },
+  location: { directory: tmp, project: { canonical: tmp } },
+  tool: { hook: async (name, fn) => { toolHooks.set(name, fn); return { dispose: async () => {} } } },
   session: {
-    hook: async (name, fn) => { sessionHooks.set(name, fn); return registration },
-    prompt: async () => ({}),
+    hook: async (name, fn) => { sessionHooks.set(name, fn); return { dispose: async () => {} } },
+    prompt: async (request) => { prompts.push(request); return {} },
   },
-  event: {
-    subscribe() {
-      subscribed = true
-      return { async *[Symbol.asyncIterator]() {} }
-    },
-  },
+  event: { subscribe() { return events.stream } },
 }
+
+const mod = await import(pathToFileURL(pluginPath).href + `?rc61=${Date.now()}`)
+const plugin = mod.default
+assert.equal(plugin.id, "tbag.transport")
 const cleanup = await plugin.setup(ctx)
 assert.equal(typeof cleanup, "function")
-assert.equal(typeof toolHooks.get("execute.before"), "function")
-assert.equal(typeof toolHooks.get("execute.after"), "function")
+const before = toolHooks.get("execute.before")
+const after = toolHooks.get("execute.after")
+assert.equal(typeof before, "function")
+assert.equal(typeof after, "function")
 assert.equal(typeof sessionHooks.get("compaction"), "function")
-await toolHooks.get("execute.before")({ tool: "read", sessionID: "ses-test", input: {} })
-await toolHooks.get("execute.after")({ tool: "read", sessionID: "ses-test", status: "completed", input: {}, result: { content: "ok" } })
-await new Promise((resolve) => setImmediate(resolve))
-assert.equal(subscribed, true)
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+function launchCommand(task) {
+  return `python3 TBag/tools/dsd_attempt.py launch --run-root "${runRoot}" --phase-id P --task-id ${task}`
+}
+function launchResult(task) {
+  return { status: "started", run_root: runRoot, phase_id: "P", task_id: task, role: "implementer", event_dir: path.join(runRoot, `event-${task}`) }
+}
+
+// Current V2 lifecycle: execution.started marks busy; completion coalesces until
+// execution.succeeded releases the same parent session.
+await before({ tool: "bash", sessionID: "ses-v2", input: { command: launchCommand("T1") } })
+events.push({ type: "session.execution.started", data: { sessionID: "ses-v2" } })
+await tick()
+await after({ tool: "bash", sessionID: "ses-v2", status: "completed", input: { command: launchCommand("T1") }, result: JSON.stringify(launchResult("T1")) })
+assert.equal(observers.length, 1)
+observers[0].resolve()
+await tick()
+assert.equal(prompts.length, 0)
+events.push({ type: "session.execution.succeeded", data: { sessionID: "ses-v2" } })
+await tick(); await tick()
+assert.equal(prompts.length, 1)
+assert.match(prompts[0].text, /T-BAG completion wake/)
+assert.match(prompts[0].text, /parent_tick\.py tick/)
+
+// If ctx.event.subscribe silently delivers nothing, T-BAG tool hooks do not
+// manufacture a permanent busy bit. Observer completion still wakes the parent.
+await before({ tool: "bash", sessionID: "ses-no-events", input: { command: launchCommand("T2") } })
+await after({ tool: "bash", sessionID: "ses-no-events", status: "completed", input: { command: launchCommand("T2") }, result: JSON.stringify(launchResult("T2")) })
+observers.at(-1).resolve()
+await tick(); await tick()
+assert.equal(prompts.length, 2, "observer completion must wake when V2 event delivery is silent")
+
+// Durable Human wait suppresses a late wake and removes the run registration.
+fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
+await before({ tool: "bash", sessionID: "ses-quiet", input: { command: launchCommand("TQ") } })
+await after({ tool: "bash", sessionID: "ses-quiet", status: "completed", input: { command: launchCommand("TQ") }, result: JSON.stringify(launchResult("TQ")) })
+fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "human-blocked" }))
+const beforeQuiet = prompts.length
+observers.at(-1).resolve()
+await tick(); await tick()
+assert.equal(prompts.length, beforeQuiet)
+const registry = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.ok(!registry.parent_sessions.some((x) => x.session_id === "ses-quiet"), "quiescent run must be unenrolled")
+
+events.close()
 cleanup()
+fs.rmSync(tmp, { recursive: true, force: true })
 console.log("OPENCODE_V2_PLUGIN_RUNTIME_PASS")
