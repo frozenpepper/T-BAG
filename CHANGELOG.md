@@ -2,6 +2,13 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC62 — bounded disk use and dependency reuse
+
+- Replaced per-attempt npm/Node compile caches with project-local shared caches under `PROJECT/TBag/cache` while keeping genuine temporary files attempt-local. Terminal/stale attempt `scratch/` is now reclaimed automatically without deleting reports, logs, gates or terminal evidence.
+- Activated the existing dependency fixture store automatically for npm installs only when tracked `package-lock.json`, npm's hidden installation lock and the actual package-folder set agree. Mutable rooms receive private CoW clones; uncertain/stale installs fall back to ordinary installation using the shared download cache.
+- Added `archive-run` for conservative in-place compaction of completed/abandoned runs and `disk-usage` diagnostics. Parent ticks sample owned disk surfaces on a bounded cadence and expose growth without touching other projects' shared legacy cache.
+- Worker guidance now reuses provisioned dependencies rather than reinstalling unchanged trees; Codex receives the exact launcher cache directory as an authorized writable sandbox path.
+
 ## v2.2.0 RC61 — wake-path repair and transport-only completion pulse
 
 - Updated the OpenCode 2 parent adapter to the current `session.execution.started/succeeded/failed/interrupted` lifecycle. Tool hooks no longer manufacture a permanent busy bit, so observer completion still wakes when a beta host's `ctx.event.subscribe()` is silent.

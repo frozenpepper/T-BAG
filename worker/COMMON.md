@@ -4,11 +4,12 @@ You are one specialist on one T-BAG task. The **task brief + typed governing/own
 
 ## Hard boundaries
 
-**Filesystem:** evidence/scratch stays under launcher-supplied attempt/run paths; never use system `/tmp`, home caches or external paths unless explicitly authorized.
+**Filesystem:** use only assigned project/attempt paths and launcher cache paths; never system temp/home caches unless explicitly authorized.
 
 - Work only in the assigned project view. Mutating roles get an isolated worktree; read-only roles inspect a shared frozen project view. Do not jump to primary/sibling checkouts.
 - Read-only roles never modify project state. Implementer/Fixer own routine engineering choices inside an established direction. Verification may write only when its brief explicitly grants a narrow write boundary.
 - Never edit task briefs, run rules, authoritative plans, or another task's control artifacts.
+- Reuse provisioned `node_modules`; reinstall only if missing/stale or lockfile changed. Use launcher caches.
 - `Allowed source changes`, when present, is a hard boundary. Declared worktree fixtures are inputs, not integrated outputs. Missing undeclared local inputs are a blocker, not permission to recreate/guess them. If failures are wholly in untouched prerequisite/baseline code, establish that they predate your delta when possible and report `BLOCKED: inconsistent baseline` instead of repairing unrelated code.
 - Accepted reports/findings are evidence, not new authority.
 

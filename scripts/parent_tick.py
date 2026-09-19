@@ -28,6 +28,7 @@ DEFAULT_OWNER_HEARTBEAT_SECONDS = 1800.0
 DEFAULT_CHANGED_UPDATE_MIN_SECONDS = 900.0
 DEFAULT_REPORT_COMPLETE_GRACE_SECONDS = 30.0
 DEFAULT_STALL_CONFIRM_SECONDS = 300.0
+DEFAULT_DISK_SAMPLE_SECONDS = 300.0
 
 
 def now() -> str:
@@ -76,6 +77,25 @@ def args_for(**values: Any) -> SimpleNamespace:
 
 def action_key(item: dict[str, Any]) -> str:
     return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
+
+def disk_usage_for_tick(run: Path, loop: dict[str, Any], *, sample_seconds: float) -> dict[str, Any]:
+    """Return throttled disk telemetry without making every owner turn walk the tree."""
+    current=time.time()
+    cached=loop.get("disk_usage_sample") if isinstance(loop.get("disk_usage_sample"),dict) else None
+    sampled=epoch(cached.get("sampled_at")) if cached else None
+    if cached is not None and sampled is not None and current-sampled < max(0.0,sample_seconds):
+        return {**cached,"cached":True,"sample_age_seconds":round(max(0.0,current-sampled),1)}
+    try:
+        import dsd_workspace
+        fresh=dsd_workspace.disk_usage_snapshot(run)
+    except Exception as exc:
+        return {"sampled_at":now(),"error":str(exc)[:800],"cached":False}
+    previous_total=int(cached.get("owned_total_bytes") or 0) if cached else None
+    if previous_total is not None:
+        fresh["delta_since_previous_sample_bytes"]=int(fresh.get("owned_total_bytes") or 0)-previous_total
+    loop["disk_usage_sample"]=fresh
+    return {**fresh,"cached":False,"sample_age_seconds":0.0}
+
 
 
 def reconcile(run: Path, phase_id: str | None, *, sweep: bool = True) -> dict[str, Any]:
@@ -463,6 +483,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         classification = "run-human-blocked"
         turn = "owner"
 
+    disk_usage=disk_usage_for_tick(run,loop,sample_seconds=float(getattr(args,"disk_sample_seconds",DEFAULT_DISK_SAMPLE_SECONDS)))
     owner = update_due(
         loop,
         state,
@@ -473,7 +494,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     )
     if owner.get("due"):
         try:
-            owner["status"] = dsd_task.command_owner_status(args_for(run_root=run, phase_id=getattr(args, "phase_id", None)))
+            owner["status"] = dsd_task.command_owner_status(args_for(run_root=run, phase_id=getattr(args, "phase_id", None), disk_usage=disk_usage))
         except Exception as exc:
             owner["status_error"] = str(exc)
         loop["pending_owner_update"] = {"token": owner.get("token"), "signature": owner.get("signature"), "reasons": owner.get("reasons"), "created_at": now()}
@@ -491,6 +512,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "turn": turn,
         "worker_budget": state.get("worker_budget"),
         "owner_update": owner,
+        "disk_usage": disk_usage,
     }
     if run_status_transition: out["run_status_transition"] = run_status_transition
     advance_packet=compact_advance(advance_result)
@@ -540,6 +562,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--changed-update-min-seconds", type=float, default=DEFAULT_CHANGED_UPDATE_MIN_SECONDS)
     p.add_argument("--report-complete-grace-seconds", type=float, default=DEFAULT_REPORT_COMPLETE_GRACE_SECONDS)
     p.add_argument("--stall-confirm-seconds", type=float, default=DEFAULT_STALL_CONFIRM_SECONDS)
+    p.add_argument("--disk-sample-seconds", type=float, default=DEFAULT_DISK_SAMPLE_SECONDS)
     p = sub.add_parser("pulse"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id")
     p = sub.add_parser("ack-update"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--token", required=True)
     p = sub.add_parser("finish"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id"); p.add_argument("--reason", required=True)

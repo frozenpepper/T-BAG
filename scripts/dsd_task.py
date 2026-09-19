@@ -438,6 +438,40 @@ def attempt_is_live(attempt: dict[str, Any]) -> bool:
     if event.is_dir() and (event/"terminal.json").is_file(): return False
     return any(pid_alive(pid) for pid in attempt_pids(attempt))
 
+def reap_attempt_scratch(run: Path, *, phase_id: str | None = None) -> dict[str, Any]:
+    """Delete launcher-owned scratch for attempts that can no longer execute.
+
+    Reports, logs, scope evidence, gates and terminal records live beside scratch and
+    are intentionally preserved. A dead attempt without terminal evidence is reclaimed
+    only after sweep-stale has durably classified it as stale-unresolved.
+    """
+    run=run.resolve()
+    phases=[slug(phase_id)] if phase_id else sorted(p.name for p in (run/"phases").iterdir() if p.is_dir()) if (run/"phases").is_dir() else []
+    removed=[]; reclaimed=0
+    for phase in phases:
+        tasks_dir=phase_root(run,phase)/"tasks"
+        for state_path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
+            try: task=load_json(state_path)
+            except (OSError,ValueError,json.JSONDecodeError): continue
+            for attempt in task.get("attempts",[]) if isinstance(task.get("attempts"),list) else []:
+                if not isinstance(attempt,dict) or attempt_is_live(attempt): continue
+                event=Path(str(attempt.get("event_dir") or ""))
+                if not event.is_absolute(): continue
+                try: event.resolve().relative_to(run)
+                except ValueError: continue
+                terminal=(event/"terminal.json").is_file()
+                stale=str(attempt.get("status") or "")=="stale-unresolved"
+                if not terminal and not stale: continue
+                scratch=event/"scratch"
+                if not scratch.is_dir(): continue
+                try:
+                    size=sum(p.stat().st_size for p in scratch.rglob("*") if p.is_file() and not p.is_symlink())
+                except OSError:
+                    size=0
+                shutil.rmtree(scratch,ignore_errors=False)
+                reclaimed+=size; removed.append(str(scratch))
+    return {"count":len(removed),"reclaimed_bytes":reclaimed,"removed":removed}
+
 def attempt_is_unresolved(attempt: dict[str, Any]) -> bool:
     # sweep-stale is an explicit durable disposition for a dead launcher/process.
     # The missing terminal stays as evidence, but must not poison every later launch.
@@ -1608,7 +1642,8 @@ def command_sweep_stale(args: argparse.Namespace) -> dict[str, Any]:
                         task["status"]=target; changed=True
                 if changed:
                     task["updated_at"]=now(); write_json(state_path,task)
-    return {"marked":marked,"count":len(marked)}
+    scratch_gc=reap_attempt_scratch(run,phase_id=getattr(args,"phase_id",None))
+    return {"marked":marked,"count":len(marked),"scratch_gc":scratch_gc}
 
 
 
@@ -1816,6 +1851,8 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
         try:
             import dsd_workspace
             housekeeping=dsd_workspace.reap_safe_runtime(run,phase_id=getattr(args,"phase_id",None))
+            scratch_gc=reap_attempt_scratch(run,phase_id=getattr(args,"phase_id",None))
+            if scratch_gc.get("count"): housekeeping["attempt_scratch"]=scratch_gc
         except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
             housekeeping={"deferred":str(exc)[:800]}
     else: swept={"marked":[],"count":0}
@@ -1946,6 +1983,14 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         if task.get("status")=="blocked" and esc.get("target")=="human":
             human.append({"phase":task.get("phase_id"),"purpose":task_brief_objective(task,max_chars=420),"task_id":task.get("task_id")})
     if human: result["decisions_needed"]=human
+    disk=getattr(args,"disk_usage",None)
+    if not isinstance(disk,dict):
+        try:
+            import dsd_workspace
+            disk=dsd_workspace.disk_usage_snapshot(run)
+        except Exception as exc:
+            disk={"error":str(exc)[:800]}
+    result["disk_usage"]=disk
     return result
 
 

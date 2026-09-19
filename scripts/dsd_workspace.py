@@ -367,13 +367,14 @@ def prepare_launch_workspace(run: Path, phase: str, task_id: str, role: str) -> 
         class A: pass
         a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid
         return command_create(a)
+    fixture_mirrors,automatic_fixtures=workspace_fixture_mirrors(primary,brief)
     fixture_bindings=[]
-    for rel in required_worktree_fixtures(brief):
+    for rel in fixture_mirrors:
         binding=ensure_dependency_fixture_store(run,primary,rel)
         if binding is None: raise ValueError(f"read-only fixture cannot be safely shared: {rel}")
         fixture_bindings.append(binding)
     view=acquire_analysis_view(run,fixture_bindings); runtime=Path(info["runtime_root"]).resolve(); db=runtime/"opencode-db"/safe_component(phase)/f"{safe_component(tid)}.sqlite"; db.parent.mkdir(parents=True,exist_ok=True)
-    data={"format":FORMAT,"mode":"analysis-view","phase_id":phase,"task_id":tid,"primary_root":str(primary),"worktree":view["path"],"baseline_ref":view["baseline_ref"],"analysis_view_generation":view["generation"],"db":str(db),"fixture_mirrors":required_worktree_fixtures(brief),"fixture_bindings":fixture_bindings,"created_at":now(),"released":False}
+    data={"format":FORMAT,"mode":"analysis-view","phase_id":phase,"task_id":tid,"primary_root":str(primary),"worktree":view["path"],"baseline_ref":view["baseline_ref"],"analysis_view_generation":view["generation"],"db":str(db),"fixture_mirrors":fixture_mirrors,"auto_dependency_fixtures":automatic_fixtures,"fixture_bindings":fixture_bindings,"created_at":now(),"released":False}
     dsd_task.write_json(existing,data)
     task_path=dsd_task.task_file(run,phase,tid)
     with dsd_task.file_lock(task_path.with_suffix(".lock")):
@@ -469,6 +470,87 @@ def _known_untracked_producers(run: Path, phase: str, paths: list[str]) -> dict[
 
 DEPENDENCY_LOCKFILES=("package-lock.json","npm-shrinkwrap.json","pnpm-lock.yaml","yarn.lock","bun.lock","bun.lockb")
 
+
+def _npm_installed_package_dirs(node_modules: Path) -> dict[str, Path] | None:
+    """Enumerate npm package directories without walking package contents."""
+    root=node_modules.resolve(); found: dict[str,Path]={}; pending=[root]
+    while pending:
+        current=pending.pop()
+        try: entries=list(current.iterdir())
+        except OSError: return None
+        for entry in entries:
+            name=entry.name
+            if name.startswith("."): continue
+            if name.startswith("@"):
+                if entry.is_symlink() or not entry.is_dir(): continue
+                try: scoped=list(entry.iterdir())
+                except OSError: return None
+                packages=[item for item in scoped if not item.name.startswith(".") and (item.is_dir() or item.is_symlink())]
+            elif entry.is_dir() or entry.is_symlink():
+                packages=[entry]
+            else:
+                continue
+            for package in packages:
+                try: rel=package.relative_to(root).as_posix()
+                except ValueError: return None
+                key=f"node_modules/{rel}"
+                found[key]=package
+                nested=package/"node_modules"
+                if not package.is_symlink() and nested.is_dir(): pending.append(nested)
+    return found
+
+
+def npm_installed_tree_matches_lock(primary: Path, lockfile: Path, rel: str) -> bool:
+    """Conservatively prove npm would regard its hidden lock as current."""
+    node_modules=(primary/rel).resolve(); hidden=node_modules/".package-lock.json"
+    if lockfile.name!="package-lock.json" or not hidden.is_file(): return False
+    try:
+        root=json.loads(lockfile.read_text(encoding="utf-8"))
+        installed=json.loads(hidden.read_text(encoding="utf-8"))
+        hidden_mtime=hidden.stat().st_mtime
+    except (OSError,json.JSONDecodeError,UnicodeError):
+        return False
+    root_packages=root.get("packages"); installed_packages=installed.get("packages")
+    if not isinstance(root_packages,dict) or not isinstance(installed_packages,dict): return False
+    root_tree={str(k):v for k,v in root_packages.items() if str(k).startswith("node_modules/")}
+    installed_tree={str(k):v for k,v in installed_packages.items() if str(k).startswith("node_modules/")}
+    if root_tree!=installed_tree: return False
+    actual=_npm_installed_package_dirs(node_modules)
+    if actual is None or set(actual)!=set(installed_tree): return False
+    try:
+        return all(hidden_mtime>=path.lstat().st_mtime for path in actual.values())
+    except OSError:
+        return False
+
+
+def discover_dependency_fixtures(primary: Path) -> list[str]:
+    """Discover npm dependency trees whose hidden lock proves installed freshness."""
+    primary=primary.resolve()
+    cp=run_cmd(["git","ls-files","-z"],primary,check=False)
+    if cp.returncode!=0: return []
+    found=[]
+    for raw in cp.stdout.split(b"\0"):
+        if not raw: continue
+        rel=raw.decode("utf-8",errors="surrogateescape")
+        path=Path(rel)
+        if path.name!="package-lock.json": continue
+        candidate=(path.parent/"node_modules").as_posix()
+        if candidate.startswith("./"): candidate=candidate[2:]
+        src=primary/candidate
+        if not src.is_dir(): continue
+        ignored=run_cmd(["git","check-ignore","-q","--",candidate],primary,check=False).returncode==0
+        if not ignored or not npm_installed_tree_matches_lock(primary,primary/path,candidate): continue
+        try:
+            if dependency_fixture_identity(primary,candidate) is not None: found.append(candidate)
+        except (OSError,ValueError):
+            continue
+    return list(dict.fromkeys(found))
+
+
+def workspace_fixture_mirrors(primary: Path, task_text: str) -> tuple[list[str], list[str]]:
+    explicit=required_worktree_fixtures(task_text)
+    automatic=[rel for rel in discover_dependency_fixtures(primary) if rel not in explicit]
+    return explicit+automatic,automatic
 
 def _validate_fixture_source(primary: Path, rel: str) -> Path:
     src=primary/rel
@@ -724,7 +806,7 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         task_text=Path(str(task.get("brief") or "")).read_text(encoding="utf-8",errors="replace")
         integrated_primary=copy_integrated_primary_inputs(primary,worktree,integrated_primary_untracked_inputs(run,primary))
         fixture_snapshot=dsd_task.task_root(run,phase,tid)/"fixture-snapshot"
-        fixture_mirrors=required_worktree_fixtures(task_text); fixture_bindings=[]; snapshot_used=False
+        fixture_mirrors,automatic_fixtures=workspace_fixture_mirrors(primary,task_text); fixture_bindings=[]; snapshot_used=False
         for rel in fixture_mirrors:
             binding=ensure_dependency_fixture_store(run,primary,rel)
             if binding is not None:
@@ -769,7 +851,7 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         primary_head,primary_status=_primary_view_marker(primary)
         data={
             "format":FORMAT,"mode":"isolated-worktree","phase_id":phase,"task_id":tid,"primary_root":str(primary),"worktree":str(worktree),
-            "baseline_branch":base_branch,"task_branch":task_branch,"db":str(db),"fixture_mirrors":fixture_mirrors,"fixture_bindings":fixture_bindings,
+            "baseline_branch":base_branch,"task_branch":task_branch,"db":str(db),"fixture_mirrors":fixture_mirrors,"auto_dependency_fixtures":automatic_fixtures,"fixture_bindings":fixture_bindings,
             "integrated_primary_inputs":integrated_primary,
             "fixture_snapshot_root":str(fixture_snapshot.resolve()) if snapshot_used else None,"primary_head":primary_head,"primary_status":primary_status,"created_at":now(),
         }
@@ -1458,6 +1540,110 @@ def command_purge_run(args: argparse.Namespace) -> dict[str, Any]:
     shutil.rmtree(runtime)
     return {**result,"purged":True}
 
+def _du_bytes(path: Path) -> int:
+    """Return du-style allocated bytes without following symlink targets."""
+    if not path.exists() and not path.is_symlink(): return 0
+    du=shutil.which("du")
+    if du:
+        cp=subprocess.run([du,"-sk",str(path)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,check=False)
+        if cp.returncode==0:
+            try: return int(cp.stdout.split()[0])*1024
+            except (IndexError,ValueError): pass
+    if path.is_file() or path.is_symlink():
+        try: return int(path.lstat().st_size)
+        except OSError: return 0
+    total=0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink(): total+=int(item.stat().st_size)
+        except OSError: pass
+    return total
+
+
+def disk_usage_snapshot(run: Path, *, include_shared_home_cache: bool = False) -> dict[str, Any]:
+    """Measure owned run/runtime/cache surfaces for parent and Human diagnostics."""
+    run=run.resolve(); info=dsd_task.load_run(run)
+    project=Path(str(info["project_root"])).resolve(); runtime=Path(str(info["runtime_root"])).resolve()
+    cache=(project/"TBag"/"cache").resolve(); worktrees=runtime/"worktrees"; fixture_store=runtime/"fixture-store"
+    scratch_paths=sorted((run/"phases").glob("*/tasks/*/attempts/*/scratch")) if (run/"phases").is_dir() else []
+    scratch_bytes=sum(_du_bytes(path) for path in scratch_paths if path.is_dir())
+    run_bytes=_du_bytes(run); runtime_bytes=_du_bytes(runtime); cache_bytes=_du_bytes(cache)
+    project_tbag=(project/"TBag").resolve()
+    try: runtime.relative_to(project_tbag); runtime_external=False
+    except ValueError: runtime_external=True
+    result={
+        "sampled_at":now(),"run_bytes":run_bytes,"runtime_bytes":runtime_bytes,
+        "project_shared_cache_bytes":cache_bytes,"owned_total_bytes":run_bytes+runtime_bytes+cache_bytes,
+        "attempt_scratch_bytes":scratch_bytes,"attempt_scratch_count":sum(1 for path in scratch_paths if path.is_dir()),
+        "worktrees_bytes":_du_bytes(worktrees),"fixture_store_bytes":_du_bytes(fixture_store),
+        "runtime_external_to_project":runtime_external,
+    }
+    if include_shared_home_cache:
+        shared=(Path.home()/".cache"/dsd_task.CACHE_DIR).resolve()
+        result["shared_home_cache_bytes"]=_du_bytes(shared)
+        projects=shared/"projects"; rows=[]
+        if projects.is_dir():
+            for child in projects.iterdir():
+                if child.is_dir(): rows.append({"name":child.name,"bytes":_du_bytes(child)})
+        result["shared_home_projects"]=sorted(rows,key=lambda row:int(row["bytes"]),reverse=True)
+    return result
+
+
+def _archive_log_inventory(run: Path) -> list[dict[str, Any]]:
+    rows=[]
+    for task in dsd_task.iter_run_tasks(run):
+        for attempt in task.get("attempts",[]) if isinstance(task.get("attempts"),list) else []:
+            if not isinstance(attempt,dict): continue
+            event=Path(str(attempt.get("event_dir") or ""))
+            if not event.is_absolute(): continue
+            try: event.resolve().relative_to(run.resolve())
+            except ValueError: continue
+            for name in ("worker.log","worker.stderr.log"):
+                path=event/name
+                if path.is_file(): rows.append({"path":str(path),"bytes":_du_bytes(path)})
+    return rows
+
+
+def command_archive_run(args: argparse.Namespace) -> dict[str, Any]:
+    """Compact a closed run in place without manufacturing duplicate archives."""
+    run=args.run_root.resolve(); info=dsd_task.load_run(run); status=str(info.get("status") or "active")
+    if status not in {"completed","abandoned"}:
+        raise ValueError(f"archive-run requires completed/abandoned status, got {status!r}")
+    live=[]
+    for task in dsd_task.iter_run_tasks(run):
+        if dsd_task.task_has_live_attempt(task): live.append(str(task.get("task_id") or ""))
+    if live: raise ValueError(f"archive-run refuses live worker attempts: {live[:8]}")
+    logs=_archive_log_inventory(run)
+    before=disk_usage_snapshot(run)
+    preview={"run_id":info.get("run_id"),"status":status,"log_count":len(logs),"log_bytes":sum(int(x["bytes"]) for x in logs),"disk_before":before}
+    if getattr(args,"dry_run",False): return {**preview,"dry_run":True}
+    scratch_gc=dsd_task.reap_attempt_scratch(run)
+    removed_logs=[]
+    for row in logs:
+        path=Path(str(row["path"]))
+        try:
+            path.unlink(missing_ok=True); removed_logs.append(str(path))
+        except OSError: pass
+    runtime_action=None
+    runtime=Path(str(info["runtime_root"])).resolve()
+    if runtime.exists():
+        if status=="completed":
+            class P: pass
+            p=P(); p.run_root=run; p.dry_run=False
+            try: runtime_action=command_purge_run(p)
+            except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc: runtime_action={"deferred":str(exc)[:800]}
+        else:
+            try: runtime_action=reap_safe_runtime(run,drop_current_analysis=True)
+            except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc: runtime_action={"deferred":str(exc)[:800]}
+    after=disk_usage_snapshot(run)
+    record={
+        "format":"tbag-run-archive-v1","run_id":info.get("run_id"),"status":status,"archived_at":now(),
+        "scratch_gc":scratch_gc,"removed_log_count":len(removed_logs),"removed_log_bytes":sum(int(x["bytes"]) for x in logs),
+        "runtime_action":runtime_action,"disk_before":before,"disk_after":after,
+    }
+    dsd_task.write_json(run/"archive.json",record)
+    return record
+
 def parser() -> argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
     for name in ("create","checkpoint","integrate","cleanup"):
@@ -1469,6 +1655,8 @@ def parser() -> argparse.ArgumentParser:
             p.add_argument("--reason",help="required with --force; durable reason for discarding workspace authority")
     p=sub.add_parser("cleanup-phase"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True)
     p=sub.add_parser("purge-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--dry-run",action="store_true")
+    p=sub.add_parser("archive-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--dry-run",action="store_true")
+    p=sub.add_parser("disk-usage"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--include-shared-home-cache",action="store_true")
     p=sub.add_parser("gc-analysis-views"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--drop-current-if-unused",action="store_true")
     p=sub.add_parser("invalidate-analysis-view"); p.add_argument("--run-root",type=Path,required=True)
     return ap
@@ -1482,6 +1670,8 @@ def main()->int:
         elif args.command=="integrate": out=command_integrate(args)
         elif args.command=="cleanup-phase": out=command_cleanup_phase(args)
         elif args.command=="purge-run": out=command_purge_run(args)
+        elif args.command=="archive-run": out=command_archive_run(args)
+        elif args.command=="disk-usage": out=disk_usage_snapshot(args.run_root.resolve(),include_shared_home_cache=bool(args.include_shared_home_cache))
         elif args.command=="gc-analysis-views": out={"removed":gc_analysis_views(args.run_root.resolve(),drop_current_if_unused=args.drop_current_if_unused)}
         elif args.command=="invalidate-analysis-view": invalidate_analysis_view(args.run_root.resolve()); out={"invalidated":True}
         else: out=command_cleanup(args)

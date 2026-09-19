@@ -69,6 +69,39 @@ def launch_gate_root(run_root: Path) -> Path:
     return (project_root/"TBag"/"runtime"/"launch-start-gate").resolve()
 
 
+def worker_cache_paths(run_root: Path) -> dict[str, Path]:
+    """Return project-local caches shared by all worker attempts.
+
+    Attempt TMPDIR remains private for genuine temporary files. Package/download and
+    Node compile caches are deliberately shared so dozens of attempts do not each
+    materialize the same hundreds of megabytes under durable attempt scratch.
+    """
+    run_root=run_root.resolve()
+    data=json.loads((run_root/"run.json").read_text(encoding="utf-8"))
+    project_root=Path(str(data["project_root"])).resolve()
+    root=(project_root/"TBag"/"cache").resolve()
+    expected=(project_root/"TBag").resolve()
+    try: root.relative_to(expected)
+    except ValueError as exc: raise ValueError(f"worker cache root escapes PROJECT/TBag: {root}") from exc
+    npm=root/"npm-cache"; node=root/"node-compile-cache"
+    npm.mkdir(parents=True,exist_ok=True); node.mkdir(parents=True,exist_ok=True)
+    return {"root":root,"npm":npm,"node_compile":node}
+
+
+def worker_environment(base: dict[str,str], p: dict[str,Path]) -> tuple[dict[str,str], dict[str,Path]]:
+    """Apply project-local temporary/cache ownership to one worker process."""
+    env=dict(base)
+    scratch=p["event_dir"]/"scratch"; scratch.mkdir(parents=True,exist_ok=True)
+    caches=worker_cache_paths(p["run_root"])
+    env.update({
+        "TMPDIR":str(scratch),"TMP":str(scratch),"TEMP":str(scratch),
+        "npm_config_cache":str(caches["npm"]),
+        "npm_config_prefer_offline":"true",
+        "NODE_COMPILE_CACHE":str(caches["node_compile"]),
+    })
+    return env,caches
+
+
 def _finite_interval(value: Any, *, default: float = 0.0) -> float:
     try: interval=float(value)
     except (TypeError,ValueError): return default
@@ -309,6 +342,8 @@ def worker_command(args: argparse.Namespace,p:dict[str,Path],env:dict[str,str])-
         cwd=p["project_root"] if writes else p["event_dir"]
         cmd=["codex","exec","--json","--model",args.model,"--sandbox","workspace-write","--cd",str(cwd)]
         if effort: cmd[2:2]=["--config",f'model_reasoning_effort="{effort}"']
+        cache_root=Path(str(env.get("npm_config_cache") or "")).parent
+        if str(cache_root) not in {"",".","/"}: cmd[2:2]=["--add-dir",str(cache_root)]
         if writes: cmd[2:2]=["--add-dir",str(p["event_dir"])]
         if args.resume_session: cmd += ["resume",args.resume_session,prompt]
         else: cmd.append(prompt)
@@ -396,9 +431,9 @@ def terminal_error(args: argparse.Namespace,p:dict[str,Path],error:str,exit_code
 
 
 def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
-    p["log"].parent.mkdir(parents=True,exist_ok=True); env=os.environ.copy(); started=None
-    scratch=p["event_dir"]/"scratch"; scratch.mkdir(parents=True,exist_ok=True)
-    env.update({"TMPDIR":str(scratch),"TMP":str(scratch),"TEMP":str(scratch)})
+    p["log"].parent.mkdir(parents=True,exist_ok=True); started=None
+    try: env,caches=worker_environment(os.environ.copy(),p)
+    except (OSError,ValueError) as exc: return terminal_error(args,p,str(exc),2,reserved_at)
     try: cmd,env,title,launch_cwd=worker_command(args,p,env)
     except FileNotFoundError as exc: return terminal_error(args,p,str(exc),127,reserved_at)
     except (OSError,ValueError) as exc: return terminal_error(args,p,str(exc),2,reserved_at)
@@ -413,7 +448,7 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
         if out is not None: out.close()
         if err is not None: err.close()
         return terminal_error(args,p,f"failed to launch {args.driver}: {exc}",2,started)
-    attempt={"format":"dsd-worker-attempt-v2.2","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"effort":getattr(args,"effort",None),"attempt":args.attempt,"event_dir":str(p["event_dir"]),"project_root":str(p["project_root"]),"worker_pid":proc.pid,"launcher_pid":os.getpid(),"reserved_at":reserved_at,"started_at":started,"resume_session":args.resume_session,"launch_start_interval_seconds":getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)}
+    attempt={"format":"dsd-worker-attempt-v2.2","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"effort":getattr(args,"effort",None),"attempt":args.attempt,"event_dir":str(p["event_dir"]),"project_root":str(p["project_root"]),"worker_pid":proc.pid,"launcher_pid":os.getpid(),"reserved_at":reserved_at,"started_at":started,"resume_session":args.resume_session,"launch_start_interval_seconds":getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS),"shared_cache_root":str(caches["root"]),"npm_cache":str(caches["npm"]),"node_compile_cache":str(caches["node_compile"])}
     if stderr_path is not None: attempt["stderr_log"]=str(stderr_path)
     atomic_json(p["event_dir"]/"attempt.json",attempt)
     process_retries=[]

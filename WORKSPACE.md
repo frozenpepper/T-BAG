@@ -48,7 +48,7 @@ Allocation follows mutation needs:
 
 A successful integration invalidates the current analysis generation; existing readers keep it and later readers get a fresh one. Analysis-view index/cache drift self-heals on reuse; orphan derived views are reclaimed, while referenced ones stay frozen. Primary commits/detectable tracked dirty-state changes also rotate it. Ambient untracked changes do not. If an external tool changes only an already-dirty tracked path's contents, invalidate before new readers launch.
 
-**Ambient untracked/ignored files are not mirrored.** Reviewed additions become later project state; other ignored inputs require `Required worktree fixtures`. Lockfile-backed `node_modules` uses one run-owned immutable generation: read-only views borrow it, mutable rooms get private CoW clones (copy fallback), never from sibling rooms. Other fixtures keep frozen copies. Missing fixtures fail early; derived freshness remains task-owned.
+**Ambient untracked/ignored files are not mirrored.** Other ignored inputs require `Required worktree fixtures`; the one automatic exception is npm `node_modules` proven current by tracked `package-lock.json` plus npm's matching hidden lock. One immutable run generation feeds read-only views and private CoW clones (copy fallback), never sibling rooms. Other fixtures keep frozen copies.
 
 Before each attempt, mutable state is checkpointed; read-only work uses the frozen view baseline. Attempts record the checkpoint OID. A cold base-role retry refreshes to current primary only with **no task delta**; retained work is never silently rebased. Scope evidence answers what moved during that attempt, not whether the repository was globally clean.
 
@@ -89,12 +89,10 @@ The retained workspace is the durable implementation state. A missing process/re
 
 ## Cleanup
 
-Cleanup is automatic. Read-only results release DB/view bindings; integration retires its worktree, fixture snapshot, branches and CLI DB. `reconcile-run` reaps safe leftovers/orphan DBs; `completed` purges only owned runtime. Durable `PROJECT/TBag` state remains.
+Cleanup is automatic: read-only results release DB/views; integration retires worktree, fixture snapshot, branches and DB. Terminal/stale attempts drop launcher `scratch/` but keep evidence. `reconcile-run` reaps safe leftovers; completed runs purge owned runtime. Package/compile caches are shared at `PROJECT/TBag/cache`.
 
-Supersession is **delta-aware**: release read-only/empty rooms, frozen `carry_from`, explicit `rederive_from_primary`, or a delta already present in primary; retain any unique undisposed delta. `--force` needs a reason and cannot bypass live/unresolved or undisposed-delta protection. Fixtures stay outside evidence/integration; private snapshots retire immediately, shared generations after their last binding.
+Supersession is **delta-aware**: release read-only/empty or durably transferred rooms; retain unique undisposed deltas. `--force` needs a reason and cannot bypass live/unresolved or undisposed-delta protection. Private fixtures retire immediately; shared generations after their last binding.
 
-`~/.cache/t-bag` is shared; one run owns only `run.json.runtime_root`. Never raw-delete shared state. `cleanup-phase`/`purge-run --dry-run` are diagnostics, not routine parent chores.
+`archive-run` compacts closed runs in place, dropping launcher logs/scratch while preserving briefs, reports, gates and task state. `disk-usage` reports owned surfaces; its explicit shared-cache option inventories only. Never implicitly delete `~/.cache/t-bag`.
 
-`authority/decisions/` is tool-owned by `resolve-escalation`; keep parent notes elsewhere. Numbering skips collisions defensively.
-
-If primary moved, do not hand-merge generated outputs to force a stale patch. Reconcile hand-written authority, then regenerate from current sources; use Analyst judgment only for real hand-written authority conflicts.
+`authority/decisions/` belongs to `resolve-escalation`. If primary moved, reconcile hand-written authority then regenerate derived outputs; use Analyst judgment only for real authority conflicts.

@@ -888,9 +888,11 @@ def _gate_one(run:Path,phase:str,tid:str,event_arg:Path|None)->dict[str,Any]:
     class U: pass
     u=U(); u.run_root=run; u.phase_id=phase; u.task_id=tid; u.event_dir=event; u.status=status; u.gate=gate_path; u.session_id=terminal_data.get("session_id")
     dsd_task.command_update_attempt(u)
+    scratch_gc=dsd_task.reap_attempt_scratch(run,phase_id=phase)
     errors=list(gate.get("errors") or [])
     warnings=list(gate.get("warnings") or [])
     result={"task_id":tid,"event_dir":str(event),"gate":str(gate_path),"disposition":disposition,"ready_for_interpretation":bool(gate.get("ready_for_interpretation")),"exit_code":gate.get("exit_code"),"session_id":gate.get("session_id"),"first_error":str(errors[0])[:800] if errors else None,"first_warning":str(warnings[0])[:800] if warnings else None}
+    if scratch_gc.get("count"): result["scratch_gc"]=scratch_gc
     report=event/"report.md"
     if result["ready_for_interpretation"] and report.is_file():
         # The evidence gate already owns the report path. Surface only the bounded
