@@ -1733,6 +1733,58 @@ def command_prepare_followup_triage(args: argparse.Namespace) -> dict[str, Any]:
             source["updated_at"]=now(); write_json(source_path,source)
     return {"source_task":source_id,"triage_task":triage_id,"finding_ids":finding_ids,"existing":False}
 
+def _human_accept_route_allowed(task: dict[str, Any]) -> bool:
+    if task.get("kind")=="analysis" and task.get("followup_triage_for") and task.get("followup_finding_ids"):
+        return True
+    if task.get("kind")!="implementation" or not task.get("requires_integration"):
+        return False
+    review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
+    return review.get("outcome") in {"fail","escalate"} and Path(str(review.get("report") or "")).is_file()
+
+
+def _human_escalation_excerpt(task: dict[str, Any], *, max_chars: int = 700) -> str:
+    escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
+    report=Path(str(escalation.get("report") or ""))
+    if not report.is_file(): return "A Human decision is required before this task can continue."
+    try:
+        lines=[line.strip() for line in report.read_text(encoding="utf-8",errors="replace").splitlines() if line.strip()]
+    except OSError:
+        return "A Human decision is required before this task can continue."
+    text=" ".join(lines[:6])
+    return text[:max_chars] + ("…" if len(text)>max_chars else "")
+
+
+def human_decision_question(task: dict[str, Any]) -> dict[str, Any]:
+    """Describe one durable Human blocker for a native harness question UI."""
+    phase=str(task.get("phase_id") or "")
+    tid=str(task.get("task_id") or "")
+    seq=len(task.get("human_decision_history",[]) if isinstance(task.get("human_decision_history"),list) else [])+1
+    purpose=task_brief_objective(task,max_chars=280) or tid
+    options=[
+        {"label":"Send to Analyst","value":"analysis","description":"Commission Analyst reasoning/replanning before resuming this task."},
+        {"label":"Resume","value":"resume","description":"Record my decision/instructions and continue under existing task authority."},
+    ]
+    if _human_accept_route_allowed(task):
+        options.append({"label":"Accept despite red review","value":"accept","description":"Use explicit Human authority while preserving the recorded Reviewer FAIL/ESCALATE evidence."})
+    options.append({"label":"Keep blocked","value":"defer","description":"Do not resolve this blocker yet."})
+    return {
+        "id":f"human-decision:{phase}:{tid}:{seq}",
+        "kind":"human-decision",
+        "blocking":True,
+        "required_interface":"native-question",
+        "header":"T-BAG needs you",
+        "question":f"{purpose}\n\nWhy T-BAG stopped here: {_human_escalation_excerpt(task)}\n\nChoose a route, or type a custom decision/instruction.",
+        "options":options,
+        "custom_answer":True,
+        "fallback_banner":"╔═ T-BAG — ACTION REQUIRED ═╗",
+        "phase_id":phase,
+        "task_id":tid,
+        "decision_command":"resolve-escalation",
+        "decision_file_required":True,
+        "allowed_routes":[str(item["value"]) for item in options if item["value"]!="defer"],
+    }
+
+
 def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
     """Return the one mechanically executable next action for a task.
 
@@ -1756,7 +1808,7 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if status=="accepted":
         return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None
     if status=="blocked":
-        return {**base,"action":"await-human-decision","escalation":task.get("last_escalation")}
+        return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}
 
     if latest and attempt_status=="gated" and report_requests_capability(event/"report.md"):
         return {**base,"action":"route-capability-escalation","report":str(event/"report.md"),"role":role}
@@ -2219,7 +2271,10 @@ def command_idle_check(args: argparse.Namespace) -> dict[str, Any]:
     if pending: result["required_actions"]=pending
     if state.get("live_attempts"):
         result["live_attempts"]=state.get("live_attempts"); result["observer_required"]=True
-    if state.get("human_blocks"): result["human_blocks"]=state.get("human_blocks")
+    if state.get("human_blocks"):
+        result["human_blocks"]=state.get("human_blocks")
+        result["owner_question_required"]=True
+        result["owner_questions"]=[item["owner_question"] for item in state.get("human_blocks") if isinstance(item,dict) and isinstance(item.get("owner_question"),dict)]
     if state.get("unresolved_state"): result["unresolved_state"]=state.get("unresolved_state")
     return result
 
@@ -2761,13 +2816,10 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         if not decision.is_file(): raise ValueError(f"decision file missing: {decision}")
         if decision.is_symlink(): raise ValueError("Human decision input must be a regular file, not a symlink")
         route=getattr(args,"route","resume")
+        review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
         followup_accept=bool(route=="accept" and task.get("kind")=="analysis" and task.get("followup_triage_for") and task.get("followup_finding_ids"))
-        if route=="accept" and not followup_accept:
-            if task.get("kind")!="implementation" or not task.get("requires_integration"):
-                raise ValueError("Human accept route is valid only for a reviewed implementation or a mechanically-created Review follow-up triage")
-            review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
-            if review.get("outcome") not in {"fail","escalate"} or not Path(str(review.get("report") or "")).is_file():
-                raise ValueError("Human accept route requires an existing fresh Reviewer FAIL/ESCALATE record; it cannot bypass task Review")
+        if route=="accept" and not _human_accept_route_allowed(task):
+            raise ValueError("Human accept route requires a reviewed implementation with fresh red Review evidence or a mechanically-created Review follow-up triage; it cannot bypass task Review")
         authority_dir=run/"authority"/"decisions"; authority_dir.mkdir(parents=True,exist_ok=True)
         seq=len(task.get("human_decision_history",[]))+1
         snapshot=authority_dir/f"{phase}--{tid}--{seq:03d}.md"

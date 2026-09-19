@@ -915,6 +915,8 @@ def command_gate(args:argparse.Namespace)->dict[str,Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id)
     raw=getattr(args,"task_id",None)
     tids=[dsd_task.slug(str(x)) for x in raw] if isinstance(raw,list) else [dsd_task.slug(str(raw))]
+    if len(tids)!=len(set(tids)):
+        raise ValueError("duplicate --task-id values are forbidden; gate each task at most once per command")
     event_arg=getattr(args,"event_dir",None)
     if event_arg is not None and len(tids)!=1:
         raise ValueError("--event-dir is only valid when gating one --task-id")

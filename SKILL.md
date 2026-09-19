@@ -16,33 +16,32 @@ Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs a
 
 ## Parent loop
 
-Every owner turn, resume or harness wake starts with **`parent_tick.py tick`**. It reconciles, advances decided transitions, monitors live work and returns one continue/launch/yield/update/intervene/finish boundary. Wakes are hints, never supervision truth.
+Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an answer to an open `owner_question`: apply it, `resume-owner`, then tick.
 
-1. **Tick first.** Load one harness adapter, consume the tick packet, and never reconstruct a parallel monitor loop. Launch READY work before housekeeping; delegate technical archaeology to Discovery.
-   Resolve missing Analyst/Grunt runtime from supplied authority/config; if still unknown, ask the user **once**. Never invent it; `MISSING_RUNTIME_CONFIG` blocks launch.
-2. **Establish authority.** Substantial work needs an accepted plan. With only a goal: Goal Planner → fresh Plan Reviewer until PASS. Parent never authors or repairs technical plans.
-3. **Expose executable work only when needed.** Analyst findings may close as findings. When decomposition/replanning is actually needed, Planner/Discovery/Surveyor emits briefs + `plan/task-graph.json`; register that graph verbatim after mechanical preflight. Never invent a duplicate graph merely to satisfy a role label. Keep unresolved root cause/architecture with Analysts, not Grunts.
-4. **Schedule aggressively but safely.** Launch dependency-ready tasks up to budget. Mutating tasks use isolated worktrees; standalone read-only roles inspect a shared frozen project view. Dependencies that change project state integrate before dependents run.
-5. **Run the Grunt loop.** Implementer → fresh Reviewer. PASS → land; FAIL → Fixer resumes that Reviewer → fresh Review. Material out-of-brief obligations use Review `Follow-up obligations`; new phase launches pause until Analyst triage. ESCALATE → central escalation.
-6. **Escalate authority separately from runtime strength.** Grunt → Analyst → Human is the authority ladder. Optional stronger profiles stay cold until owner direction or exact `ESCALATE CAPABILITY`; stronger models never gain wider authority.
-7. **Continue from durable truth.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, confirmed silence and final-report/no-terminal hangs; lifecycle retirement preserves retained recovery state.
-8. **Gate phases; launch/yield attempts.** Non-bootstrap phases require fresh Phase Gates. In OpenCode, `OPENCODE.md` is the sole protocol: normal detached `launch` auto-arms when possible; a 60s deterministic completion pulse wakes the parent only when a worker call actually ended, while a slower health heartbeat performs general orchestration checkups. `HUMAN-BLOCKED`, `PAUSED-BY-USER`, `COMPLETED` and `ABANDONED` runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops.
+1. **Harness first.** Install/check one parent adapter before launch. `bootstrap_ready=false` / `blocking_question` means native question UI + stop; after the requested restart/action rerun until ready. Missing Analyst/Grunt runtime: resolve supplied config or ask the user **once** through the native question UI; never invent it—`MISSING_RUNTIME_CONFIG` blocks.
+2. **Authority first.** Substantial work needs an accepted plan. Goal-only: Goal Planner → fresh Plan Reviewer until PASS. Parent never authors or repairs technical plans.
+3. **Expose only needed work.** Analyst findings may close as findings. Planning/replanning comes from Planner/Discovery/Surveyor briefs + `plan/task-graph.json`; register verbatim. Keep unresolved root cause/architecture with Analysts.
+4. **Schedule safely.** Launch dependency-ready work to budget. Mutations use isolated worktrees; standalone read-only roles use a shared frozen project view. State-changing dependencies integrate first.
+5. **Grunt loop.** Implementer → fresh Reviewer; FAIL → Fixer resumes that Reviewer → fresh Review; PASS → land. Out-of-brief obligations go to Analyst triage; ESCALATE uses the central ladder.
+6. **Authority ladder.** Grunt → Analyst → Human. Stronger runtime profiles do not widen authority.
+7. **Durable truth.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, silence and final-report/no-terminal hangs; retirement preserves recovery state.
+8. **Harness wake.** `OPENCODE.md` is the sole protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. Waiting/paused/ended runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops.
 
 ## Non-negotiable boundaries
 
-- **Authority:** brief + typed governing/owner authority define the job. Evidence informs; it does not widen authority.
-- **Acceptance:** red predicates stay red. Workers cannot waive/narrow/proxy a required criterion after observing failure. Contract correction requires Analyst/Human authority.
-- **Semantic truth:** a valid report may conclude `FAIL`, `BLOCKED` or `NOT READY`. Recorded/accepted evidence is not a green milestone. Preserve open prerequisites.
-- **Review ownership:** fresh Reviewer owns task acceptance normally. Human authority may explicitly accept a Human-targeted escalation without rewriting the Reviewer outcome; otherwise the parent never substitutes its own review. After PASS the parent does not inspect code, rerun tests, or commission confidence-only reviews.
-- **Scope:** follow relevant interactions deeply enough to establish the assigned conclusion; unrelated obligations go to planning/escalation.
-- **Succession:** supersession/deferral does not erase obligations. Bulk closure requires an explicit successor or Human cancellation.
-- **Context:** workers receive frozen common rules, technical method when applicable, one role, optional Project Protocol, selected skills, brief and typed inputs. Rich parent history stays parent-only. The parent is a router, not a reader: never pipe raw logs/reports or full process commands into context; consume bounded JSON/routing surfaces directly instead of reformatting them through helper scripts.
-- **Cleanup/blast radius:** runtime cleanup is lifecycle-owned; the parent never inventories or raw-deletes cache paths. T-BAG reaps only mechanically disposable state inside the current run's owned runtime. `~/.cache/t-bag` is shared; never `rm -rf` it.
-- **Project-local scratch:** T-BAG-created diagnostics, repro/smoke projects, SDK probes, temporary artifacts, reports and handoff intermediates stay under the current project's `TBag/` tree. Never create new T-BAG work in `$TMPDIR`, `/tmp`, `/private/var/...` or another external location unless the Human explicitly names that destination. Legacy recorded runtime roots remain readable but do not authorize new external scratch.
+- **Authority/acceptance:** brief + typed authority define scope; evidence never widens it. Red predicates stay red; contract correction needs Analyst/Human authority.
+- **Semantic truth:** accepted evidence is not automatically green. Preserve failed prerequisites and explicit `FAIL`/`BLOCKED`.
+- **Review ownership:** fresh Reviewer owns task acceptance; Human may explicitly accept a Human-targeted escalation without rewriting its red Review. After PASS the parent does not shadow-review.
+- **Succession:** supersession/deferral never erases obligations; closure needs a successor or Human cancellation.
+- **Context:** workers get frozen rules, one role, selected skills, brief and typed inputs—not rich parent history or raw logs.
+- **Cleanup:** lifecycle owns runtime cleanup. Never raw-delete shared `~/.cache/t-bag`.
+- **Project-local scratch:** T-BAG diagnostics/repros/temp/handoffs stay under project `TBag/`; never `$TMPDIR`, `/tmp`, `/private/var/...` or external paths unless the Human explicitly requests them.
 
 ## Owner communication
 
-The tick decides when an owner update is due: decisions/recovery/end-state immediately, plus a periodic active-work heartbeat. Send its purpose-first digest, then acknowledge its token; never ack an unsent update. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**. Never sell task counts as progress. `completion-candidate` is an explicit end boundary: finish only after confirming accepted-plan obligations are exhausted; otherwise replan.
+Two channels only. **`owner_question`** is blocking authority/input after deterministic + Analyst routes are exhausted: launch `actions_before_question`, `wait-owner`, use the harness-native question UI, then end the turn. Both heartbeat lanes stay suspended until the answer is applied and `resume-owner` runs. Plain chat is invalid; do not ask Humans for choices precedent/Analyst authority can resolve.
+
+**`owner_notice`** is passive progress: render `━━ T-BAG UPDATE ━━`, send the bounded digest, then ack. Never bury questions or sell task counts as progress. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**.
 
 ## Instruction architecture
 

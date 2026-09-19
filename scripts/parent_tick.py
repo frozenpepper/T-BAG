@@ -174,6 +174,7 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
     run = args.run_root.resolve()
     info = dsd_task.load_run(run)
     status = str(info.get("status") or "active")
+    wait=load_loop(run).get("owner_wait")
     base: dict[str, Any] = {
         "format": PULSE_FORMAT,
         "generated_at": now(),
@@ -181,6 +182,8 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
         "run_status": status,
         "wake_parent": False,
     }
+    if isinstance(wait,dict) and wait.get("open"):
+        return {**base,"heartbeat_state":"waiting","reason":"owner-question-open","owner_question_id":wait.get("question_id")}
     if status in {"completed", "abandoned"}:
         return {**base, "heartbeat_state": "ended", "reason": f"run-{status}"}
     if status == "paused-by-user":
@@ -298,6 +301,63 @@ def update_due(
     if token: result["token"] = token
     if elapsed is not None: result["seconds_since_last_update"] = round(elapsed, 1)
     return result
+
+
+def owner_questions(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return durable Human blockers as native-question payloads, de-duplicated."""
+    found=[]; seen=set()
+    for block in state.get("human_blocks") or []:
+        if not isinstance(block,dict): continue
+        question=block.get("owner_question")
+        if not isinstance(question,dict) or not question.get("blocking"): continue
+        key=str(question.get("id") or f"{block.get('phase_id')}:{block.get('task_id')}")
+        if key in seen: continue
+        seen.add(key); found.append(question)
+    return found
+
+
+def runtime_config_questions(run: Path, blocked_actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn only missing owner-supplied runtime authority into native questions."""
+    found=[]; seen=set()
+    for item in blocked_actions:
+        if not isinstance(item,dict): continue
+        reason=str(item.get("reason") or item.get("error") or "")
+        if "MISSING_RUNTIME_CONFIG:" not in reason: continue
+        phase=str(item.get("phase_id") or ""); tid=str(item.get("task_id") or "")
+        try: task=dsd_task.load_task(run,phase,tid)
+        except Exception: task={}
+        tier=str(task.get("tier") or "worker")
+        key=f"runtime-config:{tier}"
+        if key in seen: continue
+        seen.add(key)
+        found.append({
+            "id":key,
+            "kind":"runtime-config",
+            "blocking":True,
+            "required_interface":"native-question",
+            "header":"T-BAG needs runtime configuration",
+            "question":f"{reason}\n\nProvide the exact {tier} worker driver and model T-BAG should use. Do not guess or infer a model name.",
+            "options":[],
+            "custom_answer":True,
+            "fallback_banner":"╔═ T-BAG — ACTION REQUIRED ═╗",
+            "tier":tier,
+            "affected_task":{"phase_id":phase,"task_id":tid},
+            "decision_command":"set-runtime",
+        })
+    return found
+
+
+def owner_notice(owner: dict[str, Any]) -> dict[str, Any] | None:
+    if not owner.get("due"): return None
+    return {
+        "kind":"owner-notice",
+        "blocking":False,
+        "banner":"━━ T-BAG UPDATE ━━",
+        "render":"decorated-chat",
+        "ack_token":owner.get("token"),
+        "reasons":owner.get("reasons") or [],
+        "status":owner.get("status"),
+    }
 
 
 def compact_advance(result: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -449,6 +509,8 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             launchable.append(item)
     pending=launchable
     live_now = list(state.get("live_attempts") or [])
+    durable_questions=owner_questions(state)
+    questions=durable_questions+runtime_config_questions(run,blocked_actions)
     if run_status != "active":
         classification = f"run-{run_status}"
         turn = "terminal" if run_status in {"completed", "abandoned"} else "owner"
@@ -464,24 +526,54 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif live_now:
         classification = "workers-running"
         turn = "yield"
-    elif state.get("human_blocks"):
-        classification = "awaiting-owner"
-        turn = "owner"
     else:
         classification = "active-idle"
         turn = "intervene"
 
+    loop_suspected=None
+    repeated_actions=None
+    if not questions and classification=="actions-ready" and pending:
+        signature="|".join(action_key(item) for item in pending)
+        prior=loop.get("action_repeat") if isinstance(loop.get("action_repeat"),dict) else {}
+        same=str(prior.get("signature") or "")==signature
+        count=int(prior.get("count") or 0)+1 if same else 1
+        record={
+            "signature":signature,
+            "count":count,
+            "first_seen_at":prior.get("first_seen_at") if same else now(),
+            "last_seen_at":now(),
+        }
+        loop["action_repeat"]=record
+        if count>=3:
+            repeated_actions=list(pending)
+            pending=[]
+            loop_suspected={
+                "count":count,
+                "since":record.get("first_seen_at"),
+                "actions":repeated_actions,
+                "next":"Do not issue the same launch/resume suggestion again. Diagnose why durable state did not change; use Analyst/recovery for semantic uncertainty rather than repeating the loop.",
+            }
+            classification="loop-suspected"
+            turn="intervene"
+    else:
+        loop.pop("action_repeat",None)
+
+    # Human blockers are an interaction boundary, not a status footnote. Independent
+    # work may still be launched first, but the parent turn must end in the harness's
+    # native question UI rather than an ordinary chat message or silent yield.
+    if questions and run_status not in {"completed","abandoned","paused-by-user"}:
+        classification = "owner-question-required"
+        turn = "ask-owner"
+
     run_status_transition = None
-    if classification == "awaiting-owner" and run_status == "active":
+    if durable_questions and run_status == "active" and not pending and not live_now:
         run_status_transition = dsd_task.command_set_run_status(args_for(
             run_root=run,
             status="human-blocked",
-            reason="awaiting Human decision",
+            reason="awaiting native Human question response",
         ))
         run_status = "human-blocked"
         state["run_status"] = run_status
-        classification = "run-human-blocked"
-        turn = "owner"
 
     disk_usage=disk_usage_for_tick(run,loop,sample_seconds=float(getattr(args,"disk_sample_seconds",DEFAULT_DISK_SAMPLE_SECONDS)))
     owner = update_due(
@@ -497,8 +589,12 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             owner["status"] = dsd_task.command_owner_status(args_for(run_root=run, phase_id=getattr(args, "phase_id", None), disk_usage=disk_usage))
         except Exception as exc:
             owner["status_error"] = str(exc)
-        loop["pending_owner_update"] = {"token": owner.get("token"), "signature": owner.get("signature"), "reasons": owner.get("reasons"), "created_at": now()}
+        if questions:
+            owner["covered_by_native_question"]=True
+        else:
+            loop["pending_owner_update"] = {"token": owner.get("token"), "signature": owner.get("signature"), "reasons": owner.get("reasons"), "created_at": now()}
 
+    notice=None if questions else owner_notice(owner)
     loop["last_classification"] = classification
     loop["last_signature"] = owner.get("signature")
     save_loop(run, loop)
@@ -514,11 +610,20 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "owner_update": owner,
         "disk_usage": disk_usage,
     }
+    if questions:
+        out["owner_question_required"]=True
+        out["owner_questions"]=questions
+        out["question_contract"]="Run actions_before_question first. Then call parent_tick.py wait-owner --question-id <id>, invoke the harness-native question UI, and end the turn. Plain chat/status output is not a substitute. After recording/applying the Human answer, call parent_tick.py resume-owner --question-id <id> before the next tick."
+        out["heartbeat_contract"]="While owner_wait is open, both completion pulse and health heartbeat are suspended even if detached workers continue; their durable results reconcile after resume."
+        if pending: out["actions_before_question"]=pending
+    elif notice is not None:
+        out["owner_notice"]=notice
     if run_status_transition: out["run_status_transition"] = run_status_transition
     advance_packet=compact_advance(advance_result)
     if advance_packet: out["advance"] = advance_packet
     if poison_result and poison_result.get("count"): out["poisoned_sessions_routed"] = poison_result
     if blocked_actions: out["blocked_actions"] = blocked_actions
+    if loop_suspected: out["loop_suspected"] = loop_suspected
     if pending: out["actions"] = pending
     if live_now: out["live_attempts"] = live_now
     if monitors: out["monitoring"] = monitors
@@ -544,6 +649,53 @@ def command_ack_update(args: argparse.Namespace) -> dict[str, Any]:
     return {"acknowledged": True, "token": args.token, "recorded_at": loop["last_owner_update_at"]}
 
 
+def command_wait_owner(args: argparse.Namespace) -> dict[str, Any]:
+    """Suspend autonomous heartbeat transport while a native Human question is open."""
+    run=args.run_root.resolve(); dsd_task.load_run(run)
+    question_id=str(args.question_id).strip()
+    if not question_id: raise ValueError("question_id is required")
+    loop=load_loop(run)
+    current=loop.get("owner_wait") if isinstance(loop.get("owner_wait"),dict) else None
+    if current and current.get("open") and str(current.get("question_id"))!=question_id:
+        raise ValueError(f"another owner question is already open: {current.get('question_id')}")
+    loop["owner_wait"]={
+        "open":True,
+        "question_id":question_id,
+        "opened_at":current.get("opened_at") if current else now(),
+        "updated_at":now(),
+    }
+    save_loop(run,loop)
+    info=dsd_task.load_run(run)
+    return {
+        "format":FORMAT,"generated_at":now(),"run_id":info.get("run_id"),"run_status":info.get("status"),
+        "classification":"owner-question-open","turn":"ask-owner","heartbeat_state":"waiting",
+        "owner_question_id":question_id,"heartbeat_suspended":True,
+    }
+
+
+def command_resume_owner(args: argparse.Namespace) -> dict[str, Any]:
+    """Resume autonomous heartbeat transport after the Human answer was durably handled."""
+    run=args.run_root.resolve(); info=dsd_task.load_run(run); loop=load_loop(run)
+    current=loop.get("owner_wait") if isinstance(loop.get("owner_wait"),dict) else None
+    if not current or not current.get("open"):
+        return {
+            "format":FORMAT,"generated_at":now(),"run_id":info.get("run_id"),"run_status":info.get("status"),
+            "classification":"owner-question-closed","turn":"continue","heartbeat_state":"running",
+            "owner_question_id":getattr(args,"question_id",None),"heartbeat_resumed":False,"already_resumed":True,
+        }
+    expected=str(current.get("question_id") or "")
+    supplied=str(getattr(args,"question_id",None) or "")
+    if supplied and supplied!=expected:
+        raise ValueError(f"owner question mismatch: open={expected!r} supplied={supplied!r}")
+    loop["last_owner_wait"]={**current,"open":False,"closed_at":now()}
+    loop.pop("owner_wait",None); save_loop(run,loop)
+    return {
+        "format":FORMAT,"generated_at":now(),"run_id":info.get("run_id"),"run_status":info.get("status"),
+        "classification":"owner-question-closed","turn":"continue","heartbeat_state":"running",
+        "owner_question_id":expected,"heartbeat_resumed":True,
+    }
+
+
 def command_finish(args: argparse.Namespace) -> dict[str, Any]:
     run = args.run_root.resolve()
     state = reconcile(run, getattr(args, "phase_id", None), sweep=True)
@@ -565,6 +717,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--disk-sample-seconds", type=float, default=DEFAULT_DISK_SAMPLE_SECONDS)
     p = sub.add_parser("pulse"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id")
     p = sub.add_parser("ack-update"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--token", required=True)
+    p = sub.add_parser("wait-owner"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--question-id",required=True)
+    p = sub.add_parser("resume-owner"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--question-id")
     p = sub.add_parser("finish"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id"); p.add_argument("--reason", required=True)
     return ap
 
@@ -575,6 +729,8 @@ def main() -> int:
         if args.command == "tick": result = command_tick(args)
         elif args.command == "pulse": result = command_pulse(args)
         elif args.command == "ack-update": result = command_ack_update(args)
+        elif args.command == "wait-owner": result = command_wait_owner(args)
+        elif args.command == "resume-owner": result = command_resume_owner(args)
         elif args.command == "finish": result = command_finish(args)
         else: raise ValueError(args.command)
         print(json.dumps(result, sort_keys=True)); return 0

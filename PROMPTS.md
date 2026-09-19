@@ -2,9 +2,7 @@
 
 Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HARNESS.md` + selected adapter.
 
-**Normal rule:** semantic routing belongs to the worker report. `parent_tick.py tick` records explicit routing tokens automatically. Manual result commands record that same decision; `--outcome ...` is only a compatibility fallback for an older/tokenless report.
-
-**OpenCode parent:** tick + detached launch. Auto-arm gives immediate completion wake; 60s deterministic + slower health fallbacks recover misses. Waiting/paused/ended runs are unenrolled. V1 `tbag_follow` is diagnostics/re-arm only.
+Worker reports own semantic routing; `--outcome` is legacy fallback only.
 
 ## Parent tick / turn boundary
 
@@ -12,7 +10,15 @@ Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HA
 python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-Run on owner turn/resume/wake/heartbeat. After sending `owner_update`, acknowledge its token with `parent_tick.py ack-update`. On `completion-candidate`, replan or `parent_tick.py finish --reason "..."` after confirming plan exhaustion.
+Run on owner turn/resume/wake. For `owner_question_required`: run `actions_before_question`, then `parent_tick.py wait-owner --question-id <id>`, ask through the native UI, and end the turn. After applying the answer, `resume-owner --question-id <id>` then tick. Passive `owner_notice` is bannered and acknowledged. `completion-candidate` means finish or replan.
+
+## Harness bootstrap
+
+```bash
+python3 <skill>/scripts/install_harness_adapter.py --project-root /abs/project --harness <parent-harness>
+```
+
+`bootstrap_ready=false` → ask its `blocking_question` natively and stop. After the requested restart/action, rerun until `bootstrap_ready=true`; launch nothing before that.
 
 ## Initialize runtime
 
@@ -66,6 +72,7 @@ python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1
 ```
 
 `inspect` is diagnostic. Tick handles final-report/no-terminal recovery and silent anomalies; long runtime alone is not failure.
+OpenCode V1 `tbag_follow` is diagnostics/re-arm only.
 
 ## Gate / Review / Fix
 
@@ -76,7 +83,7 @@ python3 <skill>/scripts/dsd_task.py review --run-root ... --phase-id phase-1 --t
 python3 <skill>/scripts/dsd_workspace.py integrate --run-root ... --phase-id phase-1 --task-id T01 --review-pass-report .../reviewer-N/report.md
 ```
 
-The Reviewer owns `PASS`/`FAIL`/`ESCALATE`; the parent never re-decides it. `--review-pass-report` validates and records that gated PASS, accepts it and integrates. FAIL opens the Fixer lane; Fixer resumes that Reviewer session, then a **new** Reviewer judges the whole task.
+Reviewer owns `PASS`/`FAIL`/`ESCALATE`; `--review-pass-report` records PASS and integrates. FAIL → Fixer resumes that Reviewer → fresh Reviewer.
 
 Analyst diagnosis/recovery routing is also report-owned:
 
@@ -85,9 +92,7 @@ python3 <skill>/scripts/dsd_task.py analysis-result \
   --run-root ... --phase-id phase-1 --task-id T01 --report .../discovery-N/report.md
 ```
 
-Lifecycle reports use `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, or `ESCALATE CAPABILITY`. Findings-only Analyst work uses `accept --report ...`. `REPLAN` requires a graph; `REPLAN+RESUME` is implementation/verification-only. Follow-up triage uses `RESUME` only when the frozen plan already covers every finding.
-
-For a legacy report with no routing token, add the matching `--outcome ...` to `review`, `plan-review`, `context-review`, or `analysis-result`; never use it to override a report token.
+Lifecycle tokens: `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, `ESCALATE CAPABILITY`; findings-only uses `accept --report`. `REPLAN` needs a graph; `--outcome` only repairs legacy/tokenless reports.
 
 ## Human escalation
 
@@ -97,7 +102,7 @@ python3 <skill>/scripts/dsd_task.py resolve-escalation --run-root ... --phase-id
   --decision .../decision.md --route resume|analysis|accept
 ```
 
-On Human-blocked follow-up triage, `--route accept` cancels its findings and preserves the decision.
+Tick supplies `owner_question`; native-ask it, save the answer as the decision file, resolve it, then `resume-owner`. Follow-up triage `--route accept` cancels its findings while preserving the decision.
 
 ## Cleanup / interrupted process
 
@@ -107,7 +112,7 @@ python3 <skill>/scripts/dsd_task.py sweep-stale --run-root ... --phase-id phase-
 python3 <skill>/scripts/dsd_workspace.py purge-run --run-root ... --dry-run
 ```
 
-`cleanup --force --reason "..."` is explicit abandonment; never raw-delete shared cache/runtime paths.
+`cleanup --force --reason "..."` is explicit abandonment; never raw-delete shared cache/runtime.
 
 ## Same-session continuation
 

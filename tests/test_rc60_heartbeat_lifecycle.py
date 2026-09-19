@@ -9,6 +9,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import parent_tick
+import dsd_task
 
 
 class RC60HeartbeatLifecycleTests(unittest.TestCase):
@@ -62,6 +63,29 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
                 self.assertFalse(result["wake_parent"])
                 tasks.assert_not_called()
 
+    def test_open_owner_question_suspends_pulse_even_while_run_active(self):
+        with patch.object(parent_tick.dsd_task,"load_run",return_value={"run_id":"R","status":"active"}), \
+             patch.object(parent_tick,"load_loop",return_value={"format":parent_tick.FORMAT,"owner_wait":{"open":True,"question_id":"human-decision:P:T:1"}}), \
+             patch.object(parent_tick.dsd_task,"iter_run_tasks") as tasks:
+            result=parent_tick.command_pulse(self.args())
+        self.assertEqual(result["heartbeat_state"],"waiting")
+        self.assertEqual(result["reason"],"owner-question-open")
+        self.assertEqual(result["owner_question_id"],"human-decision:P:T:1")
+        self.assertFalse(result["wake_parent"])
+        tasks.assert_not_called()
+
+    def test_wait_and_resume_owner_are_durable_transport_state(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            run=Path(td)/"run"; run.mkdir()
+            (run/"run.json").write_text(json.dumps({"format":dsd_task.RUN_FORMAT,"run_id":"R","project_root":td,"runtime_root":str(Path(td)/"runtime"),"status":"active"}))
+            opened=parent_tick.command_wait_owner(SimpleNamespace(run_root=run,question_id="runtime-config:grunt"))
+            self.assertTrue(opened["heartbeat_suspended"])
+            self.assertEqual(parent_tick.load_loop(run)["owner_wait"]["question_id"],"runtime-config:grunt")
+            closed=parent_tick.command_resume_owner(SimpleNamespace(run_root=run,question_id="runtime-config:grunt"))
+            self.assertTrue(closed["heartbeat_resumed"])
+            self.assertNotIn("owner_wait",parent_tick.load_loop(run))
+
     def test_active_without_started_attempt_uses_only_slow_health_lane(self):
         result = self.pulse("active", [])
         self.assertEqual(result["heartbeat_state"], "idle-recovery")
@@ -73,6 +97,8 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
         self.assertIn("HEALTH_HEARTBEAT_MS", core)
         self.assertIn("function removeRunHeartbeat", core)
         self.assertIn('status === "human-blocked"', core)
+        self.assertIn("owner_wait", core)
+        self.assertIn('packet.classification === "owner-question-open"', core)
         self.assertIn('status === "paused-by-user"', core)
         self.assertIn('status === "completed" || status === "abandoned"', core)
         self.assertNotIn("const HEARTBEAT_MS =", core)

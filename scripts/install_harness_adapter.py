@@ -63,6 +63,43 @@ def write_json(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def opencode_activation_request_path(project_root: Path) -> Path:
+    return project_root / ".opencode" / "tbag-activation.json"
+
+
+def opencode_activation_marker_path(project_root: Path) -> Path:
+    return project_root / "TBag" / "harness" / "opencode-activation.json"
+
+
+def opencode_activation_token(project_root: Path, transport: dict[str, Any], core: dict[str, Any], ui: list[dict[str, Any]], generation: str, major: int | None) -> str:
+    config=tui_config_path(project_root)
+    config_sha=hashlib.sha256(config.read_bytes()).hexdigest() if config.is_file() else None
+    payload={
+        "major":major,
+        "generation":generation,
+        "transport":transport.get("installed_sha256"),
+        "transport_core":core.get("installed_sha256"),
+        "ui":[item.get("installed_sha256") for item in ui],
+        "tui_config_sha256":config_sha,
+    }
+    return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode()).hexdigest()
+
+
+def blocking_harness_question(*, question_id: str, header: str, question: str, options: list[dict[str,str]], after_answer: str) -> dict[str, Any]:
+    return {
+        "id":question_id,
+        "kind":"harness-bootstrap",
+        "blocking":True,
+        "required_interface":"native-question",
+        "header":header,
+        "question":question,
+        "options":options,
+        "custom_answer":False,
+        "fallback_banner":"╔═ T-BAG — ACTION REQUIRED ═╗",
+        "after_answer":after_answer,
+    }
+
+
 def ensure_hook(data: dict[str, Any], event: str, group: dict[str, Any], marker: str = MARKER) -> bool:
     hooks = data.setdefault("hooks", {})
     groups = hooks.setdefault(event, [])
@@ -300,6 +337,34 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
     )
     result["changed"] = changed
 
+    activation_token=opencode_activation_token(project_root,result,transport_core,ui_results,transport_generation,major)
+    activation_request=opencode_activation_request_path(project_root)
+    write_json(activation_request,{
+        "format":"tbag-opencode-activation-request-v1",
+        "token":activation_token,
+        "transport_generation":transport_generation,
+        "opencode_major":major,
+        "requested_at":utc_stamp(),
+    })
+    activation_marker=opencode_activation_marker_path(project_root)
+    live=load_json(activation_marker)
+    activation_verified=bool(
+        live.get("token")==activation_token
+        and live.get("transport_generation")==transport_generation
+        and live.get("opencode_major")==major
+    )
+    restart_required=not activation_verified
+    bootstrap_question=blocking_harness_question(
+        question_id=f"opencode-restart:{activation_token[:16]}",
+        header="Restart OpenCode",
+        question="T-BAG's project adapter is installed on disk, but this OpenCode process has not proven that it loaded this exact adapter generation. Restart/reload OpenCode, reopen this project/session, then continue. T-BAG will verify the live activation token before launching workers.",
+        options=[
+            {"label":"Restart OpenCode now","value":"restart","description":"Restart/reload the host, then resume this T-BAG conversation."},
+            {"label":"Stop for now","value":"pause","description":"Do not start the T-BAG run yet."},
+        ],
+        after_answer="After OpenCode restarts, rerun install_harness_adapter.py. Do not initialize or launch T-BAG workers until bootstrap_ready=true.",
+    ) if restart_required else None
+
     if major == 1:
         presentation_note = "OpenCode 1.x requires the T-BAG TUI file to be listed in .opencode/tui.json or tui.jsonc; the installer has merged that registration. After restart, /tbag and the sidebar should appear. In the built-in Plugins dialog, tbag.status.v1 should be listed enabled+active."
     elif major == 2:
@@ -322,11 +387,17 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         "interactive_supervision": "detached-core-launch; optional-tbag-follow-rearm",
         "autonomous_supervision": "two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm",
         "live_probe_tool": None if major == 2 else "tbag_follow",
-        "live_capability_verified": False,
-        "activation": "restart-required-to-load-refreshed-adapter" if changed else "disk-current-live-registry-unverified",
+        "live_capability_verified": activation_verified,
+        "activation": "live-current" if activation_verified else "restart-required-to-prove-live-adapter",
+        "activation_token": activation_token,
+        "activation_request": str(activation_request),
+        "activation_marker": str(activation_marker),
+        "restart_required": restart_required,
+        "bootstrap_ready": activation_verified,
+        "blocking_question": bootstrap_question,
         "legacy_plugin_removed": legacy_removed,
         "stale_v1_companion_removed": stale_v1_removed,
-        "manual_step": "The installer proves only the project adapter file on disk plus project TUI config; it cannot inspect the current OpenCode plugin registry or prove transport/presentation live. " + presentation_note + " Once the server adapter is live, a normal parent tick/launch enrolls two-lane supervision: a 60-second deterministic completion pulse plus a slower parent health heartbeat; no separate heartbeat setup is required. Never run core dsd_attempt.py follow or a Bash/Python wait/poll in the parent turn.",
+        "manual_step": ("Live activation is proven by the project-local adapter token." if activation_verified else "Restart/reload OpenCode; the run is bootstrap-blocked until the live adapter writes the matching activation token.") + " " + presentation_note + " Once live, normal tick/launch enrolls supervision automatically.",
     })
     return result
 
@@ -336,7 +407,30 @@ def install_kilo(project_root: Path, skill_root: Path) -> dict[str, Any]:
         project_root, "kilo", Path(".kilo/plugin/dsd-compaction.ts"),
         skill_root / "adapters" / "kilo" / "dsd-compaction.ts",
     )
-    result["manual_step"] = "Restart/reload Kilo so the project-local plugin is active; it injects reconcile-first T-BAG orientation during compaction."
+    token=hashlib.sha256(json.dumps({"plugin":result.get("installed_sha256"),"generation":"kilo-v1"},sort_keys=True,separators=(",",":")).encode()).hexdigest()
+    request=project_root/".kilo"/"tbag-activation.json"
+    marker=project_root/"TBag"/"harness"/"kilo-activation.json"
+    write_json(request,{"format":"tbag-kilo-activation-request-v1","token":token,"requested_at":utc_stamp()})
+    live=load_json(marker)
+    ready=bool(live.get("token")==token)
+    result.update({
+        "activation_token":token,
+        "activation_request":str(request),
+        "activation_marker":str(marker),
+        "restart_required":not ready,
+        "bootstrap_ready":ready,
+        "blocking_question":None if ready else blocking_harness_question(
+            question_id=f"kilo-restart:{token[:16]}",
+            header="Restart Kilo",
+            question="T-BAG's project plugin is installed, but this Kilo process has not proven that it loaded this exact generation. Restart/reload Kilo, reopen the project, then continue.",
+            options=[
+                {"label":"Restart Kilo now","value":"restart","description":"Restart/reload Kilo, then resume this T-BAG conversation."},
+                {"label":"Stop for now","value":"pause","description":"Do not start the T-BAG run yet."},
+            ],
+            after_answer="After restart, rerun install_harness_adapter.py and continue only when bootstrap_ready=true.",
+        ),
+        "manual_step":"Live activation is proven by the project-local Kilo token." if ready else "Restart/reload Kilo; T-BAG bootstrap remains blocked until the loaded plugin writes the matching activation token.",
+    })
     return result
 
 def main() -> int:

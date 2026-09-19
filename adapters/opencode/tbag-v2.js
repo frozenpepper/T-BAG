@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, renameSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs"
 import {
   COMPLETION_PULSE_MS,
   HEALTH_HEARTBEAT_MS,
@@ -8,7 +8,7 @@ import {
   createWakeQueue,
   decode,
   isCoreAttemptCommand,
-  isParentTickCommand,
+  isParentTickCommand, isParentControlCommand,
   startHeartbeatTimers,
   structuredObjects,
   wakeText,
@@ -31,6 +31,28 @@ function projectRoot(ctx) {
 }
 
 function transportPath(runRoot) { return `${runRoot}/.transport/opencode.json` }
+function markActivation(root) {
+  if (!root) return
+  try {
+    const request = JSON.parse(readFileSync(`${root}/.opencode/tbag-activation.json`, "utf8"))
+    if (!request?.token) return
+    const dir = `${root}/TBag/harness`
+    const path = `${dir}/opencode-activation.json`
+    const tmp = `${path}.tmp-${process.pid}`
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(tmp, JSON.stringify({
+      format: "tbag-opencode-activation-v1",
+      token: request.token,
+      transport_generation: "v2",
+      opencode_major: 2,
+      adapter_pid: process.pid,
+      activated_at: new Date().toISOString(),
+    }, null, 2) + "\n")
+    renameSync(tmp, path)
+  } catch (_) {
+    // Bootstrap proof is diagnostic/transport state; failure must not corrupt host startup.
+  }
+}
 function persistTransport(runRoot) {
   if (!runRoot) return
   try {
@@ -349,6 +371,7 @@ const TBagV2Plugin = {
   async setup(ctx) {
     const root = projectRoot(ctx)
     if (!root) throw new Error("T-BAG OpenCode 2 adapter cannot resolve the project root")
+    markActivation(root)
 
     const controller = new AbortController()
     const heartbeatTimers = startHeartbeatTimers({
@@ -380,8 +403,8 @@ const TBagV2Plugin = {
       const command = String(event.input?.command || "")
       const sessionID = event.sessionID
       const text = resultText(event.result)
-      if (isParentTickCommand(command) && sessionID) {
-        repairObserversFromTick(ctx, sessionID, root, command, text)
+      if (isParentControlCommand(command) && sessionID) {
+        if (isParentTickCommand(command)) repairObserversFromTick(ctx, sessionID, root, command, text)
         syncHeartbeatFromTick(sessionID, command, text)
       }
       if (!isCoreAttemptCommand(command, "launch")) return

@@ -460,6 +460,12 @@ class TaskControlTests(unittest.TestCase):
         analysis=self.gated_analysis_report("HUMAN-ACCEPT",role="discovery",name="discovery-1",text="ESCALATE: this is an owner acceptance decision.\n")
         a.outcome="escalate"; a.report=analysis
         self.assertEqual(dsd_task.command_analysis_result(a)["status"],"blocked")
+        state=dsd_task.command_reconcile_run(type("R",(),{"run_root":self.run,"phase_id":"P1","no_sweep":True,"details":False})())
+        block=next(item for item in state["human_blocks"] if item["task_id"]=="HUMAN-ACCEPT")
+        question=block["owner_question"]
+        self.assertTrue(question["blocking"]); self.assertEqual(question["required_interface"],"native-question")
+        self.assertEqual(question["header"],"T-BAG needs you")
+        self.assertIn("accept",question["allowed_routes"])
         decision=self.run/"owner-accept.md"; decision.write_text("Accept this reviewed implementation despite the recorded escalation; preserve the red evidence.\n")
         a.decision=decision; a.route="accept"
         out=dsd_task.command_resolve_escalation(a)

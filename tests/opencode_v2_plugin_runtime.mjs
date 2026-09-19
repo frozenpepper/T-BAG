@@ -11,6 +11,8 @@ const tmp = fs.mkdtempSync(path.join(scratchRoot, "opencode-v2-runtime-"))
 const runRoot = path.join(tmp, "run")
 fs.mkdirSync(runRoot, { recursive: true })
 fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
+fs.mkdirSync(path.join(tmp, ".opencode"), { recursive: true })
+fs.writeFileSync(path.join(tmp, ".opencode", "tbag-activation.json"), JSON.stringify({ token: "rc63-v2-token", transport_generation: "v2", opencode_major: 2 }))
 
 const encoder = new TextEncoder()
 const observers = []
@@ -80,6 +82,10 @@ const plugin = mod.default
 assert.equal(plugin.id, "tbag.transport")
 const cleanup = await plugin.setup(ctx)
 assert.equal(typeof cleanup, "function")
+const activation = JSON.parse(fs.readFileSync(path.join(tmp, "TBag", "harness", "opencode-activation.json"), "utf8"))
+assert.equal(activation.token, "rc63-v2-token")
+assert.equal(activation.transport_generation, "v2")
+assert.equal(activation.opencode_major, 2)
 const before = toolHooks.get("execute.before")
 const after = toolHooks.get("execute.after")
 assert.equal(typeof before, "function")
@@ -93,6 +99,22 @@ function launchCommand(task) {
 function launchResult(task) {
   return { status: "started", run_root: runRoot, phase_id: "P", task_id: task, role: "implementer", event_dir: path.join(runRoot, `event-${task}`) }
 }
+
+const tickCommand = `python3 TBag/tools/parent_tick.py tick --run-root "${runRoot}"`
+await before({ tool: "bash", sessionID: "ses-wait", input: { command: tickCommand } })
+await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: { command: tickCommand }, result: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "workers-running" }) })
+let transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.ok(transportState.parent_sessions.some((x) => x.session_id === "ses-wait"), "tick must enroll V2 heartbeat")
+fs.writeFileSync(path.join(runRoot, "parent-loop.json"), JSON.stringify({ format: "tbag-parent-loop-v1", owner_wait: { open: true, question_id: "q1" } }))
+const waitCommand = `python3 TBag/tools/parent_tick.py wait-owner --run-root "${runRoot}" --question-id q1`
+await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: { command: waitCommand }, result: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "owner-question-open", heartbeat_state: "waiting" }) })
+transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.ok(!transportState.parent_sessions.some((x) => x.session_id === "ses-wait"), "wait-owner must immediately unenroll V2 heartbeat")
+fs.writeFileSync(path.join(runRoot, "parent-loop.json"), JSON.stringify({ format: "tbag-parent-loop-v1" }))
+const resumeCommand = `python3 TBag/tools/parent_tick.py resume-owner --run-root "${runRoot}" --question-id q1`
+await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: { command: resumeCommand }, result: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "owner-question-closed", heartbeat_state: "running" }) })
+transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.ok(transportState.parent_sessions.some((x) => x.session_id === "ses-wait"), "resume-owner must re-enroll V2 heartbeat")
 
 // Current V2 lifecycle: execution.started marks busy; completion coalesces until
 // execution.succeeded releases the same parent session.

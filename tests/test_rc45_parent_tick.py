@@ -22,6 +22,11 @@ class Rc45ProtocolTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"must begin"):
                     dsd_task.declared_report_outcome(report,"verification",required=True)
 
+    def test_gate_rejects_duplicate_task_ids(self):
+        args=SimpleNamespace(run_root=Path('/run'),phase_id='P',task_id=['T1','T1'],event_dir=None)
+        with self.assertRaisesRegex(ValueError,"duplicate --task-id"):
+            dsd_attempt.command_gate(args)
+
     def test_followup_parser_handles_none_footer_and_wrapped_bullet(self):
         with tempfile.TemporaryDirectory() as td:
             report=Path(td)/"report.md"
@@ -120,6 +125,44 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertEqual(out["classification"],"actions-ready")
         self.assertEqual(out["actions"],[good])
         self.assertEqual(out["blocked_actions"][0]["task_id"],"BAD")
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    def test_three_identical_action_ticks_stop_repeating_and_intervene(self,_load,_poison,_advance,_owner):
+        action={"action":"launch-analyst-discovery","phase_id":"P","task_id":"T"}
+        state=self.base_state(first_useful_actions=[action],backlog_count=1)
+        with mock.patch.object(parent_tick,"reconcile",return_value=state), \
+             mock.patch.object(parent_tick,"_launch_action_blocker",return_value=None), \
+             mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
+            first=parent_tick.command_tick(self.args)
+            second=parent_tick.command_tick(self.args)
+            third=parent_tick.command_tick(self.args)
+        self.assertEqual(first["classification"],"actions-ready")
+        self.assertEqual(second["classification"],"actions-ready")
+        self.assertEqual(third["classification"],"loop-suspected")
+        self.assertEqual(third["turn"],"intervene")
+        self.assertNotIn("actions",third)
+        self.assertEqual(third["loop_suspected"]["count"],3)
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    @mock.patch.object(parent_tick.dsd_task,"command_set_run_status",return_value={"status":"human-blocked"})
+    def test_human_block_is_native_question_boundary_not_notice(self,_status,_load,_poison,_advance,_owner):
+        question={"id":"human-decision:P:T:1","blocking":True,"required_interface":"native-question","header":"T-BAG needs you","question":"Choose","options":[]}
+        state=self.base_state(human_blocks=[{"phase_id":"P","task_id":"T","action":"await-human-decision","owner_question":question}],backlog_count=1)
+        with mock.patch.object(parent_tick,"reconcile",return_value=state), \
+             mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"owner-question-required")
+        self.assertEqual(out["turn"],"ask-owner")
+        self.assertTrue(out["owner_question_required"])
+        self.assertEqual(out["owner_questions"],[question])
+        self.assertNotIn("owner_notice",out)
+        self.assertEqual(out["run_status"],"human-blocked")
 
     @mock.patch.object(parent_tick.dsd_task,"command_set_run_status",return_value={"status":"completed"})
     def test_finish_refuses_nonquiescent_and_accepts_completion_candidate(self,set_status):

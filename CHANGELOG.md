@@ -2,6 +2,14 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC63 — Human-attention channel and quiet waits
+
+- Split Human communication into passive `owner_notice` updates and blocking `owner_question` interactions. Passive updates carry a stable `━━ T-BAG UPDATE ━━` banner; every true authority/input blocker must use the parent harness's native question surface rather than ordinary chat prose.
+- Added durable `wait-owner` / `resume-owner` transport state. While a native question is open, OpenCode suspends both the 60-second completion pulse and slow health heartbeat—even if detached workers remain live—then reconciles their durable completions after the Human answer resumes the run.
+- OpenCode and Kilo installation now use proof-backed activation tokens. A newly installed adapter/plugin cannot start a run until the actually loaded host generation acknowledges the exact token; restart/reload requirements therefore become blocking native questions instead of buried startup prose.
+- Missing owner-supplied runtime configuration is promoted to a native question; deterministic/Analyst work is exhausted before Human escalation so the attention channel remains rare. Three unchanged action ticks now stop as `loop-suspected`, and duplicate gate task IDs are rejected.
+- Current routing already covers older field-report defects: Grunt `ESCALATE` routes to Analyst, same-session poison scanning is tick-owned, and Markdown-decorated explicit routing tokens are accepted structurally.
+
 ## v2.2.0 RC62 — bounded disk use and dependency reuse
 
 - Replaced per-attempt npm/Node compile caches with project-local shared caches under `PROJECT/TBag/cache` while keeping genuine temporary files attempt-local. Terminal/stale attempt `scratch/` is now reclaimed automatically without deleting reports, logs, gates or terminal evidence.

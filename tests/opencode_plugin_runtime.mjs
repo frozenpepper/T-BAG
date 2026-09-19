@@ -27,6 +27,8 @@ fs.mkdirSync(pluginDir, { recursive: true })
 const pluginCopy = path.join(pluginDir, "tbag.js")
 fs.copyFileSync(source, pluginCopy)
 fs.copyFileSync(path.resolve(path.dirname(source), "..", "tbag-opencode-transport-core.js"), path.join(tmp, "tbag-opencode-transport-core.js"))
+fs.mkdirSync(path.join(tmp, ".opencode"), { recursive: true })
+fs.writeFileSync(path.join(tmp, ".opencode", "tbag-activation.json"), JSON.stringify({ token: "rc63-v1-token", transport_generation: "v1", opencode_major: 1 }))
 
 const encoder = new TextEncoder()
 const syncCalls = []
@@ -92,13 +94,17 @@ const client = {
   } },
   app: { log: async (request) => { logs.push(request); return {} } },
 }
-const ctx = { client, directory: "/project", worktree: "/project" }
+const ctx = { client, directory: tmp, worktree: tmp }
 const module = await import(pathToFileURL(pluginCopy).href)
 assert.deepEqual(Object.keys(module), ["default"], "adapter must export exactly one plugin function")
 assert.equal(typeof module.default, "function")
 const plugin = await module.default(ctx)
 assert.deepEqual(Object.keys(plugin.tool), ["tbag_follow"], "tbag_follow is the only stable custom tool")
-const context = { sessionID: "ses-main", directory: "/project", worktree: "/project" }
+const activation = JSON.parse(fs.readFileSync(path.join(tmp, "TBag", "harness", "opencode-activation.json"), "utf8"))
+assert.equal(activation.token, "rc63-v1-token")
+assert.equal(activation.transport_generation, "v1")
+assert.equal(activation.opencode_major, 1)
+const context = { sessionID: "ses-main", directory: tmp, worktree: tmp }
 const runRoot = path.join(tmp, "run")
 fs.mkdirSync(runRoot, { recursive: true })
 fs.writeFileSync(path.join(runRoot, "run.json"), JSON.stringify({ status: "active" }))
@@ -115,6 +121,22 @@ await plugin["tool.execute.before"](
 )
 const transport = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
 assert.ok(transport.parent_sessions.some((x) => x.session_id === "ses-auto" && x.run_root === enrolledRun), "parent tick must auto-enroll heartbeat supervision")
+
+const waitCommand = `python3 TBag/tools/parent_tick.py wait-owner --run-root "${enrolledRun}" --question-id q1`
+await plugin["tool.execute.after"](
+  { tool: "bash", sessionID: "ses-auto", callID: "wait-auto", args: { command: waitCommand } },
+  { title: "bash", output: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "owner-question-open", heartbeat_state: "waiting" }), metadata: {} },
+)
+let waitRegistry = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
+assert.ok(!waitRegistry.parent_sessions.some((x) => x.session_id === "ses-auto" && x.run_root === enrolledRun), "wait-owner must immediately unenroll heartbeat supervision")
+fs.writeFileSync(path.join(enrolledRun, "parent-loop.json"), JSON.stringify({ format: "tbag-parent-loop-v1" }))
+const resumeCommand = `python3 TBag/tools/parent_tick.py resume-owner --run-root "${enrolledRun}" --question-id q1`
+await plugin["tool.execute.after"](
+  { tool: "bash", sessionID: "ses-auto", callID: "resume-auto", args: { command: resumeCommand } },
+  { title: "bash", output: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "owner-question-closed", heartbeat_state: "running" }), metadata: {} },
+)
+waitRegistry = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
+assert.ok(waitRegistry.parent_sessions.some((x) => x.session_id === "ses-auto" && x.run_root === enrolledRun), "resume-owner must re-enroll heartbeat supervision")
 
 function launchPayload(task, suffix = task) {
   return {

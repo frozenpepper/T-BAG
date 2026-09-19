@@ -33,6 +33,10 @@ export function isParentTickCommand(command) {
   return /parent_tick\.py["']?\s+tick(?:\s|$)/.test(String(command || ""))
 }
 
+export function isParentControlCommand(command) {
+  return /parent_tick\.py["']?\s+(?:tick|wait-owner|resume-owner)(?:\s|$)/.test(String(command || ""))
+}
+
 export function backgroundLaunchCommand(command) {
   return String(command || "").replace(/(dsd_attempt\.py["']?\s+launch)(?!\s+--background-prepare)/g, "$1 --background-prepare")
 }
@@ -99,6 +103,10 @@ export function createHeartbeatRegistry({
 
   function durableHeartbeatState(runRoot) {
     try {
+      try {
+        const loop = JSON.parse(readFileSync(`${runRoot}/parent-loop.json`, "utf8"))
+        if (loop?.owner_wait?.open === true) return "waiting"
+      } catch (_) {}
       const status = JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8")).status
       return heartbeatStateForStatus(status)
     } catch (_) {
@@ -159,14 +167,19 @@ export function createHeartbeatRegistry({
   function syncHeartbeatFromTick(sessionID, command, text) {
     const runRoot = commandArg(command, "run-root")
     if (!runRoot || !sessionID) return
-    const item = runHeartbeats.get(heartbeatKey(sessionID, runRoot))
-    if (!item) return
     const packet = structuredObjects(text).find((value) => value?.format === "tbag-parent-loop-v1")
     if (!packet) return
+    let item = runHeartbeats.get(heartbeatKey(sessionID, runRoot))
     const statusState = heartbeatStateForStatus(packet.run_status)
-    if (statusState !== "running" || packet.classification === "awaiting-owner" || packet.classification === "run-human-blocked") {
+    const questionWaiting = packet.heartbeat_state === "waiting" || packet.classification === "owner-question-open" || packet.owner_question_required === true
+    if (statusState !== "running" || questionWaiting || packet.classification === "run-human-blocked") {
       removeRunHeartbeat(sessionID, runRoot)
       return
+    }
+    if (!item) {
+      registerRunHeartbeat(sessionID, { run_root: runRoot })
+      item = runHeartbeats.get(heartbeatKey(sessionID, runRoot))
+      if (!item) return
     }
     if (["active-idle", "completion-candidate", "recovery-required"].includes(packet.classification)) item.heartbeatState = "idle-recovery"
     else item.heartbeatState = "running"

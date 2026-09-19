@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { mkdirSync, writeFileSync, renameSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs"
 import {
   COMPLETION_PULSE_MS,
   HEALTH_HEARTBEAT_MS,
@@ -9,7 +9,7 @@ import {
   createWakeQueue,
   decode,
   isCoreAttemptCommand,
-  isParentTickCommand,
+  isParentTickCommand, isParentControlCommand,
   startHeartbeatTimers,
   structuredObjects,
   wakeText,
@@ -29,6 +29,28 @@ const wakeInflightSessions = new Set()
 const deletedSessions = new Set()
 
 function transportPath(runRoot) { return `${runRoot}/.transport/opencode.json` }
+function markActivation(root) {
+  if (!root) return
+  try {
+    const request = JSON.parse(readFileSync(`${root}/.opencode/tbag-activation.json`, "utf8"))
+    if (!request?.token) return
+    const dir = `${root}/TBag/harness`
+    const path = `${dir}/opencode-activation.json`
+    const tmp = `${path}.tmp-${process.pid}`
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(tmp, JSON.stringify({
+      format: "tbag-opencode-activation-v1",
+      token: request.token,
+      transport_generation: "v1",
+      opencode_major: 1,
+      adapter_pid: process.pid,
+      activated_at: new Date().toISOString(),
+    }, null, 2) + "\n")
+    renameSync(tmp, path)
+  } catch (_) {
+    // Bootstrap proof is diagnostic/transport state; failure must not corrupt host startup.
+  }
+}
 function persistTransport(runRoot) {
   if (!runRoot) return
   try {
@@ -267,6 +289,7 @@ const followArgs = {
 
 const TBagPlugin = async (ctx) => {
   const root = process.env.TBAG_PROJECT_ROOT || ctx.worktree || ctx.directory
+  markActivation(root)
   startHeartbeatTimers({
     host: ctx.client,
     runHeartbeats,
@@ -325,8 +348,8 @@ const TBagPlugin = async (ctx) => {
     const command=String(input?.args?.command || "")
     const sessionID=input.sessionID
     const root=ctx.worktree || ctx.directory
-    if (isParentTickCommand(command) && sessionID && root) {
-      repairObserversFromTick(ctx.client,sessionID,root,command,output)
+    if (isParentControlCommand(command) && sessionID && root) {
+      if (isParentTickCommand(command)) repairObserversFromTick(ctx.client,sessionID,root,command,output)
       syncHeartbeatFromTick(sessionID,command,String(output?.output || ""))
     }
     if (!isCoreAttemptCommand(command,"launch")) return

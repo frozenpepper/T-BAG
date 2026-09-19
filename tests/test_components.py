@@ -506,6 +506,9 @@ class ComponentsTests(unittest.TestCase):
                     self.assertEqual(data['interactive_supervision'],'detached-core-launch; optional-tbag-follow-rearm')
                     self.assertEqual(data['autonomous_supervision'],'two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm')
                     self.assertNotIn('required_live_tool',data); self.assertFalse(data['live_capability_verified'])
+                    self.assertFalse(data['bootstrap_ready']); self.assertTrue(data['restart_required'])
+                    self.assertEqual(data['blocking_question']['required_interface'],'native-question')
+                    self.assertEqual(data['blocking_question']['header'],'Restart OpenCode')
                     self.assertTrue(data['disk_matches_source']); self.assertEqual(data['source_sha256'],data['installed_sha256'])
                     plugin=project/'.opencode'/'plugins'/'tbag.js'; self.assertTrue(plugin.is_file())
                     text=plugin.read_text()
@@ -515,6 +518,11 @@ class ComponentsTests(unittest.TestCase):
                     else:
                         self.assertEqual(data['live_probe_tool'],'tbag_follow'); self.assertEqual(data['transport_generation'],'v1')
                         self.assertIn('tbag_follow: tool({',text); self.assertNotIn('tbag_launch: tool({',text)
+                if harness=='kilo':
+                    self.assertFalse(data['bootstrap_ready']); self.assertTrue(data['restart_required'])
+                    self.assertEqual(data['blocking_question']['required_interface'],'native-question')
+                    self.assertEqual(data['blocking_question']['header'],'Restart Kilo')
+                    self.assertIn('markActivation', (project/'.kilo'/'plugin'/'dsd-compaction.ts').read_text())
 
     def test_reinstall_prunes_obsolete_managed_compaction_hooks(self):
         project=self.root/'adapter-prune'; project.mkdir(); git(project,'init','-q')
@@ -540,9 +548,12 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(data['interactive_supervision'],'detached-core-launch; optional-tbag-follow-rearm')
         self.assertEqual(data['autonomous_supervision'],'two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm')
         self.assertNotIn('required_live_tool',data); self.assertFalse(data['live_capability_verified'])
+        self.assertFalse(data['bootstrap_ready']); self.assertTrue(data['restart_required'])
+        self.assertEqual(data['blocking_question']['required_interface'],'native-question')
+        self.assertEqual(data['blocking_question']['header'],'Restart OpenCode')
         self.assertTrue(data['changed']); self.assertTrue(data['disk_matches_source']); self.assertEqual(data['source_sha256'],data['installed_sha256'])
         self.assertTrue(Path(data['backup']).is_file())
-        self.assertEqual(data['activation'],'restart-required-to-load-refreshed-adapter')
+        self.assertEqual(data['activation'],'restart-required-to-prove-live-adapter')
         self.assertTrue(data['legacy_plugin_removed']); self.assertFalse(legacy.exists())
         plugin=plugins/'tbag.js'; self.assertTrue(plugin.is_file())
         text=plugin.read_text(); self.assertIn('ctx.session.prompt' if data.get('opencode_major')==2 else 'client.session.prompt',text); self.assertNotIn('tbag_supervise',text)
@@ -552,13 +563,34 @@ class ComponentsTests(unittest.TestCase):
         else:
             self.assertEqual(data['live_probe_tool'],'tbag_follow'); self.assertEqual(data['transport_generation'],'v1')
             self.assertIn('tbag_follow: tool({',text); self.assertNotIn('tbag_launch: tool({',text)
-        self.assertIn('proves only the project adapter file on disk',data['manual_step']); self.assertIn('current OpenCode plugin registry',data['manual_step'])
+        self.assertIn('bootstrap-blocked',data['manual_step'])
+        marker=Path(data['activation_marker']); marker.parent.mkdir(parents=True,exist_ok=True)
+        marker.write_text(json.dumps({
+            "format":"tbag-opencode-activation-v1",
+            "token":data["activation_token"],
+            "transport_generation":data["transport_generation"],
+            "opencode_major":data["opencode_major"],
+        }))
 
-        # A second refresh is idempotent and still refuses to claim live-host state.
+        # A second refresh is idempotent and accepts only the matching live-adapter proof.
         cp2=subprocess.run([sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','opencode','--project-root',str(project),'--skill-root',str(ROOT)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         self.assertEqual(cp2.returncode,0,cp2.stderr); second=json.loads(cp2.stdout)
         self.assertFalse(second['changed']); self.assertIsNone(second['backup']); self.assertTrue(second['disk_matches_source'])
-        self.assertFalse(second['live_capability_verified']); self.assertEqual(second['activation'],'disk-current-live-registry-unverified')
+        self.assertTrue(second['live_capability_verified']); self.assertTrue(second['bootstrap_ready'])
+        self.assertFalse(second['restart_required']); self.assertIsNone(second['blocking_question'])
+        self.assertEqual(second['activation'],'live-current')
+
+    def test_kilo_restart_handshake_accepts_only_matching_live_marker(self):
+        project=self.root/'adapter-kilo-restart'; project.mkdir(); git(project,'init','-q')
+        cmd=[sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','kilo','--project-root',str(project),'--skill-root',str(ROOT)]
+        first=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(first.returncode,0,first.stderr); data=json.loads(first.stdout)
+        self.assertFalse(data['bootstrap_ready']); self.assertEqual(data['blocking_question']['required_interface'],'native-question')
+        marker=Path(data['activation_marker']); marker.parent.mkdir(parents=True,exist_ok=True)
+        marker.write_text(json.dumps({"format":"tbag-kilo-activation-v1","token":data["activation_token"]}))
+        second=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(second.returncode,0,second.stderr); live=json.loads(second.stdout)
+        self.assertTrue(live['bootstrap_ready']); self.assertFalse(live['restart_required']); self.assertIsNone(live['blocking_question'])
 
     def test_opencode_plugin_runtime_launch_follow_compatibility_and_wake(self):
         node=shutil.which('node')
