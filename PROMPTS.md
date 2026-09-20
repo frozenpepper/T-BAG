@@ -12,6 +12,8 @@ python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 
 Run on owner turn/resume/wake. For `owner_question_required`: run `actions_before_question`, then `parent_tick.py wait-owner --question-id <id>`, ask through the native UI, and end the turn. After applying the answer, `resume-owner --question-id <id>` then tick. Passive `owner_notice` is bannered and acknowledged. `completion-candidate` means finish or replan.
 
+Do not pipe/filter/summarize stdout from `parent_tick.py tick` or `dsd_attempt.py launch` in the parent shell command. The OpenCode adapter consumes their structured JSON for immediate heartbeat/observer repair. RC64 also self-heals from durable state when that output is mangled, so this is a latency/diagnostic rule rather than a correctness dependency.
+
 ## Harness bootstrap
 
 ```bash
