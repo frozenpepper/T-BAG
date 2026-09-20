@@ -30,6 +30,8 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
         }])
         self.assertEqual(result["heartbeat_state"], "running")
         self.assertFalse(result["wake_parent"])
+        self.assertEqual(len(result["live_attempts"]), 1)
+        self.assertEqual(result["live_attempts"][0]["task_id"], "T1")
 
     def test_fast_pulse_wakes_when_started_attempt_process_stops_without_terminal(self):
         result = self.pulse("active", [{
@@ -39,6 +41,7 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
         self.assertTrue(result["wake_parent"])
         self.assertEqual(result["reason"], "attempt-stopped")
         self.assertFalse(result["stopped_attempts"][0]["terminal_present"])
+        self.assertEqual(result["live_attempts"], [])
 
     def test_fast_pulse_ignores_scheduler_and_human_block_semantics(self):
         result = self.pulse("active", [{
@@ -102,10 +105,16 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
         self.assertIn('status === "paused-by-user"', core)
         self.assertIn('status === "completed" || status === "abandoned"', core)
         self.assertNotIn("const HEARTBEAT_MS =", core)
+        self.assertIn('["running", "idle-recovery"].includes(item.heartbeatState)', core)
+        self.assertIn('args?.activity_hint === "launch"', core)
+        self.assertIn('typeof onPulse === "function"', core)
         for rel in ("adapters/opencode/tbag.js", "adapters/opencode/tbag-v2.js"):
             source = (ROOT / rel).read_text()
             self.assertIn("../tbag-opencode-transport-core.js", source)
             self.assertIn("startHeartbeatTimers", source)
+            self.assertIn("repairObserversFromPacket", source)
+            self.assertIn("onPulse:", source)
+            self.assertIn('"health"', source)
 
     def test_owner_update_reasons_distinguish_wait_pause_and_terminal(self):
         waiting = parent_tick.update_due(
