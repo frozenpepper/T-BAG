@@ -274,7 +274,7 @@ function watchPreparation(ctx, sessionID, item) {
   persistTransport(entry.run_root)
 }
 
-function repairObserversFromPacket(ctx, sessionID, root, runRoot, packet) {
+function repairTransportFromPacket(ctx, sessionID, root, runRoot, packet) {
   const live = Array.isArray(packet?.live_attempts) ? packet.live_attempts : []
   for (const item of live) {
     if (!item?.phase_id || !item?.task_id || !item?.event_dir) continue
@@ -295,13 +295,18 @@ function repairObserversFromPacket(ctx, sessionID, root, runRoot, packet) {
       })
     }
   }
+  const preparing = Array.isArray(packet?.live_preparations) ? packet.live_preparations : []
+  for (const item of preparing) {
+    if (!item?.phase_id || !item?.task_id || !Number.isInteger(item?.preparation_pid)) continue
+    watchPreparation(ctx, sessionID, { ...item, run_root: runRoot })
+  }
   persistTransport(runRoot)
 }
 
 function repairObserversFromTick(ctx, sessionID, root, command, text) {
   const runRoot = commandArg(command, "run-root")
   if (!runRoot) return
-  for (const packet of structuredObjects(text)) repairObserversFromPacket(ctx, sessionID, root, runRoot, packet)
+  for (const packet of structuredObjects(text)) repairTransportFromPacket(ctx, sessionID, root, runRoot, packet)
 }
 
 function eventSessionID(event) {
@@ -387,7 +392,7 @@ const TBagV2Plugin = {
       persistTransport,
       transportErrors,
       queueWake,
-      onPulse: (item, pulse) => repairObserversFromPacket(ctx, item.sessionID, root, item.run_root, pulse),
+      onPulse: (item, pulse) => repairTransportFromPacket(ctx, item.sessionID, root, item.run_root, pulse),
     })
 
     await ctx.tool.hook("execute.before", (event) => {
