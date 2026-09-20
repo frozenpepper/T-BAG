@@ -193,7 +193,31 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
 
     live: list[dict[str, Any]] = []
     stopped: list[dict[str, Any]] = []
+    live_preparations: list[dict[str, Any]] = []
+    stopped_preparations: list[dict[str, Any]] = []
     for task in dsd_task.iter_run_tasks(run):
+        phase = str(task.get("phase_id") or "")
+        task_id = str(task.get("task_id") or "")
+        if phase and task_id:
+            marker = dsd_task.task_root(run, phase, task_id) / "launch-preparation.json"
+            if marker.is_file():
+                try:
+                    preparation = dsd_task.load_json(marker)
+                except Exception:
+                    preparation = {}
+                pid = preparation.get("pid")
+                item = {
+                    "phase_id": phase,
+                    "task_id": task_id,
+                    "preparation_pid": pid,
+                    "preparation": str(marker),
+                    "role": preparation.get("role"),
+                }
+                if isinstance(pid, int) and pid > 0 and dsd_attempt.pid_alive(pid):
+                    live_preparations.append(item)
+                else:
+                    stopped_preparations.append(item)
+
         attempts = [item for item in task.get("attempts", []) if isinstance(item, dict)]
         if not attempts:
             continue
@@ -213,25 +237,35 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
         else:
             live.append(item)
 
-    if stopped:
+    if stopped or stopped_preparations:
+        reason = "attempt-stopped" if stopped and not stopped_preparations else "preparation-stopped" if stopped_preparations and not stopped else "attempt-or-preparation-stopped"
         return {
             **base,
             "heartbeat_state": "running",
             "wake_parent": True,
-            "reason": "attempt-stopped",
+            "reason": reason,
             "stopped_attempts": stopped,
+            "stopped_preparations": stopped_preparations,
+            "live_attempts": live,
+            "live_preparations": live_preparations,
         }
-    if live:
+    if live or live_preparations:
+        reason = "workers-still-running" if live else "launch-preparation-running"
         return {
             **base,
             "heartbeat_state": "running",
-            "reason": "workers-still-running",
+            "reason": reason,
             "live_count": len(live),
+            "preparation_count": len(live_preparations),
+            "live_attempts": live,
+            "live_preparations": live_preparations,
         }
     return {
         **base,
         "heartbeat_state": "idle-recovery",
         "reason": "no-started-attempt-is-running",
+        "live_attempts": [],
+        "live_preparations": [],
     }
 
 

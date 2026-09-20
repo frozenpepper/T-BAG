@@ -138,6 +138,37 @@ await plugin["tool.execute.after"](
 waitRegistry = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
 assert.ok(waitRegistry.parent_sessions.some((x) => x.session_id === "ses-auto" && x.run_root === enrolledRun), "resume-owner must re-enroll heartbeat supervision")
 
+// A prior idle tick must not poison later work. A recognized launch is direct
+// activity evidence and must immediately reopen the fast completion lane.
+const idleTickCommand = `python3 TBag/tools/parent_tick.py tick --run-root "${enrolledRun}"`
+await plugin["tool.execute.after"](
+  { tool: "bash", sessionID: "ses-auto", callID: "idle-auto", args: { command: idleTickCommand } },
+  { title: "bash", output: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "active-idle", heartbeat_state: "idle-recovery" }), metadata: {} },
+)
+let idleRegistry = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
+assert.equal(idleRegistry.parent_sessions.find((x) => x.session_id === "ses-auto")?.heartbeat_state, "idle-recovery")
+const promoteCommand = `python3 TBag/tools/dsd_attempt.py launch --run-root "${enrolledRun}" --phase-id P --task-id PROMOTE`
+const promoteOut = { args: { command: promoteCommand } }
+await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ses-auto", callID: "promote-auto" }, promoteOut)
+idleRegistry = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
+assert.equal(idleRegistry.parent_sessions.find((x) => x.session_id === "ses-auto")?.heartbeat_state, "running", "new launch must clear stale idle-recovery")
+
+// Filtering launch stdout is degraded but bounded: preserve heartbeat enrollment
+// and queue one ordinary reconciliation wake instead of waiting for the slow lane.
+const mangledCommand = `python3 TBag/tools/dsd_attempt.py launch --run-root "${enrolledRun}" --phase-id P --task-id MANGLED | head -n 1`
+const mangledOut = { args: { command: mangledCommand } }
+await plugin["tool.execute.before"]({ tool: "bash", sessionID: "ses-mangled", callID: "mangled-before" }, mangledOut)
+const promptsBeforeMangled = prompts.length
+await plugin["tool.execute.after"](
+  { tool: "bash", sessionID: "ses-mangled", callID: "mangled-after", args: { command: mangledCommand } },
+  { title: "bash", output: "human-readable summary without structured launch JSON", metadata: {} },
+)
+await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses-mangled" } } })
+await tick(); await tick()
+assert.equal(prompts.length, promptsBeforeMangled + 1, "mangled launch output must queue one bounded reconciliation wake")
+assert.match(prompts.at(-1).body.parts[0].text, /health heartbeat/)
+prompts.length = 0
+
 function launchPayload(task, suffix = task) {
   return {
     status: "started",

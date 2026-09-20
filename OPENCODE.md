@@ -40,6 +40,8 @@ The current adapter owns wake setup mechanically. Before a normal active parent 
 
 Therefore:
 
+- structured tick/launch stdout is an acceleration surface, not transport authority: keep it unfiltered for immediate auto-arm, while the deterministic durable pulse can restore heartbeat state, missing attempt observers, and launch-preparation watchers if shell presentation mangles that output;
+- a recognized new launch is activity evidence and clears stale `idle-recovery`; the fast pulse also revisits stale `idle-recovery` registrations instead of parking them forever;
 - the orchestrator never performs a separate heartbeat-registration ritual;
 - `tbag_follow` may remain available for diagnosis, but observer repair is tick-driven and does not require it;
 - headless/host modes where project hooks are unavailable degrade to manual owner-turn ticks;

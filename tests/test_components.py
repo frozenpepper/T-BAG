@@ -601,6 +601,15 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(cp.returncode,0,cp.stderr)
         self.assertIn('OPENCODE_PLUGIN_RUNTIME_PASS',cp.stdout)
 
+    def test_opencode_v2_plugin_runtime_transport_recovery(self):
+        node=shutil.which('node')
+        if not node: self.skipTest('node unavailable')
+        script=ROOT/'tests'/'opencode_v2_plugin_runtime.mjs'
+        plugin=ROOT/'adapters'/'opencode'/'tbag-v2.js'
+        cp=subprocess.run([node,str(script),str(plugin)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(cp.returncode,0,cp.stderr)
+        self.assertIn('OPENCODE_V2_PLUGIN_RUNTIME_PASS',cp.stdout)
+
     def test_opencode_plugin_uses_stable_follow_tool_and_session_wake_not_background_subagent_protocol(self):
         plugin=ROOT/'adapters'/'opencode'/'tbag.js'; text=plugin.read_text()
         core=(ROOT/'adapters'/'tbag-opencode-transport-core.js').read_text()

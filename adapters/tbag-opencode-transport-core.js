@@ -135,13 +135,14 @@ export function createHeartbeatRegistry({
     const key = heartbeatKey(sessionID, args.run_root)
     const prior = runHeartbeats.get(key)
     const stamp = Date.now()
+    const activityEvidence = args?.activity_hint === "launch" || ["started", "preparing"].includes(args?.status)
     runHeartbeats.set(key, {
       sessionID,
       run_root: args.run_root,
       lastQueuedAt: stamp,
-      lastCompletionProbeAt: prior?.lastCompletionProbeAt || 0,
+      lastCompletionProbeAt: activityEvidence ? 0 : (prior?.lastCompletionProbeAt || 0),
       lastHealthWakeAt: prior?.lastHealthWakeAt || stamp,
-      heartbeatState: prior?.heartbeatState === "idle-recovery" ? "idle-recovery" : "running",
+      heartbeatState: activityEvidence ? "running" : (prior?.heartbeatState === "idle-recovery" ? "idle-recovery" : "running"),
     })
     persistTransport(args.run_root)
     return true
@@ -268,8 +269,10 @@ export function startHeartbeatTimers({
   persistTransport,
   transportErrors,
   queueWake,
+  onPulse,
 }) {
   const completionTimer = setInterval(() => {
+    const stamp = Date.now()
     for (const item of [...runHeartbeats.values()]) {
       if (deletedSessions.has(item.sessionID)) {
         removeRunHeartbeat(item.sessionID, item.run_root)
@@ -280,15 +283,27 @@ export function startHeartbeatTimers({
         removeRunHeartbeat(item.sessionID, item.run_root)
         continue
       }
-      if (item.heartbeatState !== "running") continue
+      if (!["running", "idle-recovery"].includes(item.heartbeatState)) continue
+      if (
+        item.heartbeatState === "idle-recovery"
+        && item.lastCompletionProbeAt > 0
+        && stamp - item.lastCompletionProbeAt < COMPLETION_PULSE_MS * 2
+      ) continue
       const pulse = pulseRun(item.run_root)
-      item.lastCompletionProbeAt = Date.now()
+      item.lastCompletionProbeAt = stamp
       item.heartbeatState = pulse.heartbeat_state || "idle-recovery"
       if (pulse.error) {
         transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse failed: ${pulse.error}` })
-      } else if (pulse.wake_parent === true) {
+      } else {
         transportErrors.delete(item.run_root)
-        queueWake(host, item.sessionID, "completion")
+        if (typeof onPulse === "function") {
+          try {
+            onPulse(item, pulse)
+          } catch (error) {
+            transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse recovery failed: ${String(error?.stack || error)}` })
+          }
+        }
+        if (pulse.wake_parent === true) queueWake(host, item.sessionID, "completion")
       }
       persistTransport(item.run_root)
     }

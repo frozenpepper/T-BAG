@@ -137,11 +137,12 @@ function validateAttempt(root, args) {
 
 function enrollHeartbeatFromCommand(sessionID, command) {
   if (!sessionID) return false
-  if (!isParentTickCommand(command) && !isCoreAttemptCommand(command, "launch")) return false
+  const launch = isCoreAttemptCommand(command, "launch")
+  if (!isParentTickCommand(command) && !launch) return false
   const runRoot = commandArg(command, "run-root")
   if (!runRoot) return false
   deletedSessions.delete(sessionID)
-  registerRunHeartbeat(sessionID, { run_root: runRoot })
+  registerRunHeartbeat(sessionID, { run_root: runRoot, activity_hint: launch ? "launch" : undefined })
   return true
 }
 
@@ -273,32 +274,39 @@ function watchPreparation(ctx, sessionID, item) {
   persistTransport(entry.run_root)
 }
 
+function repairTransportFromPacket(ctx, sessionID, root, runRoot, packet) {
+  const live = Array.isArray(packet?.live_attempts) ? packet.live_attempts : []
+  for (const item of live) {
+    if (!item?.phase_id || !item?.task_id || !item?.event_dir) continue
+    try {
+      armAttempt(ctx, sessionID, root, {
+        run_root: runRoot,
+        phase_id: item.phase_id,
+        task_id: item.task_id,
+        event_dir: item.event_dir,
+      })
+      transportErrors.delete(runRoot)
+    } catch (error) {
+      transportErrors.set(runRoot, {
+        at: new Date().toISOString(),
+        task_id: item.task_id,
+        event_dir: item.event_dir,
+        error: String(error?.stack || error),
+      })
+    }
+  }
+  const preparing = Array.isArray(packet?.live_preparations) ? packet.live_preparations : []
+  for (const item of preparing) {
+    if (!item?.phase_id || !item?.task_id || !Number.isInteger(item?.preparation_pid)) continue
+    watchPreparation(ctx, sessionID, { ...item, run_root: runRoot })
+  }
+  persistTransport(runRoot)
+}
+
 function repairObserversFromTick(ctx, sessionID, root, command, text) {
   const runRoot = commandArg(command, "run-root")
   if (!runRoot) return
-  for (const packet of structuredObjects(text)) {
-    const live = Array.isArray(packet?.live_attempts) ? packet.live_attempts : []
-    for (const item of live) {
-      if (!item?.phase_id || !item?.task_id || !item?.event_dir) continue
-      try {
-        armAttempt(ctx, sessionID, root, {
-          run_root: runRoot,
-          phase_id: item.phase_id,
-          task_id: item.task_id,
-          event_dir: item.event_dir,
-        })
-        transportErrors.delete(runRoot)
-      } catch (error) {
-        transportErrors.set(runRoot, {
-          at: new Date().toISOString(),
-          task_id: item.task_id,
-          event_dir: item.event_dir,
-          error: String(error?.stack || error),
-        })
-      }
-    }
-  }
-  persistTransport(runRoot)
+  for (const packet of structuredObjects(text)) repairTransportFromPacket(ctx, sessionID, root, runRoot, packet)
 }
 
 function eventSessionID(event) {
@@ -384,6 +392,7 @@ const TBagV2Plugin = {
       persistTransport,
       transportErrors,
       queueWake,
+      onPulse: (item, pulse) => repairTransportFromPacket(ctx, item.sessionID, root, item.run_root, pulse),
     })
 
     await ctx.tool.hook("execute.before", (event) => {
@@ -414,8 +423,9 @@ const TBagV2Plugin = {
         if (runRoot) {
           transportErrors.set(runRoot, { at: new Date().toISOString(), error: "launch output contained no structured T-BAG launch/preparation result" })
           persistTransport(runRoot)
+          if (sessionID) queueWake(ctx, sessionID, "health")
         }
-        logError("launch output contained no structured result; heartbeat/tick reconciliation remains authoritative")
+        logError("launch output contained no structured result; durable pulse recovery is armed and a bounded reconciliation wake was queued")
         return
       }
       for (const launch of results) {
