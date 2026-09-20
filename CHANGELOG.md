@@ -2,6 +2,13 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC64 — durable OpenCode transport recovery
+
+- Removed the sticky `idle-recovery` liveness trap: new launch activity reopens the fast lane, and the deterministic completion pulse revisits stale idle-recovery registrations instead of skipping them forever.
+- Extended the read-only pulse packet with exact live-attempt tuples and taught both OpenCode adapters to repair missing observers from that durable probe. Tick/launch stdout remains the fastest path, but filtering it can no longer permanently disable supervision.
+- Mangled or summarized launch stdout now keeps heartbeat enrollment and queues one bounded reconciliation wake rather than silently falling back to the 15-minute health lane.
+- Added V1/V2 regressions for stale-idle launch recovery and filtered launch output, plus pulse contract coverage and explicit operator guidance to leave structured parent stdout unfiltered for lowest latency.
+
 ## v2.2.0 RC63 — Human-attention channel and quiet waits
 
 - Split Human communication into passive `owner_notice` updates and blocking `owner_question` interactions. Passive updates carry a stable `━━ T-BAG UPDATE ━━` banner; every true authority/input blocker must use the parent harness's native question surface rather than ordinary chat prose.
