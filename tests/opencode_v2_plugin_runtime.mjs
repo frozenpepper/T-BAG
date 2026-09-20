@@ -132,6 +132,7 @@ await after({ tool: "bash", sessionID: "ses-mangled", status: "completed", input
 await tick(); await tick()
 assert.equal(prompts.length, promptsBeforeMangled + 1, "V2 mangled launch output must queue one bounded reconciliation wake")
 assert.match(prompts.at(-1).text, /health heartbeat/)
+prompts.length = 0
 
 // Current V2 lifecycle: execution.started marks busy; completion coalesces until
 // execution.succeeded releases the same parent session.
