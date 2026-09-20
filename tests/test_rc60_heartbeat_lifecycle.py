@@ -89,10 +89,47 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
             self.assertTrue(closed["heartbeat_resumed"])
             self.assertNotIn("owner_wait",parent_tick.load_loop(run))
 
-    def test_active_without_started_attempt_uses_only_slow_health_lane(self):
+    def test_active_without_started_attempt_enters_idle_recovery_without_wake(self):
         result = self.pulse("active", [])
         self.assertEqual(result["heartbeat_state"], "idle-recovery")
         self.assertFalse(result["wake_parent"])
+        self.assertEqual(result["live_preparations"], [])
+
+    def test_fast_pulse_surfaces_durable_launch_preparation(self):
+        import json, os, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "run"
+            task_root = Path(td) / "task"
+            task_root.mkdir()
+            marker = task_root / "launch-preparation.json"
+            marker.write_text(json.dumps({"pid": os.getpid(), "role": "implementer"}))
+            task = {"phase_id": "P1", "task_id": "T1", "attempts": []}
+            with patch.object(parent_tick.dsd_task, "load_run", return_value={"run_id": "R", "status": "active"}), \
+                 patch.object(parent_tick.dsd_task, "iter_run_tasks", return_value=iter([task])), \
+                 patch.object(parent_tick.dsd_task, "task_root", return_value=task_root):
+                result = parent_tick.command_pulse(SimpleNamespace(run_root=run, phase_id=None))
+            self.assertEqual(result["heartbeat_state"], "running")
+            self.assertFalse(result["wake_parent"])
+            self.assertEqual(result["reason"], "launch-preparation-running")
+            self.assertEqual(result["live_preparations"][0]["preparation_pid"], os.getpid())
+
+    def test_fast_pulse_wakes_for_dead_durable_launch_preparation(self):
+        import json, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "run"
+            task_root = Path(td) / "task"
+            task_root.mkdir()
+            marker = task_root / "launch-preparation.json"
+            marker.write_text(json.dumps({"pid": 12345, "role": "implementer"}))
+            task = {"phase_id": "P1", "task_id": "T1", "attempts": []}
+            with patch.object(parent_tick.dsd_task, "load_run", return_value={"run_id": "R", "status": "active"}), \
+                 patch.object(parent_tick.dsd_task, "iter_run_tasks", return_value=iter([task])), \
+                 patch.object(parent_tick.dsd_task, "task_root", return_value=task_root), \
+                 patch.object(parent_tick.dsd_attempt, "pid_alive", return_value=False):
+                result = parent_tick.command_pulse(SimpleNamespace(run_root=run, phase_id=None))
+            self.assertTrue(result["wake_parent"])
+            self.assertEqual(result["reason"], "preparation-stopped")
+            self.assertEqual(result["stopped_preparations"][0]["task_id"], "T1")
 
     def test_adapters_expose_two_lanes_and_true_unenrollment(self):
         core = (ROOT / "adapters/tbag-opencode-transport-core.js").read_text()
@@ -112,7 +149,9 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
             source = (ROOT / rel).read_text()
             self.assertIn("../tbag-opencode-transport-core.js", source)
             self.assertIn("startHeartbeatTimers", source)
-            self.assertIn("repairObserversFromPacket", source)
+            self.assertIn("repairTransportFromPacket", source)
+            self.assertIn("live_preparations", source)
+            self.assertIn("watchPreparation", source)
             self.assertIn("onPulse:", source)
             self.assertIn('"health"', source)
 
