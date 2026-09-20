@@ -5,7 +5,7 @@ This release package keeps only recent architectural history. Detailed pre-RC22 
 ## v2.2.0 RC64 — durable OpenCode transport recovery
 
 - Removed the sticky `idle-recovery` liveness trap: new launch activity reopens the fast lane, and the deterministic completion pulse revisits stale idle-recovery registrations instead of skipping them forever.
-- Extended the read-only pulse packet with exact live-attempt tuples and taught both OpenCode adapters to repair missing observers from that durable probe. Tick/launch stdout remains the fastest path, but filtering it can no longer permanently disable supervision.
+- Extended the read-only pulse packet with exact live-attempt tuples and taught both OpenCode adapters to repair missing attempt observers and launch-preparation watchers from that durable probe. Tick/launch stdout remains the fastest path, but filtering it can no longer permanently disable supervision.
 - Mangled or summarized launch stdout now keeps heartbeat enrollment and queues one bounded reconciliation wake rather than silently falling back to the 15-minute health lane.
 - Added V1/V2 regressions for stale-idle launch recovery and filtered launch output, plus pulse contract coverage and explicit operator guidance to leave structured parent stdout unfiltered for lowest latency.
 
