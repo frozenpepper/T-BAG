@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - rc64-durable-transport-recovery
+  pull_request:
+    branches:
+      - main
 jobs:
   test:
     runs-on: ubuntu-latest
