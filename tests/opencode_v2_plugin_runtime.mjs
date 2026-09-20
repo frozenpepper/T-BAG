@@ -116,6 +116,23 @@ await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: {
 transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
 assert.ok(transportState.parent_sessions.some((x) => x.session_id === "ses-wait"), "resume-owner must re-enroll V2 heartbeat")
 
+// New launch activity clears stale idle-recovery even if a later tick packet is
+// filtered away from the adapter.
+await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: { command: tickCommand }, result: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "active-idle", heartbeat_state: "idle-recovery" }) })
+transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.equal(transportState.parent_sessions.find((x) => x.session_id === "ses-wait")?.heartbeat_state, "idle-recovery")
+await before({ tool: "bash", sessionID: "ses-wait", input: { command: launchCommand("PROMOTE") } })
+transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
+assert.equal(transportState.parent_sessions.find((x) => x.session_id === "ses-wait")?.heartbeat_state, "running", "V2 launch must clear stale idle-recovery")
+
+// Mangled launch output is a degraded acceleration path, not a liveness failure.
+const promptsBeforeMangled = prompts.length
+await before({ tool: "bash", sessionID: "ses-mangled", input: { command: launchCommand("MANGLED") } })
+await after({ tool: "bash", sessionID: "ses-mangled", status: "completed", input: { command: launchCommand("MANGLED") }, result: "human-readable summary without structured launch JSON" })
+await tick(); await tick()
+assert.equal(prompts.length, promptsBeforeMangled + 1, "V2 mangled launch output must queue one bounded reconciliation wake")
+assert.match(prompts.at(-1).text, /health heartbeat/)
+
 // Current V2 lifecycle: execution.started marks busy; completion coalesces until
 // execution.succeeded releases the same parent session.
 await before({ tool: "bash", sessionID: "ses-v2", input: { command: launchCommand("T1") } })
