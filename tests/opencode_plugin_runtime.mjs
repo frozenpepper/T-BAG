@@ -167,6 +167,7 @@ await plugin.event({ event: { type: "session.idle", properties: { sessionID: "se
 await tick(); await tick()
 assert.equal(prompts.length, promptsBeforeMangled + 1, "mangled launch output must queue one bounded reconciliation wake")
 assert.match(prompts.at(-1).body.parts[0].text, /health heartbeat/)
+prompts.length = 0
 
 function launchPayload(task, suffix = task) {
   return {
