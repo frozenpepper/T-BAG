@@ -220,6 +220,7 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
             "wake_parent": True,
             "reason": "attempt-stopped",
             "stopped_attempts": stopped,
+            "live_attempts": live,
         }
     if live:
         return {
@@ -227,11 +228,13 @@ def command_pulse(args: argparse.Namespace) -> dict[str, Any]:
             "heartbeat_state": "running",
             "reason": "workers-still-running",
             "live_count": len(live),
+            "live_attempts": live,
         }
     return {
         **base,
         "heartbeat_state": "idle-recovery",
         "reason": "no-started-attempt-is-running",
+        "live_attempts": [],
     }
 
 
