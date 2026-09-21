@@ -2029,6 +2029,7 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
     }
     running=[]; backlog=[]; completed=[]; gates=[]; open_followups=[]
+    backlog_sources: dict[tuple[str,str],dict[str,Any]]={}; completed_sources: dict[tuple[str,str],dict[str,Any]]={}
     purpose_chars=420 if details else 140
     for phase in phases:
         gate_files=sorted(owner_plan_dir(run).glob(f"PHASE-{phase}-GATE-*.md")) if owner_plan_dir(run).is_dir() else []
@@ -2045,22 +2046,21 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             for finding in open_review_findings(task):
                 item={"phase":phase,"source_task":task.get("task_id"),"finding_id":finding.get("finding_id"),"triage_task":finding.get("triage_task_id")}
-                if details: item["finding"]=str(finding.get("text") or "")[:420]
+                item["finding"]=str(finding.get("text") or "")[:420 if details else 180]
                 open_followups.append(item)
             if task.get("role")=="phase-auditor" and status=="accepted": continue
-            live_now=task_has_live_attempt(task)
-            purpose=task_brief_objective(task,max_chars=purpose_chars) if details or live_now else None
+            live_now=task_has_live_attempt(task); tid=str(task.get("task_id") or "")
             if status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration")):
                 if status!="superseded":
                     outcome="integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
-                    row={"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")}
-                    if purpose is not None: row["purpose"]=purpose
-                    completed.append(row)
+                    completed.append({"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
+                    if details: completed_sources[(phase,tid)]=task
                 continue
             item={"phase":phase,"task_id":task.get("task_id"),"state":state_labels.get(status,status)}
-            if purpose is not None: item["purpose"]=purpose
-            if live_now: running.append(item)
-            else: backlog.append(item)
+            if live_now:
+                item["purpose"]=task_brief_objective(task,max_chars=purpose_chars); running.append(item)
+            else:
+                backlog.append(item); backlog_sources[(phase,tid)]=task
     backlog_by_state: dict[str,int]={}
     for item in backlog:
         state=str(item.get("state") or "unknown"); backlog_by_state[state]=backlog_by_state.get(state,0)+1
@@ -2069,15 +2069,22 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     recent=[]
     for item in completed[:recent_limit]:
         row={k:v for k,v in item.items() if k!="at"}
-        if not details: row.pop("purpose",None)
+        if details:
+            source=completed_sources.get((str(item.get("phase") or ""),str(item.get("task_id") or "")))
+            if source is not None: row["purpose"]=task_brief_objective(source,max_chars=purpose_chars)
         recent.append(row)
+    backlog_preview=[]
+    for raw in backlog[:backlog_limit]:
+        item=dict(raw); source=backlog_sources.get((str(item.get("phase") or ""),str(item.get("task_id") or "")))
+        if source is not None: item["purpose"]=task_brief_objective(source,max_chars=purpose_chars)
+        backlog_preview.append(item)
     result={
         "run_status":info.get("status","active"),
         "running":running,
         "recent_outcomes":recent,
         "backlog_count":len(backlog),
         "backlog_by_state":backlog_by_state,
-        "backlog_preview":backlog[:backlog_limit],
+        "backlog_preview":backlog_preview,
     }
     if len(backlog)>backlog_limit: result["backlog_preview_truncated"]=True
     if gates: result["phase_gates"]=gates
