@@ -147,6 +147,32 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(holder.wait(timeout=3),0); self.assertEqual(exclusive.wait(timeout=3),0)
         self.assertGreater(abs(float(a3.read_text())-float(a4.read_text())),0.20)
 
+    def test_same_task_concurrent_workspace_create_is_serialized(self):
+        self.register("T-RACE")
+        helper=(
+            "import json,sys,time; from pathlib import Path; from types import SimpleNamespace; "
+            f"sys.path.insert(0,{str(SCRIPTS)!r}); import dsd_workspace; "
+            "run=Path(sys.argv[1]); ready=Path(sys.argv[2]); go=Path(sys.argv[3]); "
+            "ready.write_text('ready'); "
+            "\nwhile not go.exists(): time.sleep(0.005)"
+            "\nout=dsd_workspace.command_create(SimpleNamespace(run_root=run,phase_id='P',task_id='T-RACE'))"
+            "\nprint(json.dumps(out,sort_keys=True))"
+        )
+        go=self.root/'race-go'; r1=self.root/'race-r1'; r2=self.root/'race-r2'
+        p1=subprocess.Popen([sys.executable,'-c',helper,str(self.run),str(r1),str(go)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        p2=subprocess.Popen([sys.executable,'-c',helper,str(self.run),str(r2),str(go)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        deadline=time.time()+4
+        while time.time()<deadline and not (r1.exists() and r2.exists()): time.sleep(0.01)
+        self.assertTrue(r1.exists() and r2.exists()); go.write_text('go')
+        out1,err1=p1.communicate(timeout=15); out2,err2=p2.communicate(timeout=15)
+        self.assertEqual(p1.returncode,0,err1); self.assertEqual(p2.returncode,0,err2)
+        one=json.loads(out1); two=json.loads(out2)
+        self.assertEqual(one['worktree'],two['worktree'])
+        self.assertTrue(Path(one['worktree']).is_dir())
+        self.assertTrue(dsd_workspace.workspace_path(self.run,'P','T-RACE').is_file())
+        refs=git(self.project,'for-each-ref','--format=%(refname:short)','refs/heads/dsd/r1/P/T-RACE')
+        self.assertEqual(sorted(refs.splitlines()),['dsd/r1/P/T-RACE','dsd/r1/P/T-RACE-base'])
+
     def test_internal_snapshot_commits_bypass_project_hooks(self):
         hooks=self.project/".git"/"hooks"; hooks.mkdir(exist_ok=True)
         hook=hooks/"pre-commit"; hook.write_text("#!/bin/sh\necho project-hook-ran >&2\nexit 91\n"); hook.chmod(0o755)
