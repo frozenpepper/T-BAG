@@ -262,6 +262,43 @@ class ComponentsTests(unittest.TestCase):
             blocker=dsd_attempt.launch_blocker(self.run,'P1','T-PREP','implementer')
         self.assertIsNone(blocker)
 
+    def test_preparation_child_waits_for_parent_marker_publication(self):
+        self.register_impl('T-PREP-HANDSHAKE')
+        marker=dsd_attempt._launch_preparation_path(self.run,'P1','T-PREP-HANDSHAKE')
+        lock=dsd_attempt._launch_preparation_lock_path(self.run,'P1','T-PREP-HANDSHAKE')
+        ready=self.root/'prep-lock-ready'; release=self.root/'prep-lock-release'
+        helper=(
+            "import json,os,sys,time; from pathlib import Path; "
+            f"sys.path.insert(0,{str(SCRIPTS)!r}); import dsd_task; "
+            "lock=Path(sys.argv[1]); marker=Path(sys.argv[2]); ready=Path(sys.argv[3]); release=Path(sys.argv[4]); "
+            "\nwith dsd_task.file_lock(lock):"
+            "\n ready.write_text('ready')"
+            "\n while not release.exists(): time.sleep(0.005)"
+            "\n marker.write_text(json.dumps({'format':'tbag-launch-preparation-v1','pid':os.getpid()}))"
+        )
+        holder=subprocess.Popen([sys.executable,'-c',helper,str(lock),str(marker),str(ready),str(release)])
+        deadline=time.time()+3
+        while time.time()<deadline and not ready.exists(): time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        args=SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-PREP-HANDSHAKE',background_prepare=False)
+        seen={}
+        def foreground(_args):
+            seen['marker_visible']=marker.is_file()
+            return {'status':'mock-started'}
+        old=os.environ.get('TBAG_LAUNCH_PREPARATION_MARKER')
+        os.environ['TBAG_LAUNCH_PREPARATION_MARKER']=str(marker)
+        try:
+            release.write_text('go')
+            with mock.patch.object(dsd_attempt,'_command_launch_foreground',side_effect=foreground):
+                out=dsd_attempt.command_launch(args)
+        finally:
+            if old is None: os.environ.pop('TBAG_LAUNCH_PREPARATION_MARKER',None)
+            else: os.environ['TBAG_LAUNCH_PREPARATION_MARKER']=old
+            holder.wait(timeout=3)
+        self.assertEqual(out['status'],'mock-started')
+        self.assertTrue(seen['marker_visible'])
+        self.assertFalse(marker.exists())
+
     def test_live_attempt_session_evidence_is_reusable_before_terminal(self):
         event=self.root/'live-session'; event.mkdir(); (event/'attempt.json').write_text(json.dumps({'session_id':'live-ses'}))
         attempt={'role':'reviewer','event_dir':str(event)}
@@ -446,6 +483,9 @@ class ComponentsTests(unittest.TestCase):
         gate=(SCRIPTS/'dsd_attempt.py').read_text()
         self.assertIn('legacy_fallback_command',gate)
         self.assertIn('--run-root',gate)
+        self.assertIn('--outcome OUTCOME',gate)
+        self.assertNotIn("--outcome <{'|'.join(fallback_values)}>",gate)
+        self.assertIn('Replace OUTCOME with one of',gate)
         self.assertIn('do not relaunch solely to repair formatting',gate)
 
     def test_headless_opencode_install_uses_manual_mode_without_restart_question(self):
