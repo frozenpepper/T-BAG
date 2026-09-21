@@ -957,7 +957,7 @@ def _gate_one(run:Path,phase:str,tid:str,event_arg:Path|None)->dict[str,Any]:
                     )
                 result["routing_protocol_error"]=(
                     f"{role} report lacks an exact first-line routing token. Allowed first lines: {', '.join(allowed)}. "
-                    + (f"For this already-generated legacy/tokenless report, record the worker-owned outcome with: {fallback_command}. Do not relaunch solely to repair formatting."
+                    + (f"For this already-generated legacy/tokenless report, use: {fallback_command}. Replace OUTCOME with one of: {', '.join(fallback_values)}. Do not relaunch solely to repair formatting."
                        if fallback_command else "This role has no safe tokenless fallback; repair/re-run the bounded semantic step rather than inferring a verdict.")
                 )
                 result["routing_protocol"]={
