@@ -439,6 +439,14 @@ def launch_blocker(run:Path, phase:str, tid:str, role:str, *, continuing:bool=Fa
     parent never advertises an action that the lifecycle guards already know cannot run.
     """
     try:
+        preparation=_live_launch_preparation(run,phase,tid,self_pid=os.getpid())
+        if preparation is not None:
+            pid=preparation.get("pid")
+            raise ValueError(
+                f"PREPARATION_IN_FLIGHT: {phase}/{tid} launch preparation is already running"
+                f" (pid={pid}); do not launch it again. Yield and let observer/heartbeat wake"
+                " the parent, or run a normal tick for durable reconciliation."
+            )
         task=dsd_task.load_task(run,phase,tid)
         validate_launch_role(task,role,continuing=continuing)
         unresolved=[a for a in task.get("attempts",[]) if isinstance(a,dict) and dsd_task.attempt_is_unresolved(a)]
@@ -645,32 +653,49 @@ def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
 def _launch_preparation_path(run:Path, phase:str, tid:str)->Path:
     return dsd_task.task_root(run,phase,tid)/"launch-preparation.json"
 
+def _launch_preparation_lock_path(run:Path, phase:str, tid:str)->Path:
+    return dsd_task.task_root(run,phase,tid)/".launch-preparation.lock"
+
 def _launch_preparation_log(run:Path, phase:str, tid:str)->Path:
     return dsd_task.task_root(run,phase,tid)/"launch-preparation.log"
+
+def _live_launch_preparation(run:Path, phase:str, tid:str, *, self_pid:int|None=None)->dict[str,Any]|None:
+    marker=_launch_preparation_path(run,phase,tid)
+    if not marker.is_file(): return None
+    try: prior=dsd_task.load_json(marker)
+    except Exception: return None
+    pid=prior.get("pid")
+    if not isinstance(pid,int) or pid<=0 or not pid_alive(pid): return None
+    # The detached preparation child necessarily sees its own marker. That is proof
+    # of ownership, not a competing launch, so never self-block.
+    if self_pid is not None and pid==self_pid: return None
+    return prior
 
 def _background_launch(args:argparse.Namespace)->dict[str,Any]:
     run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
     task=dsd_task.load_task(run,phase,tid); role=getattr(args,"role",None) or str(task.get("role") or "")
-    blocker=launch_blocker(run,phase,tid,role,continuing=bool(args.resume_last or args.resume_session))
-    if blocker: raise ValueError(blocker)
     marker=_launch_preparation_path(run,phase,tid); marker.parent.mkdir(parents=True,exist_ok=True)
-    if marker.is_file():
-        try: prior=dsd_task.load_json(marker)
-        except Exception: prior={}
-        pid=prior.get("pid")
-        if isinstance(pid,int) and pid_alive(pid):
+    # Reservation is task-local and atomic: marker check, lifecycle blocker, spawn and
+    # marker write are one critical section. A second launch therefore observes the
+    # first preparation instead of creating a second workspace constructor.
+    with dsd_task.file_lock(_launch_preparation_lock_path(run,phase,tid)):
+        prior=_live_launch_preparation(run,phase,tid)
+        if prior is not None:
+            pid=prior.get("pid")
             return {"status":"preparing","already_preparing":True,"run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"preparation_pid":pid,"preparation":str(marker)}
-        marker.unlink(missing_ok=True)
-    child_args=[item for item in sys.argv[1:] if item!="--background-prepare"]
-    log=_launch_preparation_log(run,phase,tid)
-    handle=log.open("ab",buffering=0)
-    env=os.environ.copy(); env["TBAG_LAUNCH_PREPARATION_MARKER"]=str(marker)
-    try:
-        proc=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),*child_args],stdout=handle,stderr=subprocess.STDOUT,start_new_session=True,env=env)
-    finally:
-        handle.close()
-    dsd_task.write_json(marker,{"format":"tbag-launch-preparation-v1","run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"pid":proc.pid,"started_at":dsd_task.now(),"log":str(log)})
-    return {"status":"preparing","run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"preparation_pid":proc.pid,"preparation":str(marker),"log":str(log)}
+        if marker.is_file(): marker.unlink(missing_ok=True)
+        blocker=launch_blocker(run,phase,tid,role,continuing=bool(args.resume_last or args.resume_session))
+        if blocker: raise ValueError(blocker)
+        child_args=[item for item in sys.argv[1:] if item!="--background-prepare"]
+        log=_launch_preparation_log(run,phase,tid)
+        handle=log.open("ab",buffering=0)
+        env=os.environ.copy(); env["TBAG_LAUNCH_PREPARATION_MARKER"]=str(marker)
+        try:
+            proc=subprocess.Popen([sys.executable,str(Path(__file__).resolve()),*child_args],stdout=handle,stderr=subprocess.STDOUT,start_new_session=True,env=env)
+        finally:
+            handle.close()
+        dsd_task.write_json(marker,{"format":"tbag-launch-preparation-v1","run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"pid":proc.pid,"started_at":dsd_task.now(),"log":str(log)})
+        return {"status":"preparing","run_root":str(run),"phase_id":phase,"task_id":tid,"role":role,"preparation_pid":proc.pid,"preparation":str(marker),"log":str(log)}
 
 def command_launch(args:argparse.Namespace)->dict[str,Any]:
     if getattr(args,"background_prepare",False):
