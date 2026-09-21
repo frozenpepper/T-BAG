@@ -343,13 +343,16 @@ def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = F
 
     activation_token=opencode_activation_token(project_root,result,transport_core,ui_results,transport_generation,major)
     activation_request=opencode_activation_request_path(project_root)
-    write_json(activation_request,{
+    requested={
         "format":"tbag-opencode-activation-request-v1",
         "token":activation_token,
         "transport_generation":transport_generation,
         "opencode_major":major,
-        "requested_at":utc_stamp(),
-    })
+    }
+    prior_request=load_json(activation_request)
+    activation_request_changed=not all(prior_request.get(k)==v for k,v in requested.items())
+    if activation_request_changed:
+        write_json(activation_request,{**requested,"requested_at":utc_stamp()})
     activation_marker=opencode_activation_marker_path(project_root)
     live=load_json(activation_marker)
     activation_verified=bool(
@@ -396,6 +399,7 @@ def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = F
         "activation": "live-current" if activation_verified else "headless-manual" if degraded_manual else "restart-required-to-prove-live-adapter",
         "activation_token": activation_token,
         "activation_request": str(activation_request),
+        "activation_request_changed":activation_request_changed,
         "activation_marker": str(activation_marker),
         "headless_mode":bool(headless),
         "degraded_manual":degraded_manual,
@@ -423,13 +427,20 @@ def install_kilo(project_root: Path, skill_root: Path, *, headless: bool = False
     token=hashlib.sha256(json.dumps({"plugin":result.get("installed_sha256"),"generation":"kilo-v1"},sort_keys=True,separators=(",",":")).encode()).hexdigest()
     request=project_root/".kilo"/"tbag-activation.json"
     marker=project_root/"TBag"/"harness"/"kilo-activation.json"
-    write_json(request,{"format":"tbag-kilo-activation-request-v1","token":token,"requested_at":utc_stamp()})
+    prior_request=load_json(request)
+    activation_request_changed=not (
+        prior_request.get("format")=="tbag-kilo-activation-request-v1"
+        and prior_request.get("token")==token
+    )
+    if activation_request_changed:
+        write_json(request,{"format":"tbag-kilo-activation-request-v1","token":token,"requested_at":utc_stamp()})
     live=load_json(marker)
     ready=bool(live.get("token")==token)
     degraded_manual=bool(headless and not ready)
     result.update({
         "activation_token":token,
         "activation_request":str(request),
+        "activation_request_changed":activation_request_changed,
         "activation_marker":str(marker),
         "headless_mode":bool(headless),
         "degraded_manual":degraded_manual,
