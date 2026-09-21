@@ -100,7 +100,8 @@ class ParentTickCpuGuardTests(unittest.TestCase):
             with mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"}), mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary"}), mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]}), mock.patch.object(parent_tick,"reconcile",return_value=state), mock.patch.object(parent_tick,"inspect_attempt",return_value=observed), mock.patch.object(parent_tick,"retire_attempt") as retire, mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={}):
                 out=parent_tick.command_tick(args)
             retire.assert_not_called()
-            self.assertEqual(out["monitoring"][0]["automatic_intervention_deferred"],"worker-cpu-still-changing")
+            self.assertNotIn("monitoring",out)
+            self.assertEqual(out["attention"][0]["automatic_intervention_deferred"],"worker-cpu-still-changing")
 
 
 class StatusSnapshotTests(unittest.TestCase):
