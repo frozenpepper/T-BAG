@@ -478,9 +478,10 @@ def main() -> int:
         if selected == "unknown":
             raise RuntimeError("Harness detection is ambiguous; pass --harness codex|claude-code|opencode|kilo")
         harness = selected
-        # Do not guess from isatty(): agent tool shells inside a live harness are often
-        # non-TTY too. CI/TBAG_HEADLESS are strong evidence; --headless is explicit.
-        headless=bool(args.headless or env_flag("TBAG_HEADLESS") or env_flag("CI"))
+        # Do not guess from isatty() or generic CI state: agent tool shells inside a
+        # live harness are often non-TTY, and CI may itself be testing a live adapter.
+        # Headless mode therefore requires explicit CLI/environment intent.
+        headless=bool(args.headless or env_flag("TBAG_HEADLESS"))
         helpers = install_helper(skill_root, project_root)
         if harness == "codex": result = install_codex(project_root, skill_root)
         elif harness == "claude-code": result = install_claude(project_root, skill_root)
