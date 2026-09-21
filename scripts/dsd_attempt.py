@@ -929,7 +929,27 @@ def _gate_one(run:Path,phase:str,tid:str,event_arg:Path|None)->dict[str,Any]:
             declared=dsd_task.declared_report_outcome(report,role,required=False)
             if declared: result["declared_outcome"]=declared
             elif role in dsd_task.REPORT_OUTCOMES_BY_ROLE:
-                result["routing_protocol_error"]=f"{role} report lacks an exact first-line routing token"
+                allowed=list(dsd_task.REPORT_OUTCOMES_BY_ROLE[role])
+                command_by_role={
+                    "reviewer":"review","plan-reviewer":"plan-review","context-reviewer":"context-review",
+                    "verification":"verification-result","evidence-clerk":"verification-result",
+                    "planner":"analysis-result","discovery":"analysis-result","phase-surveyor":"analysis-result","recovery":"analysis-result",
+                }
+                command=command_by_role.get(role)
+                fallback_values=sorted(set(v for v in dsd_task.REPORT_OUTCOMES_BY_ROLE[role].values() if v!="capability"))
+                result["routing_protocol_error"]=(
+                    f"{role} report lacks an exact first-line routing token. Allowed first lines: {', '.join(allowed)}. "
+                    + (f"For this already-generated legacy/tokenless report, record the worker-owned outcome with dsd_task.py {command} --outcome <{'|'.join(fallback_values)}> --report {report}; do not relaunch solely to repair formatting."
+                       if command else "This role has no safe tokenless fallback; repair/re-run the bounded semantic step rather than inferring a verdict.")
+                )
+                result["routing_protocol"]={
+                    "code":"missing-first-line-routing-token",
+                    "role":role,
+                    "allowed_first_lines":allowed,
+                    "legacy_fallback_command":command,
+                    "legacy_fallback_outcomes":fallback_values if command else [],
+                    "report":str(report),
+                }
         except (OSError,ValueError,KeyError):
             pass
     return result
