@@ -1,4 +1,5 @@
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
+import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
+from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -248,6 +249,56 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(out['routine_user_update'],'human-decision')
 
 
+    def test_launch_blocker_sees_other_preparation_but_not_child_own_marker(self):
+        self.register_impl('T-PREP')
+        marker=dsd_attempt._launch_preparation_path(self.run,'P1','T-PREP')
+        marker.parent.mkdir(parents=True,exist_ok=True)
+        marker.write_text(json.dumps({'format':'tbag-launch-preparation-v1','pid':424242,'role':'implementer'}))
+        with mock.patch.object(dsd_attempt,'pid_alive',return_value=True):
+            blocker=dsd_attempt.launch_blocker(self.run,'P1','T-PREP','implementer')
+        self.assertIn('PREPARATION_IN_FLIGHT',blocker)
+        marker.write_text(json.dumps({'format':'tbag-launch-preparation-v1','pid':os.getpid(),'role':'implementer'}))
+        with mock.patch.object(dsd_attempt,'pid_alive',return_value=True):
+            blocker=dsd_attempt.launch_blocker(self.run,'P1','T-PREP','implementer')
+        self.assertIsNone(blocker)
+
+    def test_preparation_child_waits_for_parent_marker_publication(self):
+        self.register_impl('T-PREP-HANDSHAKE')
+        marker=dsd_attempt._launch_preparation_path(self.run,'P1','T-PREP-HANDSHAKE')
+        lock=dsd_attempt._launch_preparation_lock_path(self.run,'P1','T-PREP-HANDSHAKE')
+        ready=self.root/'prep-lock-ready'; release=self.root/'prep-lock-release'
+        helper=(
+            "import json,os,sys,time; from pathlib import Path; "
+            f"sys.path.insert(0,{str(SCRIPTS)!r}); import dsd_task; "
+            "lock=Path(sys.argv[1]); marker=Path(sys.argv[2]); ready=Path(sys.argv[3]); release=Path(sys.argv[4]); "
+            "\nwith dsd_task.file_lock(lock):"
+            "\n ready.write_text('ready')"
+            "\n while not release.exists(): time.sleep(0.005)"
+            "\n marker.write_text(json.dumps({'format':'tbag-launch-preparation-v1','pid':os.getpid()}))"
+        )
+        holder=subprocess.Popen([sys.executable,'-c',helper,str(lock),str(marker),str(ready),str(release)])
+        deadline=time.time()+3
+        while time.time()<deadline and not ready.exists(): time.sleep(0.01)
+        self.assertTrue(ready.exists())
+        args=SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-PREP-HANDSHAKE',background_prepare=False)
+        seen={}
+        def foreground(_args):
+            seen['marker_visible']=marker.is_file()
+            return {'status':'mock-started'}
+        old=os.environ.get('TBAG_LAUNCH_PREPARATION_MARKER')
+        os.environ['TBAG_LAUNCH_PREPARATION_MARKER']=str(marker)
+        try:
+            release.write_text('go')
+            with mock.patch.object(dsd_attempt,'_command_launch_foreground',side_effect=foreground):
+                out=dsd_attempt.command_launch(args)
+        finally:
+            if old is None: os.environ.pop('TBAG_LAUNCH_PREPARATION_MARKER',None)
+            else: os.environ['TBAG_LAUNCH_PREPARATION_MARKER']=old
+            holder.wait(timeout=3)
+        self.assertEqual(out['status'],'mock-started')
+        self.assertTrue(seen['marker_visible'])
+        self.assertFalse(marker.exists())
+
     def test_live_attempt_session_evidence_is_reusable_before_terminal(self):
         event=self.root/'live-session'; event.mkdir(); (event/'attempt.json').write_text(json.dumps({'session_id':'live-ses'}))
         attempt={'role':'reviewer','event_dir':str(event)}
@@ -369,6 +420,91 @@ class ComponentsTests(unittest.TestCase):
         a=A(); a.run_root=self.run; a.phase_id='P1'; a.task_id='T1'; a.report=report
         with self.assertRaisesRegex(ValueError,'semantic outcome command'): dsd_task.command_escalate(a)
 
+    def test_quiescent_reusable_reviewer_is_not_independent_authorized_work(self):
+        event=self.root/'plan-reviewer-5'; event.mkdir()
+        task={
+            'phase_id':'P1','task_id':'GOAL-PLAN-REVIEW','status':'active','kind':'analysis',
+            'role':'plan-reviewer','requires_integration':False,
+            'attempts':[{'role':'plan-reviewer','status':'gated','event_dir':str(event)}],
+            'last_plan_review':{'reviewer_attempt':str(event),'outcome':'pass'},
+        }
+        self.assertTrue(dsd_task._quiescent_reusable_review_conduit(task))
+        self.assertFalse(dsd_task.task_can_advance_without_human(self.run,task))
+        context={**task,'task_id':'CTX-REVIEW','role':'context-reviewer','attempts':[{'role':'context-reviewer','status':'gated','event_dir':str(event)}],'last_plan_review':{},'last_context_review':{'reviewer_attempt':str(event),'outcome':'pass'}}
+        self.assertTrue(dsd_task._quiescent_reusable_review_conduit(context))
+        self.assertTrue(dsd_task._phase_task_success(self.run,'P1',context))
+
+    def test_gated_recovery_disposition_is_recorded_before_another_recovery_launch(self):
+        event=self.root/'recovery-gated'; event.mkdir(); (event/'report.md').write_text('RESUME\n\nRecovered existing lane.\n')
+        task={
+            'phase_id':'P1','task_id':'T-REC','status':'recovery-required','kind':'implementation',
+            'role':'implementer','review_findings':[],
+            'attempts':[{'role':'recovery','tier':'analyst','status':'gated','event_dir':str(event)}],
+        }
+        action=dsd_task._reconcile_action(self.run,'P1',task)
+        self.assertEqual(action['action'],'record-analyst-disposition')
+        self.assertEqual(action['report'],str(event/'report.md'))
+
+    def test_task_show_defaults_to_compact_latest_state(self):
+        self.register_impl('T-SHOW')
+        path=dsd_task.task_file(self.run,'P1','T-SHOW'); task=dsd_task.load_json(path)
+        for i in range(5):
+            task.setdefault('attempts',[]).append({'role':'implementer','status':'gated','event_dir':str(self.root/f'e-{i}'),'session_id':f's-{i}','huge':'x'*6000})
+        dsd_task.write_json(path,task)
+        compact=dsd_task.command_show(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-SHOW',details=False,summary=True))
+        self.assertNotIn('attempts',compact)
+        self.assertEqual(compact['attempt_count'],5)
+        self.assertEqual(compact['latest_attempt']['session_id'],'s-4')
+        self.assertLess(len(json.dumps(compact)),3000)
+        full=dsd_task.command_show(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-SHOW',details=True,summary=False))
+        self.assertEqual(len(full['attempts']),5)
+        self.assertIn('huge',full['attempts'][-1])
+
+    def test_owner_status_default_is_bounded_summary_not_task_inventory(self):
+        class A: pass
+        for i in range(20):
+            brief=self.root/f'brief-{i}.md'; brief.write_text(f'# A{i}\n\n## Objective\n' + ('Long orientation text. '*80))
+            a=A(); a.run_root=self.run; a.phase_id='P1'; a.task_id=f'A{i}'; a.brief=brief
+            a.kind='analysis'; a.role='discovery'; a.tier='analyst'; a.dependency=[]; a.requires_integration=False
+            a.reviews_task=None; a.owner_authority=None
+            dsd_task.command_register_direct(a)
+        compact=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id='P1',details=False,disk_usage={'owned_total_bytes':1234}))
+        self.assertGreaterEqual(compact['backlog_count'],20)
+        self.assertLessEqual(len(compact['backlog_preview']),6)
+        self.assertTrue(compact['backlog_preview_truncated'])
+        self.assertTrue(all('purpose' in item and len(item['purpose'])<=140 for item in compact['backlog_preview']))
+        self.assertLess(len(json.dumps(compact)),5000)
+        detailed=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id='P1',details=True,disk_usage={'owned_total_bytes':1234}))
+        self.assertIn('disk_usage',detailed)
+        self.assertTrue(any('purpose' in item for item in detailed['backlog_preview']))
+
+    def test_rendered_worker_prompt_repeats_machine_routing_contract_at_report_boundary(self):
+        text=(SCRIPTS/'render_worker_prompt.py').read_text()
+        self.assertIn('MACHINE-CRITICAL REPORT ROUTING',text)
+        self.assertIn('Nothing may precede that token',text)
+        self.assertIn('REPORT_OUTCOMES_BY_ROLE.get(args.role)',text)
+        gate=(SCRIPTS/'dsd_attempt.py').read_text()
+        self.assertIn('legacy_fallback_command',gate)
+        self.assertIn('--run-root',gate)
+        self.assertIn('--outcome OUTCOME',gate)
+        self.assertNotIn("--outcome <{'|'.join(fallback_values)}>",gate)
+        self.assertIn('Replace OUTCOME with one of',gate)
+        self.assertIn('do not relaunch solely to repair formatting',gate.lower())
+
+    def test_headless_opencode_install_uses_manual_mode_without_restart_question(self):
+        project=self.root/'adapter-opencode-headless'; project.mkdir(); git(project,'init','-q')
+        cmd=[sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','opencode','--headless','--project-root',str(project),'--skill-root',str(ROOT)]
+        first=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(first.returncode,0,first.stderr); data=json.loads(first.stdout)
+        self.assertTrue(data['bootstrap_ready']); self.assertTrue(data['degraded_manual'])
+        self.assertFalse(data['restart_required']); self.assertIsNone(data['blocking_question'])
+        self.assertEqual(data['activation'],'headless-manual')
+        self.assertIn('manual-parent-tick-only',data['autonomous_supervision'])
+        second=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(second.returncode,0,second.stderr); again=json.loads(second.stdout)
+        self.assertFalse(again['activation_request_changed'])
+        self.assertFalse(again['restart_required']); self.assertIsNone(again['blocking_question'])
+
     def test_human_blocked_run_requires_no_other_authorized_work(self):
         self.register_impl('T1'); self.register_impl('T2')
         analyst,_=self.gated_attempt('T1','discovery','discovery-1','ESCALATE: owner choice required.\n',tier='analyst')
@@ -376,7 +512,7 @@ class ComponentsTests(unittest.TestCase):
         a=A(); a.run_root=self.run; a.phase_id='P1'; a.task_id='T1'; a.outcome='escalate'; a.report=analyst
         dsd_task.command_analysis_result(a)
         r=A(); r.run_root=self.run; r.status='human-blocked'; r.reason='waiting for owner'
-        with self.assertRaisesRegex(ValueError,'can advance without the Human decision'):
+        with self.assertRaisesRegex(ValueError,'ADVANCE_BEFORE_HUMAN_BLOCK'):
             dsd_task.command_set_run_status(r)
         s=A(); s.run_root=self.run; s.phase_id='P1'; s.task_id='T2'; s.by=None; dsd_task.command_supersede(s)
         self.assertEqual(dsd_task.command_set_run_status(r)['status'],'human-blocked')

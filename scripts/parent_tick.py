@@ -277,7 +277,15 @@ def owner_signature(state: dict[str, Any], monitors: list[dict[str, Any]], class
         "waiting_dependency_count": state.get("waiting_dependency_count"),
         "live": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("role"))) for x in state.get("live_attempts") or []),
         "human": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("action"))) for x in state.get("human_blocks") or []),
-        "attention": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("attention"))) for x in monitors if x.get("attention")),
+        "attention": sorted(
+            (
+                str(x.get("phase_id")),
+                str(x.get("task_id")),
+                str(x.get("attention") or x.get("observer_attention") or x.get("monitor_error") or ("retired" if x.get("retirement_requested") else "") or ("retirement-error" if x.get("retirement_error") else "")),
+            )
+            for x in monitors
+            if x.get("attention") or x.get("observer_attention") or x.get("monitor_error") or x.get("retirement_requested") or x.get("retirement_error")
+        ),
         "actions": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("action"))) for x in state.get("first_useful_actions") or []),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -394,8 +402,32 @@ def owner_notice(owner: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def compact_advance(result: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Keep deterministic transition receipts, not a duplicate reconciliation tree."""
+def _compact_action(item: dict[str, Any]) -> dict[str, Any]:
+    keep=("action","phase_id","task_id","role","tier","reason","waiting_on","blocked_by","event_dir","report")
+    return {k:item.get(k) for k in keep if item.get(k) not in (None,[],{})}
+
+
+def _compact_blocked_action(item: dict[str, Any]) -> dict[str, Any]:
+    out=_compact_action(item)
+    error=item.get("error") or item.get("reason")
+    if error: out["error"]=str(error)[:700]
+    return out
+
+
+def _compact_monitor(item: dict[str, Any]) -> dict[str, Any] | None:
+    noteworthy=any(item.get(k) for k in (
+        "attention","monitor_error","observer_attention","retirement_requested",
+        "retirement_error","automatic_intervention_deferred",
+    )) or str(item.get("state") or "") not in {"","running"}
+    if not noteworthy: return None
+    keep=("phase_id","task_id","role","state","report_state","attention","observer_attention",
+          "monitor_error","retirement_requested","retirement_error","automatic_intervention_deferred",
+          "automatic_intervention_in_seconds","stall_confirmed_seconds","elapsed_seconds")
+    return {k:item.get(k) for k in keep if item.get(k) not in (None,[],{})}
+
+
+def compact_advance(result: dict[str, Any] | None, *, details: bool = False) -> dict[str, Any] | None:
+    """Keep transition receipts compact; nested reconciliations stay behind --details."""
     if not isinstance(result,dict):
         return None
     applied=list(result.get("applied") or [])
@@ -404,9 +436,11 @@ def compact_advance(result: dict[str, Any] | None) -> dict[str, Any] | None:
     if not applied and not blocked and stopped in {"", "quiescent", "semantic-or-launch-boundary"}:
         return None
     out={"stopped":stopped}
-    if applied: out["applied"]=applied
-    if blocked: out["blocked_actions"]=blocked
-    if result.get("reason"): out["reason"]=result["reason"]
+    if applied:
+        out["applied"]=applied if details else [_compact_action(item) for item in applied]
+    # blocked_actions are surfaced once at the tick top level; repeating them inside
+    # the deterministic transition receipt is pure token duplication.
+    if result.get("reason"): out["reason"]=str(result["reason"])[:700]
     return out
 
 
@@ -440,6 +474,7 @@ def _launch_action_blocker(run:Path, action:dict[str,Any])->str|None:
 def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     run = args.run_root.resolve()
     loop = load_loop(run)
+    details=bool(getattr(args,"details",False))
     loop["last_tick_at"] = now()
 
     advance_result: dict[str, Any] | None = None
@@ -542,6 +577,11 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         else:
             launchable.append(item)
     pending=launchable
+    preparation_blocks=[
+        item for item in blocked_actions
+        if str(item.get("reason") or item.get("error") or "").startswith("PREPARATION_IN_FLIGHT")
+    ]
+    hard_blocked_actions=[item for item in blocked_actions if item not in preparation_blocks]
     live_now = list(state.get("live_attempts") or [])
     durable_questions=owner_questions(state)
     questions=durable_questions+runtime_config_questions(run,blocked_actions)
@@ -551,7 +591,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif completion_candidate(state):
         classification = "completion-candidate"
         turn = "finish-or-replan"
-    elif any(x.get("retirement_error") for x in monitors) or state.get("unresolved_state") or (blocked_actions and not pending):
+    elif any(x.get("retirement_error") for x in monitors) or state.get("unresolved_state") or (hard_blocked_actions and not pending):
         classification = "recovery-required"
         turn = "intervene"
     elif pending:
@@ -559,6 +599,9 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         turn = "continue"
     elif live_now:
         classification = "workers-running"
+        turn = "yield"
+    elif preparation_blocks:
+        classification = "workers-preparing"
         turn = "yield"
     else:
         classification = "active-idle"
@@ -601,13 +644,20 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
 
     run_status_transition = None
     if durable_questions and run_status == "active" and not pending and not live_now:
-        run_status_transition = dsd_task.command_set_run_status(args_for(
-            run_root=run,
-            status="human-blocked",
-            reason="awaiting native Human question response",
-        ))
-        run_status = "human-blocked"
-        state["run_status"] = run_status
+        try:
+            run_status_transition = dsd_task.command_set_run_status(args_for(
+                run_root=run,
+                status="human-blocked",
+                reason="awaiting native Human question response",
+            ))
+            run_status = "human-blocked"
+            state["run_status"] = run_status
+        except ValueError as exc:
+            run_status_transition={
+                "deferred":True,
+                "error":str(exc)[:900],
+                "next":"Run the next parent tick to advance independent authorized work. Do not inspect control-plane source; phase-scope the tick if the Human blocker belongs to one phase.",
+            }
 
     disk_usage=disk_usage_for_tick(run,loop,sample_seconds=float(getattr(args,"disk_sample_seconds",DEFAULT_DISK_SAMPLE_SECONDS)))
     owner = update_due(
@@ -619,16 +669,22 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         changed_min_seconds=float(args.changed_update_min_seconds),
     )
     if owner.get("due"):
-        try:
-            owner["status"] = dsd_task.command_owner_status(args_for(run_root=run, phase_id=getattr(args, "phase_id", None), disk_usage=disk_usage))
-        except Exception as exc:
-            owner["status_error"] = str(exc)
         if questions:
             owner["covered_by_native_question"]=True
         else:
+            try:
+                owner["status"] = dsd_task.command_owner_status(args_for(
+                    run_root=run,phase_id=getattr(args,"phase_id",None),disk_usage=disk_usage,details=details,
+                ))
+            except Exception as exc:
+                owner["status_error"] = str(exc)[:700]
             loop["pending_owner_update"] = {"token": owner.get("token"), "signature": owner.get("signature"), "reasons": owner.get("reasons"), "created_at": now()}
 
     notice=None if questions else owner_notice(owner)
+    prior_tick_signature=str(loop.get("last_tick_signature") or "")
+    tick_signature=str(owner.get("signature") or "")
+    state_changed=not prior_tick_signature or prior_tick_signature!=tick_signature
+    loop["last_tick_signature"]=tick_signature
     loop["last_classification"] = classification
     loop["last_signature"] = owner.get("signature")
     save_loop(run, loop)
@@ -641,32 +697,65 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "classification": classification,
         "turn": turn,
         "worker_budget": state.get("worker_budget"),
-        "owner_update": owner,
-        "disk_usage": disk_usage,
+        "state_changed": state_changed,
+        "state_signature": tick_signature,
     }
     if questions:
         out["owner_question_required"]=True
         out["owner_questions"]=questions
-        out["question_contract"]="Run actions_before_question first. Then call parent_tick.py wait-owner --question-id <id>, invoke the harness-native question UI, and end the turn. Plain chat/status output is not a substitute. After recording/applying the Human answer, call parent_tick.py resume-owner --question-id <id> before the next tick."
-        out["heartbeat_contract"]="While owner_wait is open, both completion pulse and health heartbeat are suspended even if detached workers continue; their durable results reconcile after resume."
-        if pending: out["actions_before_question"]=pending
+        out["question_contract"]="Run actions_before_question first. Then wait-owner, ask through the harness-native question UI, and end the turn. After recording/applying the answer, resume-owner before the next tick."
+        if pending: out["actions_before_question"]=[_compact_action(x) for x in pending]
     elif notice is not None:
         out["owner_notice"]=notice
+    if details:
+        out["owner_update"]=owner
+        out["disk_usage"]=disk_usage
+    elif owner.get("due") and questions:
+        out["owner_update"]={k:owner.get(k) for k in ("due","reasons","signature","seconds_since_last_update") if owner.get(k) is not None}
     if run_status_transition: out["run_status_transition"] = run_status_transition
-    advance_packet=compact_advance(advance_result)
+    advance_packet=compact_advance(advance_result,details=details)
     if advance_packet: out["advance"] = advance_packet
-    if poison_result and poison_result.get("count"): out["poisoned_sessions_routed"] = poison_result
-    if blocked_actions: out["blocked_actions"] = blocked_actions
-    if loop_suspected: out["loop_suspected"] = loop_suspected
-    if pending: out["actions"] = pending
-    if live_now: out["live_attempts"] = live_now
-    if monitors: out["monitoring"] = monitors
-    if state.get("human_blocks"): out["human_blocks"] = state.get("human_blocks")
-    if state.get("unresolved_state"): out["unresolved_state"] = state.get("unresolved_state")
+    if poison_result and poison_result.get("count"):
+        out["poisoned_sessions_routed"] = poison_result if details else {"count":poison_result.get("count")}
+    if hard_blocked_actions:
+        out["blocked_actions"] = hard_blocked_actions if details else [_compact_blocked_action(x) for x in hard_blocked_actions]
+    if preparation_blocks and (details or state_changed or classification!="workers-preparing"):
+        out["preparing"]=[
+            {k:x.get(k) for k in ("phase_id","task_id","action") if x.get(k) is not None}
+            for x in preparation_blocks
+        ]
+    if loop_suspected:
+        out["loop_suspected"] = loop_suspected if details else {
+            "count":loop_suspected.get("count"),
+            "actions":[_compact_action(x) for x in loop_suspected.get("actions") or []],
+            "next":loop_suspected.get("next"),
+        }
+    if pending: out["actions"] = pending if details else [_compact_action(x) for x in pending]
+    if live_now and (details or state_changed or classification!="workers-running"):
+        out["live_attempts"] = live_now if details else [
+            {k:x.get(k) for k in ("phase_id","task_id","role","event_dir") if x.get(k) is not None}
+            for x in live_now
+        ]
+    if monitors:
+        if details:
+            out["monitoring"]=monitors
+        else:
+            noteworthy=[x for x in (_compact_monitor(item) for item in monitors) if x]
+            if noteworthy: out["attention"]=noteworthy
+    if details and state.get("human_blocks"): out["human_blocks"] = state.get("human_blocks")
+    if state.get("unresolved_state"):
+        out["unresolved_state"] = state.get("unresolved_state") if details else [
+            {k:x.get(k) for k in ("phase_id","task_id","status","role") if x.get(k) is not None}
+            for x in state.get("unresolved_state") or []
+        ]
     if classification == "completion-candidate":
         out["project_end"] = {"candidate": True, "next": "finish after confirming accepted plan obligations are exhausted; otherwise replan/register remaining work"}
     if classification == "active-idle":
-        out["control_error"] = "active run has no live worker, no authorized action, no owner block, and is not mechanically complete; route planning/recovery instead of yielding indefinitely"
+        out["control_error"] = {
+            "code":"active-idle",
+            "message":"Active run has no live worker, authorized action, owner block, or mechanical completion.",
+            "next":"Use a bounded planning/recovery action from the current phase; do not inspect T-BAG source merely to explain this state.",
+        }
     return out
 
 
@@ -749,6 +838,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--report-complete-grace-seconds", type=float, default=DEFAULT_REPORT_COMPLETE_GRACE_SECONDS)
     p.add_argument("--stall-confirm-seconds", type=float, default=DEFAULT_STALL_CONFIRM_SECONDS)
     p.add_argument("--disk-sample-seconds", type=float, default=DEFAULT_DISK_SAMPLE_SECONDS)
+    p.add_argument("--details", action="store_true", help="include verbose monitoring, disk and transition diagnostics")
     p = sub.add_parser("pulse"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id")
     p = sub.add_parser("ack-update"); p.add_argument("--run-root", type=Path, required=True); p.add_argument("--token", required=True)
     p = sub.add_parser("wait-owner"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--question-id",required=True)

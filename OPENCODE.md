@@ -14,7 +14,9 @@ Host generation detection first follows the running parent via `OPENCODE_PID`. I
 
 Parent diagnostics also obey the top-level `SKILL.md` project-local scratch boundary: T-BAG repro projects, SDK probes, smoke fixtures, reports and handoff intermediates stay under the project's `TBag/` tree, never host system temp unless the Human explicitly requested an external destination.
 
-The installer now requires **live generation proof**, not merely matching files. It writes `.opencode/tbag-activation.json`; the actually loaded V1/V2 adapter acknowledges that exact token under `TBag/harness/`. Until the tokens match, installer output is `bootstrap_ready=false` with a blocking **Restart OpenCode** question. Invoke OpenCode's native `question` tool and stop; after restart/reload, rerun the installer and continue only when `bootstrap_ready=true`. V1 and V2 remain distinct transport generations.
+The installer now requires **live generation proof**, not merely matching files. It writes `.opencode/tbag-activation.json`; the actually loaded V1/V2 adapter acknowledges that exact token under `TBag/harness/`. Until the tokens match in an interactive host, installer output is `bootstrap_ready=false` with a blocking **Restart OpenCode** question. Invoke OpenCode's native `question` tool and stop; after restart/reload, rerun the installer and continue only when `bootstrap_ready=true`. V1 and V2 remain distinct transport generations.
+
+For CI/offline/headless maintenance, pass `--headless` (or `TBAG_HEADLESS=1`). T-BAG deliberately does **not** infer headlessness from TTY state because a real OpenCode tool shell may itself be non-TTY. Headless installation reports `degraded_manual=true`, emits no unfulfillable restart question, and requires explicit parent ticks until a live host proves the token. Re-running an unchanged installer also preserves the existing activation request instead of rewriting its timestamp. The installer is bootstrap/update machinery, not a runtime-health probe.
 
 The V1 project plugin may expose **`tbag_follow`** as a diagnostic tool, but normal autonomy does not depend on that custom tool being present. A normal active `parent_tick.py tick` or worker launch enrolls supervision; every tick also lets the adapter rediscover and re-arm missing live observers from durable attempt state. V2 uses its native setup/domain-hook adapter and `session.execution.*` lifecycle.
 
@@ -24,7 +26,7 @@ If `tbag_follow` is absent, do not invent a workaround or treat it as a lifecycl
 
 There is exactly one parent protocol, including across adapter upgrades:
 
-1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Do not separately reconstruct reconcile/advance/monitor/update state.
+1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Its default output is deliberately compact and incremental; reserve `--details` for bounded diagnosis. Do not separately reconstruct reconcile/advance/monitor/update state.
 2. Process the tick packet until it reaches a launch/semantic/owner boundary. If it says `actions-ready`, execute only those authorized actions and tick again.
 3. For each new attempt run normal `dsd_attempt.py launch`, then yield. The OpenCode adapter transparently backgrounds expensive workspace preparation, watches that preparation, and arms the resulting worker observer. Multiple launch commands may share one Bash call; structured results are parsed independently.
 4. Missing observer state is repaired automatically after a normal tick. `tbag_follow`, when the host exposes it, is diagnostics only and is never a required lifecycle step.

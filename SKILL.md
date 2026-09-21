@@ -18,14 +18,14 @@ Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs a
 
 Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an answer to an open `owner_question`: apply it, `resume-owner`, then tick.
 
-1. **Harness first.** Install/check one parent adapter before launch. `bootstrap_ready=false` / `blocking_question` means native question UI + stop; after the requested restart/action rerun until ready. Missing Analyst/Grunt runtime: resolve supplied config or ask the user **once** through the native question UI; never invent it—`MISSING_RUNTIME_CONFIG` blocks.
+1. **Harness first.** Install/check one parent adapter before launch. `bootstrap_ready=false` / `blocking_question` means native question UI + stop; after the requested restart/action rerun until ready. In deliberate CI/offline/headless operation use the installer's degraded-manual mode instead of manufacturing a restart question. Missing Analyst/Grunt runtime: resolve supplied config or ask the user **once** through the native question UI; never invent it—`MISSING_RUNTIME_CONFIG` blocks.
 2. **Authority first.** Substantial work needs an accepted plan. Goal-only: Goal Planner → fresh Plan Reviewer until PASS. Parent never authors or repairs technical plans.
 3. **Expose only needed work.** Analyst findings may close as findings. Planning/replanning comes from Planner/Discovery/Surveyor briefs + `plan/task-graph.json`; register verbatim. Keep unresolved root cause/architecture with Analysts.
 4. **Schedule safely.** Launch dependency-ready work to budget. Mutations use isolated worktrees; standalone read-only roles use a shared frozen project view. State-changing dependencies integrate first.
 5. **Grunt loop.** Implementer → fresh Reviewer; FAIL → Fixer resumes that Reviewer → fresh Review; PASS → land. Out-of-brief obligations go to Analyst triage; ESCALATE uses the central ladder.
 6. **Authority ladder.** Grunt → Analyst → Human. Stronger runtime profiles do not widen authority.
 7. **Durable truth.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, silence and final-report/no-terminal hangs; retirement preserves recovery state.
-8. **Harness wake.** `OPENCODE.md` is the sole protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. Waiting/paused/ended runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops.
+8. **Harness wake.** `OPENCODE.md` is the sole protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. After launch, yield—never sleep/poll. Waiting/paused/ended runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops. Routine parent control uses compact tick/status/show surfaces; full details are diagnostic-only.
 
 ## Non-negotiable boundaries
 

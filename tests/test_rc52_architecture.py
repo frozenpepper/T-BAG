@@ -120,7 +120,8 @@ class ParentEdgePolicyTests(unittest.TestCase):
             out=parent_tick.command_tick(args)
         retire.assert_called_once()
         self.assertNotIn("observer_rearm_required",out)
-        self.assertEqual(out["monitoring"][0]["observer_attention"],"observer-not-rearmed-after-attempt-deadline")
+        self.assertNotIn("monitoring",out)
+        self.assertEqual(out["attention"][0]["observer_attention"],"observer-not-rearmed-after-attempt-deadline")
 
 
 if __name__ == "__main__":

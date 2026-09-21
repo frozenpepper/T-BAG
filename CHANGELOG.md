@@ -2,6 +2,16 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC65 — compact parent control and preparation race hardening
+
+- Made `parent_tick.py tick` a compact incremental routing packet by default: healthy monitoring detail, full disk telemetry, nested transition results and duplicate owner state move behind `--details`; stable ticks expose a state signature/change bit instead of re-sending the world.
+- Added bounded/default summary surfaces for task show and owner status, explicit `--summary` discoverability for show/inspect/reconcile/status, shorter outcome/backlog previews, and quiescent reusable Plan/Context Reviewer conduits no longer count as backlog or independent work.
+- Fixed stale Recovery re-offers by recording a completed gated Analyst disposition before another Recovery launch can be proposed. Human-block transition failures now name the remaining mechanism and next control action instead of crashing the tick into source archaeology.
+- Foregrounded machine routing tokens at the final worker report boundary and made tokenless gate failures return allowed tokens plus a complete legacy `--outcome` recovery command.
+- Hardened same-task launch preparation: task-local workspace creation serialization, atomic preparation reservation/spawn, explicit in-flight blockers, child self-PID exemption, and a `workers-preparing` yield state prevent concurrent checkout destruction without serializing different tasks.
+- Added explicit headless/manual harness installation, idempotent activation requests, and no impossible restart question when no live host exists. Routine launch remains launch→yield; no foreground `launch --wait`/sleep-poll protocol was added.
+- Added regressions for compact packet size, bounded owner status, quiescent conduits, completed Recovery routing, headless bootstrap, preparation self-blocking, and real concurrent same-task workspace creation.
+
 ## v2.2.0 RC64 — durable OpenCode transport recovery
 
 - Removed the sticky `idle-recovery` liveness trap: new launch activity reopens the fast lane, and the deterministic completion pulse revisits stale idle-recovery registrations instead of skipping them forever.

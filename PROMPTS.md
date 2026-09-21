@@ -1,28 +1,34 @@
 # T-BAG Operator Command Cookbook
 
-Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HARNESS.md` + selected adapter.
+Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HARNESS.md` + the selected adapter. Worker reports own semantic routing; `--outcome` is legacy fallback only.
 
-Worker reports own semantic routing; `--outcome` is legacy fallback only.
-
-## Parent tick / turn boundary
+## Parent tick
 
 ```bash
 python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-Run on owner turn/resume/wake. For `owner_question_required`: run `actions_before_question`, then `parent_tick.py wait-owner --question-id <id>`, ask through the native UI, and end the turn. After applying the answer, `resume-owner --question-id <id>` then tick. Passive `owner_notice` is bannered and acknowledged. `completion-candidate` means finish or replan.
+Run on owner turn/resume/wake. Default output is compact; `state_changed=false` means routing state is materially unchanged. Use `tick --details` only for bounded control/transport diagnosis.
 
-Do not pipe/filter/summarize stdout from `parent_tick.py tick` or `dsd_attempt.py launch` in the parent shell command. The OpenCode adapter consumes their structured JSON for immediate heartbeat/observer/preparation-watcher repair. RC64 also self-heals from durable state when that output is mangled, so this is a latency/diagnostic rule rather than a correctness dependency.
+For `owner_question_required`: execute `actions_before_question`, then:
+
+```bash
+python3 <skill>/scripts/parent_tick.py wait-owner --run-root ... --question-id ...
+# ask with the harness-native question UI and end the turn
+python3 <skill>/scripts/parent_tick.py resume-owner --run-root ... --question-id ...
+```
+
+Render/ack `owner_notice`. `completion-candidate` means finish or replan. Do not pipe/filter tick or launch stdout when the adapter needs structured output.
 
 ## Harness bootstrap
 
 ```bash
-python3 <skill>/scripts/install_harness_adapter.py --project-root /abs/project --harness <parent-harness>
+python3 <skill>/scripts/install_harness_adapter.py --project-root /abs/project --harness <harness>
 ```
 
-`bootstrap_ready=false` → ask its `blocking_question` natively and stop. After the requested restart/action, rerun until `bootstrap_ready=true`; launch nothing before that.
+`bootstrap_ready=false` → use its native `blocking_question`, then rerun after the requested host action. For deliberate offline/headless operation only, add `--headless` or set `TBAG_HEADLESS=1`; this selects manual parent ticks instead of an impossible restart gate.
 
-## Initialize runtime
+## Initialize
 
 ```bash
 python3 <skill>/scripts/dsd_task.py init-run \
@@ -35,101 +41,94 @@ python3 <skill>/scripts/prepare_worker_rules.py \
 
 ## Goal-only bootstrap
 
-Goal Planner → fresh Plan Reviewer:
+Register/launch/gate the Goal Planner, then one reusable fresh-session Plan Reviewer:
 
 ```bash
-python3 <skill>/scripts/dsd_task.py register-direct \
-  --run-root ... --phase-id bootstrap --task-id GOAL-PLAN \
-  --brief .../goal-plan.md --kind analysis --role goal-planner --tier analyst --no-integration
-python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id bootstrap --task-id GOAL-PLAN [--authority-input ...]
+python3 <skill>/scripts/dsd_task.py register-direct --run-root ... --phase-id bootstrap \
+  --task-id GOAL-PLAN --brief .../goal-plan.md --kind analysis --role goal-planner --tier analyst --no-integration
+python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id bootstrap --task-id GOAL-PLAN
 python3 <skill>/scripts/dsd_attempt.py gate --run-root ... --phase-id bootstrap --task-id GOAL-PLAN
 
-python3 <skill>/scripts/dsd_task.py register-direct \
-  --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW \
-  --brief .../review.md --kind analysis --role plan-reviewer --tier analyst --no-integration \
-  --reviews-task GOAL-PLAN
+python3 <skill>/scripts/dsd_task.py register-direct --run-root ... --phase-id bootstrap \
+  --task-id GOAL-PLAN-REVIEW --brief .../review.md --kind analysis --role plan-reviewer --tier analyst \
+  --no-integration --reviews-task GOAL-PLAN
 python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW
 python3 <skill>/scripts/dsd_attempt.py gate --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW
-python3 <skill>/scripts/dsd_task.py plan-review \
-  --run-root ... --phase-id bootstrap --task-id GOAL-PLAN-REVIEW --report .../report.md
+python3 <skill>/scripts/dsd_task.py plan-review --run-root ... --phase-id bootstrap \
+  --task-id GOAL-PLAN-REVIEW --report .../report.md
 ```
 
-FAIL returns the Goal Planner for revision; the next proposal gets a fresh review. PASS permits acceptance/rules creation.
+FAIL returns the Goal Planner for revision; the next proposal receives a fresh review. PASS permits acceptance/rules creation.
 
-## Register an Analyst graph
+## Analyst graph
 
-For amendment/replan, the report starts `REPLAN` or `REPLAN+RESUME`; record that disposition before registering its graph:
+For `REPLAN` / `REPLAN+RESUME`, record the report-owned disposition, preflight, then register verbatim:
 
 ```bash
-python3 <skill>/scripts/dsd_task.py analysis-result --run-root ... --phase-id phase-1 --task-id PLAN-X --report .../report.md
-python3 <skill>/scripts/dsd_task.py preflight-plan --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
-python3 <skill>/scripts/dsd_task.py register-plan --run-root ... --phase-id phase-1 --plan .../plan/task-graph.json
+python3 <skill>/scripts/dsd_task.py analysis-result --run-root ... --phase-id P --task-id PLAN-X --report .../report.md
+python3 <skill>/scripts/dsd_task.py preflight-plan --run-root ... --phase-id P --plan .../plan/task-graph.json
+python3 <skill>/scripts/dsd_task.py register-plan --run-root ... --phase-id P --plan .../plan/task-graph.json
 ```
 
 ## Launch / inspect
 
 ```bash
-python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 --task-id T01
-python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1 --task-id T01
+python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task-id T01
+python3 <skill>/scripts/dsd_attempt.py inspect --summary --run-root ... --phase-id P --task-id T01
 ```
 
-`inspect` is diagnostic. Tick handles final-report/no-terminal recovery and silent anomalies; long runtime alone is not failure.
-OpenCode V1 `tbag_follow` is diagnostics/re-arm only.
+Launch → yield. Do not sleep/poll. Tick handles final-report/no-terminal and silent anomalies. `inspect --summary` is diagnostic; `inspect --details` is cold forensics; `tbag_follow` is re-arm diagnostics only.
 
-## Gate / Review / Fix
+## Gate / Review / Fix / land
 
 ```bash
-python3 <skill>/scripts/dsd_attempt.py gate --run-root ... --phase-id phase-1 --task-id T01 [--task-id T02 ...]
-python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 --task-id T01 --role reviewer
-python3 <skill>/scripts/dsd_task.py review --run-root ... --phase-id phase-1 --task-id T01 --report .../reviewer-N/report.md
-python3 <skill>/scripts/dsd_workspace.py integrate --run-root ... --phase-id phase-1 --task-id T01 --review-pass-report .../reviewer-N/report.md
+python3 <skill>/scripts/dsd_attempt.py gate --run-root ... --phase-id P --task-id T01
+python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task-id T01 --role reviewer
+python3 <skill>/scripts/dsd_task.py review --run-root ... --phase-id P --task-id T01 --report .../reviewer-N/report.md
+python3 <skill>/scripts/dsd_workspace.py integrate --run-root ... --phase-id P --task-id T01 --review-pass-report .../reviewer-N/report.md
 ```
 
-Reviewer owns `PASS`/`FAIL`/`ESCALATE`; `--review-pass-report` records PASS and integrates. FAIL → Fixer resumes that Reviewer → fresh Reviewer.
-
-Analyst diagnosis/recovery routing is also report-owned:
+Reviewer: `PASS|FAIL|ESCALATE|ESCALATE CAPABILITY`. FAIL → Fixer resumes that Reviewer → fresh Reviewer. Analyst lifecycle reports use `RESUME|REPLAN|REPLAN+RESUME|ESCALATE|ESCALATE CAPABILITY`:
 
 ```bash
-python3 <skill>/scripts/dsd_task.py analysis-result \
-  --run-root ... --phase-id phase-1 --task-id T01 --report .../discovery-N/report.md
+python3 <skill>/scripts/dsd_task.py analysis-result --run-root ... --phase-id P --task-id T01 --report .../report.md
 ```
 
-Lifecycle tokens: `RESUME`, `REPLAN`, `REPLAN+RESUME`, `ESCALATE`, `ESCALATE CAPABILITY`; findings-only uses `accept --report`. `REPLAN` needs a graph; `--outcome` only repairs legacy/tokenless reports.
+Use `--outcome` only for already-generated legacy/tokenless reports.
 
 ## Human escalation
 
 ```bash
-python3 <skill>/scripts/dsd_task.py escalate --run-root ... --phase-id phase-1 --task-id T01 --report .../report.md
-python3 <skill>/scripts/dsd_task.py resolve-escalation --run-root ... --phase-id phase-1 --task-id T01 \
+python3 <skill>/scripts/dsd_task.py escalate --run-root ... --phase-id P --task-id T01 --report .../report.md
+python3 <skill>/scripts/dsd_task.py resolve-escalation --run-root ... --phase-id P --task-id T01 \
   --decision .../decision.md --route resume|analysis|accept
 ```
 
-Tick supplies `owner_question`; native-ask it, save the answer as the decision file, resolve it, then `resume-owner`. Follow-up triage `--route accept` cancels its findings while preserving the decision.
+`resume` returns the existing lane; `analysis` opens bounded Analyst authority; `accept` records explicit Human acceptance/cancellation at that boundary.
 
-## Cleanup / interrupted process
+## Interrupted work / cleanup
 
 ```bash
-python3 <skill>/scripts/dsd_workspace.py cleanup-phase --run-root ... --phase-id phase-1
-python3 <skill>/scripts/dsd_task.py sweep-stale --run-root ... --phase-id phase-1
+python3 <skill>/scripts/dsd_task.py sweep-stale --run-root ... --phase-id P
+python3 <skill>/scripts/dsd_workspace.py cleanup-phase --run-root ... --phase-id P
 python3 <skill>/scripts/dsd_workspace.py purge-run --run-root ... --dry-run
 ```
 
-`cleanup --force --reason "..."` is explicit abandonment; never raw-delete shared cache/runtime.
-
-## Same-session continuation
-
-After `sweep-stale`, use `--resume-last` when available. Recovery hands back with a `RESUME` report recorded through `analysis-result --report ...` first.
+After `sweep-stale`, use `--resume-last` when continuity is valid:
 
 ```bash
-python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 --task-id T01 --role implementer --resume-last
+python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task-id T01 --role implementer --resume-last
 ```
 
 ## Owner-requested status
 
-Use `dsd_task.py owner-status --run-root ... [--phase-id ...]`; `reconcile-run --details` is internal inventory. For legacy/non-gate reports:
+Compact is the default; `--summary` makes intent explicit:
 
 ```bash
+python3 <skill>/scripts/dsd_task.py owner-status --summary --run-root ... [--phase-id P]
+python3 <skill>/scripts/dsd_task.py show --summary --run-root ... --phase-id P --task-id T01
+python3 <skill>/scripts/dsd_task.py reconcile-run --run-root ... [--phase-id P]
 python3 <skill>/scripts/report_surface.py --report .../report.md --lines 8 --chars 1600
 ```
 
-If insufficient, resume/clarify the worker; do not shadow-review.
+Use `--details` only for a concrete diagnostic gap; do not shadow-review worker semantics.

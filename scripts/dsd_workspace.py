@@ -990,12 +990,15 @@ def refresh_clean_task_workspace(run: Path, phase: str, task_id: str) -> dict[st
         return {"refreshed":True,"reason":reason,"primary_head":fresh.get("primary_head"),"baseline_ref":git_text(Path(fresh["worktree"]),"rev-parse",str(fresh["baseline_branch"]))}
 
 def command_create(args: argparse.Namespace) -> dict[str, Any]:
-    run=args.run_root.resolve()
-    # Multiple independent snapshots may proceed together. Integration takes the
-    # exclusive side of this lock, preventing snapshots from seeing a half-applied
-    # primary patch without serializing worktree preparation behind other snapshots.
+    run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
+    # Independent tasks may still prepare in parallel, but two preparations for the
+    # same task must never reclaim each other's half-created worktree/branches.
+    task_lock=dsd_task.task_root(run,phase,tid)/".workspace-create.lock"
+    # Lock order is run-shared -> task-exclusive. Integration takes run-exclusive and
+    # never takes task_lock, so this preserves cross-task concurrency without cycles.
     with dsd_task.file_lock(run/".workspace.lock", shared=True):
-        return _command_create_unlocked(args)
+        with dsd_task.file_lock(task_lock):
+            return _command_create_unlocked(args)
 
 
 def command_checkpoint(args: argparse.Namespace) -> dict[str, Any]:

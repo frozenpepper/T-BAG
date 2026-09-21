@@ -1285,7 +1285,7 @@ class TaskControlTests(unittest.TestCase):
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"
         out=dsd_task.command_owner_status(a)
-        self.assertEqual(out["backlog_count"],15); self.assertEqual(len(out["backlog_preview"]),12); self.assertTrue(out["backlog_preview_truncated"])
+        self.assertEqual(out["backlog_count"],15); self.assertEqual(len(out["backlog_preview"]),6); self.assertTrue(out["backlog_preview_truncated"])
         self.assertEqual(sum(out["backlog_by_state"].values()),15)
 
     def test_owner_status_supplies_plain_language_purpose_before_internal_id(self):

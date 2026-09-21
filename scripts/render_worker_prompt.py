@@ -8,6 +8,7 @@ from pathlib import Path
 from _contract import worker_skill_tags
 from _roles import ANALYST_DISPOSITION_ROLES, ANALYST_ROLES, ROLE_SKILLS, TECHNICAL_QUALITY_ROLES
 from _rules_snapshot import verify_snapshot
+from dsd_task import REPORT_OUTCOMES_BY_ROLE
 
 INPUT_FLAGS = {
     "authority_input": "Governing authority inputs",
@@ -108,6 +109,15 @@ def main() -> int:
                 "Before finalizing any emitted task graph, mechanically self-check it and revise until PASS; never leave mechanical brief repair to the parent:",
                 f"python3 {preflight} preflight-plan --run-root {run} --phase-id {args.phase_id} --plan {attempt_dir/'plan'/'task-graph.json'}",
             ]
+    routing=REPORT_OUTCOMES_BY_ROLE.get(args.role)
+    if routing:
+        tokens=" | ".join(routing)
+        lines += [
+            "MACHINE-CRITICAL REPORT ROUTING:",
+            f"- The report file MUST begin with exactly one of these tokens on its first non-empty line: {tokens}",
+            "- Nothing may precede that token: no Markdown heading, label, preface, code fence, or commentary.",
+            "- This line is parsed mechanically. A missing/moved token turns an otherwise useful report into a routing-protocol error.",
+        ]
     lines += [f"Report: {report}", "Final stdout: report path plus at most one short conclusion."]
     rendered = "\n".join(lines) + "\n"
     if args.output:

@@ -831,6 +831,7 @@ def task_can_advance_without_human(run: Path, task: dict[str, Any]) -> bool:
     if status in {"integrated","superseded"}: return False
     if status=="accepted": return bool(task.get("requires_integration"))
     if status=="blocked": return False
+    if _quiescent_reusable_review_conduit(task): return False
     if status in {"planned","ready"}:
         try:
             ok,_=readiness(run,str(task.get("phase_id") or ""),task)
@@ -855,9 +856,14 @@ def command_set_run_status(args: argparse.Namespace) -> dict[str, Any]:
                 for t in tasks
             )
             if not blocked: raise ValueError("human-blocked run status requires at least one Human-targeted blocked task")
-            advancing=[str(t.get("task_id")) for t in tasks if task_can_advance_without_human(run,t)]
+            advancing=[t for t in tasks if task_can_advance_without_human(run,t)]
             if advancing:
-                raise ValueError(f"run still has authorized work that can advance without the Human decision: {advancing[:5]}")
+                preview=", ".join(f"{t.get('phase_id')}/{t.get('task_id')}[{t.get('status')}]" for t in advancing[:5])
+                raise ValueError(
+                    "ADVANCE_BEFORE_HUMAN_BLOCK: independent authorized work remains: "
+                    f"{preview}. Run parent_tick.py tick to advance that work, or use a phase-scoped tick when the Human blocker belongs to one phase. "
+                    "Reusable Plan/Context Reviewer conduits with recorded dispositions are quiescent and are not blockers."
+                )
         info["status"]=args.status; info["updated_at"]=now()
         if getattr(args,"reason",None): info["status_reason"]=args.reason
         else: info.pop("status_reason",None)
@@ -1321,7 +1327,32 @@ def command_ready(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_show(args: argparse.Namespace) -> dict[str, Any]:
-    return load_task(args.run_root.resolve(), slug(args.phase_id), slug(args.task_id))
+    """Return compact task orientation by default; full durable history is opt-in."""
+    task=load_task(args.run_root.resolve(),slug(args.phase_id),slug(args.task_id))
+    if getattr(args,"details",False):
+        return task
+    attempts=[a for a in task.get("attempts",[]) if isinstance(a,dict)]
+    latest=attempts[-1] if attempts else None
+    result={
+        "phase_id":task.get("phase_id"),"task_id":task.get("task_id"),"status":task.get("status"),
+        "kind":task.get("kind"),"role":task.get("role"),"tier":task.get("tier"),
+        "requires_integration":bool(task.get("requires_integration")),
+        "dependencies":task.get("dependencies") or [],
+        "brief":task.get("brief"),"attempt_count":len(attempts),
+    }
+    if latest:
+        result["latest_attempt"]={k:latest.get(k) for k in ("role","status","event_dir","session_id","resume_session","runtime_profile") if latest.get(k) is not None}
+    for key in ("last_review","last_plan_review","last_context_review","last_analysis","last_escalation"):
+        value=task.get(key)
+        if isinstance(value,dict):
+            keep=("outcome","target","report","attempt","reviewer_attempt","recorded_at")
+            result[key]={k:value.get(k) for k in keep if value.get(k) is not None}
+    findings=open_review_findings(task)
+    if findings:
+        result["open_review_followups"]={"count":len(findings),"ids":[str(x.get("finding_id") or "") for x in findings[:8] if x.get("finding_id")]}
+    if _quiescent_reusable_review_conduit(task):
+        result["quiescent_reusable_conduit"]=True
+    return result
 
 
 def task_brief_objective(task: dict[str, Any], *, max_chars: int = 700) -> str:
@@ -1391,6 +1422,9 @@ def phase_gate_dossier_text(run: Path, phase: str, gate_task_id: str | None = No
 
 def _phase_task_success(run: Path, phase: str, task: dict[str, Any]) -> bool:
     if open_review_findings(task): return False
+    # Reusable Plan/Context Reviewer tasks remain active by design after their latest
+    # fresh verdict is recorded. They are control conduits, not unfinished phase work.
+    if _quiescent_reusable_review_conduit(task): return True
     status=str(task.get("status") or "")
     # Supersession preserves the obligation through its successors. Check it before
     # requires_integration so an integrated successor can discharge an old mutable task.
@@ -1817,8 +1851,14 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if any(attempt_is_live(a) for a in attempts):
         return None
 
-    # Recovery is a durable lane decision (including poisoned-session
-    # routing), so an older resumable session may not pull the task backward.
+    # A completed Recovery/Discovery attempt must be recorded before offering
+    # another worker. Otherwise a gated Recovery can be re-launched forever.
+    if status=="recovery-required" and latest and attempt_status=="gated" and role in ANALYST_DISPOSITION_ROLES:
+        declared=declared_report_outcome(event/"report.md",role,required=False)
+        if task.get("kind") in {"implementation","verification"} or declared in {"resume","replan","replan-resume","escalate"}:
+            return {**base,"action":"record-analyst-disposition","report":str(event/"report.md")}
+    # Recovery is a durable lane decision (including poisoned-session routing),
+    # so an older resumable session may not pull the task backward.
     if status=="recovery-required": return {**base,"action":"launch-recovery"}
 
     if attempt_status in {"report-recovery","report-resume","mutating-report-resume"}:
@@ -1980,8 +2020,8 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
-    """Return a bounded human-orientation packet; the parent writes the prose."""
-    run=args.run_root.resolve(); info=load_run(run); phases_root=run/"phases"
+    """Return compact Human orientation; verbose inventories are explicit diagnostics."""
+    run=args.run_root.resolve(); info=load_run(run); phases_root=run/"phases"; details=bool(getattr(args,"details",False))
     phases=[slug(args.phase_id)] if getattr(args,"phase_id",None) else sorted(p.name for p in phases_root.iterdir() if p.is_dir()) if phases_root.is_dir() else []
     state_labels={
         "planned":"queued","ready":"ready to start","active":"worker result pending","awaiting-review":"independent review pending",
@@ -1989,51 +2029,75 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
     }
     running=[]; backlog=[]; completed=[]; gates=[]; open_followups=[]
+    backlog_sources: dict[tuple[str,str],dict[str,Any]]={}; completed_sources: dict[tuple[str,str],dict[str,Any]]={}
+    purpose_chars=420 if details else 140
     for phase in phases:
         gate_files=sorted(owner_plan_dir(run).glob(f"PHASE-{phase}-GATE-*.md")) if owner_plan_dir(run).is_dir() else []
         if gate_files:
             latest=gate_files[-1]; first=latest.read_text(encoding="utf-8",errors="replace").splitlines()[:8]
             result_line=next((x for x in first if x.startswith("**Result:**")),"")
-            gates.append({"phase":phase,"result":result_line.replace("**Result:**","").strip(),"report":str(latest)})
+            gate={"phase":phase,"result":result_line.replace("**Result:**","").strip()}
+            if details: gate["report"]=str(latest)
+            gates.append(gate)
         tasks_dir=phase_root(run,phase)/"tasks"
         for path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
             task=load_json(path); status=str(task.get("status") or "")
+            if _quiescent_reusable_review_conduit(task):
+                continue
             for finding in open_review_findings(task):
-                open_followups.append({"phase":phase,"source_task":task.get("task_id"),"finding_id":finding.get("finding_id"),"finding":str(finding.get("text") or "")[:420],"triage_task":finding.get("triage_task_id")})
+                item={"phase":phase,"source_task":task.get("task_id"),"finding_id":finding.get("finding_id"),"triage_task":finding.get("triage_task_id")}
+                item["finding"]=str(finding.get("text") or "")[:420 if details else 180]
+                open_followups.append(item)
             if task.get("role")=="phase-auditor" and status=="accepted": continue
-            purpose=task_brief_objective(task,max_chars=420)
+            live_now=task_has_live_attempt(task); tid=str(task.get("task_id") or "")
             if status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration")):
                 if status!="superseded":
                     outcome="integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
-                    completed.append({"phase":phase,"purpose":purpose,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
+                    completed.append({"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
+                    if details: completed_sources[(phase,tid)]=task
                 continue
-            item={"phase":phase,"purpose":purpose,"task_id":task.get("task_id"),"state":state_labels.get(status,status)}
-            if task_has_live_attempt(task): running.append(item)
-            else: backlog.append(item)
-    # Owner orientation must stay bounded even on large programmes. Preserve complete
-    # counts/state distribution, but show only a small purpose-first preview; callers
-    # that explicitly need the full task inventory can use the cold `list` surface.
+            item={"phase":phase,"task_id":task.get("task_id"),"state":state_labels.get(status,status)}
+            if live_now:
+                item["purpose"]=task_brief_objective(task,max_chars=purpose_chars); running.append(item)
+            else:
+                backlog.append(item); backlog_sources[(phase,tid)]=task
     backlog_by_state: dict[str,int]={}
     for item in backlog:
         state=str(item.get("state") or "unknown"); backlog_by_state[state]=backlog_by_state.get(state,0)+1
     completed.sort(key=lambda x:str(x.get("at") or ""),reverse=True)
+    recent_limit=8 if details else 3; backlog_limit=12 if details else 6
+    recent=[]
+    for item in completed[:recent_limit]:
+        row={k:v for k,v in item.items() if k!="at"}
+        if details:
+            source=completed_sources.get((str(item.get("phase") or ""),str(item.get("task_id") or "")))
+            if source is not None: row["purpose"]=task_brief_objective(source,max_chars=purpose_chars)
+        recent.append(row)
+    backlog_preview=[]
+    for raw in backlog[:backlog_limit]:
+        item=dict(raw); source=backlog_sources.get((str(item.get("phase") or ""),str(item.get("task_id") or "")))
+        if source is not None: item["purpose"]=task_brief_objective(source,max_chars=purpose_chars)
+        backlog_preview.append(item)
     result={
         "run_status":info.get("status","active"),
         "running":running,
-        "recent_outcomes":[{k:v for k,v in item.items() if k!="at"} for item in completed[:8]],
+        "recent_outcomes":recent,
         "backlog_count":len(backlog),
         "backlog_by_state":backlog_by_state,
-        "backlog_preview":backlog[:12],
+        "backlog_preview":backlog_preview,
     }
-    if len(backlog)>12: result["backlog_preview_truncated"]=True
+    if len(backlog)>backlog_limit: result["backlog_preview_truncated"]=True
     if gates: result["phase_gates"]=gates
     if open_followups:
-        result["open_review_followups"]={"count":len(open_followups),"preview":open_followups[:8],**({"truncated":True} if len(open_followups)>8 else {})}
+        limit=8 if details else 4
+        result["open_review_followups"]={"count":len(open_followups),"preview":open_followups[:limit],**({"truncated":True} if len(open_followups)>limit else {})}
     human=[]
     for task in iter_run_tasks(run):
         esc=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
         if task.get("status")=="blocked" and esc.get("target")=="human":
-            human.append({"phase":task.get("phase_id"),"purpose":task_brief_objective(task,max_chars=420),"task_id":task.get("task_id")})
+            item={"phase":task.get("phase_id"),"task_id":task.get("task_id")}
+            if details: item["purpose"]=task_brief_objective(task,max_chars=420)
+            human.append(item)
     if human: result["decisions_needed"]=human
     disk=getattr(args,"disk_usage",None)
     if not isinstance(disk,dict):
@@ -2042,8 +2106,13 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
             disk=dsd_workspace.disk_usage_snapshot(run)
         except Exception as exc:
             disk={"error":str(exc)[:800]}
-    result["disk_usage"]=disk
+    if details:
+        result["disk_usage"]=disk
+    else:
+        compact_disk={k:disk.get(k) for k in ("owned_total_bytes","delta_since_previous_sample_bytes","error") if disk.get(k) not in (None,0,"")}
+        if compact_disk: result["disk"]=compact_disk
     return result
+
 
 
 def _attempt_terminal(attempt:dict[str,Any])->dict[str,Any]|None:
@@ -3037,15 +3106,16 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("ready"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True)
     p=sub.add_parser("list"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--status",choices=sorted(STATUSES))
     p=sub.add_parser("sweep-stale"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
-    p=sub.add_parser("reconcile-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--no-sweep",action="store_true"); p.add_argument("--details",action="store_true")
-    p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
+    p=sub.add_parser("reconcile-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--no-sweep",action="store_true"); p.add_argument("--summary",action="store_true",help="compact routing packet (default)"); p.add_argument("--details",action="store_true")
+    p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--summary",action="store_true",help="compact owner digest (default)"); p.add_argument("--details",action="store_true")
     p=sub.add_parser("poison-scan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
         description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
-        if name=="record-attempt": p.add_argument("--attempt-json",type=Path,required=True)
+        if name=="show": p.add_argument("--summary",action="store_true",help="compact latest-state view (default)"); p.add_argument("--details",action="store_true")
+        elif name=="record-attempt": p.add_argument("--attempt-json",type=Path,required=True)
         elif name=="update-attempt": p.add_argument("--event-dir",type=Path,required=True); p.add_argument("--status",choices=sorted(ATTEMPT_STATUSES)); p.add_argument("--gate",type=Path); p.add_argument("--session-id")
         elif name=="review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="plan-review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
