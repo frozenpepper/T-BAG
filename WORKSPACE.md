@@ -54,7 +54,7 @@ Before each attempt, mutable state is checkpointed; read-only work uses the froz
 
 ## Attempts and gate
 
-`dsd_attempt.py launch` checks lifecycle/dependencies, resolves the project view, freezes the baseline, renders context, launches detached, and records the attempt. Different tasks may prepare concurrently, but same-task workspace creation and background preparation reservations are serialized. A second launch observes the existing preparation instead of racing its checkout; the detached preparation child recognizes its own reservation and cannot self-block. One task cannot have two live attempts.
+`dsd_attempt.py launch` checks lifecycle/dependencies, resolves the project view, freezes the baseline, renders context, launches detached, and records the attempt. Different tasks may prepare concurrently; same-task workspace creation/preparation is serialized. A second launch sees the existing preparation instead of racing its checkout; the child recognizes its own reservation and cannot self-block. One task cannot have two live attempts.
 
 Every backend must preserve budget reservation, baseline/scope evidence, attempt/report/terminal records, resumable identity where supported, and inspection. Capture session identity in live attempt evidence as soon as the host exposes it; killed workers need not wait for `terminal.json` to remain resumable. Raw CLI wrappers are unsupported. Exit `0` is not semantic success.
 
