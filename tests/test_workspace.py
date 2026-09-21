@@ -170,8 +170,9 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(one['worktree'],two['worktree'])
         self.assertTrue(Path(one['worktree']).is_dir())
         self.assertTrue(dsd_workspace.workspace_path(self.run,'P','T-RACE').is_file())
-        refs=git(self.project,'for-each-ref','--format=%(refname:short)','refs/heads/dsd/r1/P/T-RACE')
-        self.assertEqual(sorted(refs.splitlines()),['dsd/r1/P/T-RACE','dsd/r1/P/T-RACE-base'])
+        refs=git(self.project,'branch','--list','dsd/r1/P/T-RACE*')
+        refs=[line.strip().lstrip('* ').strip() for line in refs.splitlines() if line.strip()]
+        self.assertEqual(sorted(refs),['dsd/r1/P/T-RACE','dsd/r1/P/T-RACE-base'])
 
     def test_internal_snapshot_commits_bypass_project_hooks(self):
         hooks=self.project/".git"/"hooks"; hooks.mkdir(exist_ok=True)
