@@ -430,6 +430,9 @@ class ComponentsTests(unittest.TestCase):
         }
         self.assertTrue(dsd_task._quiescent_reusable_review_conduit(task))
         self.assertFalse(dsd_task.task_can_advance_without_human(self.run,task))
+        context={**task,'task_id':'CTX-REVIEW','role':'context-reviewer','attempts':[{'role':'context-reviewer','status':'gated','event_dir':str(event)}],'last_plan_review':{},'last_context_review':{'reviewer_attempt':str(event),'outcome':'pass'}}
+        self.assertTrue(dsd_task._quiescent_reusable_review_conduit(context))
+        self.assertTrue(dsd_task._phase_task_success(self.run,'P1',context))
 
     def test_gated_recovery_disposition_is_recorded_before_another_recovery_launch(self):
         event=self.root/'recovery-gated'; event.mkdir(); (event/'report.md').write_text('RESUME\n\nRecovered existing lane.\n')
