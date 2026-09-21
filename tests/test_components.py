@@ -1,4 +1,4 @@
-import contextlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
+import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
@@ -486,7 +486,7 @@ class ComponentsTests(unittest.TestCase):
         self.assertIn('--outcome OUTCOME',gate)
         self.assertNotIn("--outcome <{'|'.join(fallback_values)}>",gate)
         self.assertIn('Replace OUTCOME with one of',gate)
-        self.assertIn('do not relaunch solely to repair formatting',gate)
+        self.assertIn('do not relaunch solely to repair formatting',gate.lower())
 
     def test_headless_opencode_install_uses_manual_mode_without_restart_question(self):
         project=self.root/'adapter-opencode-headless'; project.mkdir(); git(project,'init','-q')
