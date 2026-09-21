@@ -10,7 +10,9 @@ Worker reports own semantic routing; `--outcome` is legacy fallback only.
 python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-Run on owner turn/resume/wake. For `owner_question_required`: run `actions_before_question`, then `parent_tick.py wait-owner --question-id <id>`, ask through the native UI, and end the turn. After applying the answer, `resume-owner --question-id <id>` then tick. Passive `owner_notice` is bannered and acknowledged. `completion-candidate` means finish or replan.
+Run on owner turn/resume/wake. The default tick is the compact routing surface: healthy monitoring detail, full disk telemetry and nested transition receipts stay out of the packet. Use `tick --details` only for bounded transport/control diagnosis, never as the routine loop. `state_changed=false` means the routing state is materially unchanged.
+
+For `owner_question_required`: run `actions_before_question`, then `parent_tick.py wait-owner --question-id <id>`, ask through the native UI, and end the turn. After applying the answer, `resume-owner --question-id <id>` then tick. Passive `owner_notice` is bannered and acknowledged. `completion-candidate` means finish or replan.
 
 Do not pipe/filter/summarize stdout from `parent_tick.py tick` or `dsd_attempt.py launch` in the parent shell command. The OpenCode adapter consumes their structured JSON for immediate heartbeat/observer/preparation-watcher repair. RC64 also self-heals from durable state when that output is mangled, so this is a latency/diagnostic rule rather than a correctness dependency.
 
@@ -21,6 +23,8 @@ python3 <skill>/scripts/install_harness_adapter.py --project-root /abs/project -
 ```
 
 `bootstrap_ready=false` → ask its `blocking_question` natively and stop. After the requested restart/action, rerun until `bootstrap_ready=true`; launch nothing before that.
+
+When there is deliberately **no live harness/TUI** (CI, offline maintenance, external orchestrator), use `--headless` or `TBAG_HEADLESS=1`. The installer then reports `degraded_manual=true` instead of inventing an impossible restart question; use explicit parent ticks until a real host later proves its activation token. Do not use the installer as a routine runtime-health probe.
 
 ## Initialize runtime
 
@@ -73,8 +77,7 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 
 python3 <skill>/scripts/dsd_attempt.py inspect --run-root ... --phase-id phase-1 --task-id T01
 ```
 
-`inspect` is diagnostic. Tick handles final-report/no-terminal recovery and silent anomalies; long runtime alone is not failure.
-OpenCode V1 `tbag_follow` is diagnostics/re-arm only.
+`launch` is fire-and-yield from the parent perspective. After its structured result, do **not** sleep/poll `inspect`; observer/heartbeat wake returns control. `inspect --summary` is a bounded diagnostic snapshot only when there is a concrete reason to diagnose transport/liveness; `inspect --details` is cold forensics. Tick handles final-report/no-terminal recovery and silent anomalies; long runtime alone is not failure. OpenCode V1 `tbag_follow` is diagnostics/re-arm only.
 
 ## Gate / Review / Fix
 
@@ -104,7 +107,7 @@ python3 <skill>/scripts/dsd_task.py resolve-escalation --run-root ... --phase-id
   --decision .../decision.md --route resume|analysis|accept
 ```
 
-Tick supplies `owner_question`; native-ask it, save the answer as the decision file, resolve it, then `resume-owner`. Follow-up triage `--route accept` cancels its findings while preserving the decision.
+Tick supplies `owner_question`; native-ask it, save the answer as the decision file, resolve it, then `resume-owner`. `--route resume` returns the existing technical lane to work; `--route analysis` opens bounded Analyst authority without authorizing a replan by itself; `--route accept` is explicit Human acceptance/cancellation at that escalation boundary. Follow-up triage `accept` cancels its findings while preserving the decision.
 
 ## Cleanup / interrupted process
 
@@ -126,7 +129,7 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id phase-1 
 
 ## Owner-requested status
 
-Use `dsd_task.py owner-status --run-root ... [--phase-id ...]`; `reconcile-run --details` is internal inventory. For legacy/non-gate reports:
+Use compact surfaces first: `dsd_task.py owner-status --summary --run-root ... [--phase-id ...]`, `dsd_task.py show --summary ...`, `dsd_attempt.py inspect --summary ...`, and ordinary `reconcile-run`. Their compact forms are already the defaults; `--summary` is an explicit readability cue. `--details` is cold diagnostics/inventory only and should not be part of the routine parent loop. For legacy/non-gate reports:
 
 ```bash
 python3 <skill>/scripts/report_surface.py --report .../report.md --lines 8 --chars 1600
