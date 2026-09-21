@@ -1,4 +1,5 @@
 import contextlib, io, json, os, shutil, subprocess, sys, tempfile, unittest
+from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -247,6 +248,19 @@ class ComponentsTests(unittest.TestCase):
         out=dsd_task.command_idle_check(a)
         self.assertEqual(out['routine_user_update'],'human-decision')
 
+
+    def test_launch_blocker_sees_other_preparation_but_not_child_own_marker(self):
+        self.register_impl('T-PREP')
+        marker=dsd_attempt._launch_preparation_path(self.run,'P1','T-PREP')
+        marker.parent.mkdir(parents=True,exist_ok=True)
+        marker.write_text(json.dumps({'format':'tbag-launch-preparation-v1','pid':424242,'role':'implementer'}))
+        with mock.patch.object(dsd_attempt,'pid_alive',return_value=True):
+            blocker=dsd_attempt.launch_blocker(self.run,'P1','T-PREP','implementer')
+        self.assertIn('PREPARATION_IN_FLIGHT',blocker)
+        marker.write_text(json.dumps({'format':'tbag-launch-preparation-v1','pid':os.getpid(),'role':'implementer'}))
+        with mock.patch.object(dsd_attempt,'pid_alive',return_value=True):
+            blocker=dsd_attempt.launch_blocker(self.run,'P1','T-PREP','implementer')
+        self.assertIsNone(blocker)
 
     def test_live_attempt_session_evidence_is_reusable_before_terminal(self):
         event=self.root/'live-session'; event.mkdir(); (event/'attempt.json').write_text(json.dumps({'session_id':'live-ses'}))
