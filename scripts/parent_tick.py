@@ -277,7 +277,15 @@ def owner_signature(state: dict[str, Any], monitors: list[dict[str, Any]], class
         "waiting_dependency_count": state.get("waiting_dependency_count"),
         "live": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("role"))) for x in state.get("live_attempts") or []),
         "human": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("action"))) for x in state.get("human_blocks") or []),
-        "attention": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("attention"))) for x in monitors if x.get("attention")),
+        "attention": sorted(
+            (
+                str(x.get("phase_id")),
+                str(x.get("task_id")),
+                str(x.get("attention") or x.get("observer_attention") or x.get("monitor_error") or ("retired" if x.get("retirement_requested") else "") or ("retirement-error" if x.get("retirement_error") else "")),
+            )
+            for x in monitors
+            if x.get("attention") or x.get("observer_attention") or x.get("monitor_error") or x.get("retirement_requested") or x.get("retirement_error")
+        ),
         "actions": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("action"))) for x in state.get("first_useful_actions") or []),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -711,7 +719,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         out["poisoned_sessions_routed"] = poison_result if details else {"count":poison_result.get("count")}
     if hard_blocked_actions:
         out["blocked_actions"] = hard_blocked_actions if details else [_compact_blocked_action(x) for x in hard_blocked_actions]
-    if preparation_blocks:
+    if preparation_blocks and (details or state_changed or classification!="workers-preparing"):
         out["preparing"]=[
             {k:x.get(k) for k in ("phase_id","task_id","action") if x.get(k) is not None}
             for x in preparation_blocks
@@ -723,7 +731,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             "next":loop_suspected.get("next"),
         }
     if pending: out["actions"] = pending if details else [_compact_action(x) for x in pending]
-    if live_now:
+    if live_now and (details or state_changed or classification!="workers-running"):
         out["live_attempts"] = live_now if details else [
             {k:x.get(k) for k in ("phase_id","task_id","role","event_dir") if x.get(k) is not None}
             for x in live_now
