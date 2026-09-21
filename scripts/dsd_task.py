@@ -3093,15 +3093,15 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("ready"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True)
     p=sub.add_parser("list"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--status",choices=sorted(STATUSES))
     p=sub.add_parser("sweep-stale"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
-    p=sub.add_parser("reconcile-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--no-sweep",action="store_true"); p.add_argument("--details",action="store_true")
-    p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--details",action="store_true")
+    p=sub.add_parser("reconcile-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--no-sweep",action="store_true"); p.add_argument("--summary",action="store_true",help="compact routing packet (default)"); p.add_argument("--details",action="store_true")
+    p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--summary",action="store_true",help="compact owner digest (default)"); p.add_argument("--details",action="store_true")
     p=sub.add_parser("poison-scan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
         description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
-        if name=="show": p.add_argument("--details",action="store_true")
+        if name=="show": p.add_argument("--summary",action="store_true",help="compact latest-state view (default)"); p.add_argument("--details",action="store_true")
         elif name=="record-attempt": p.add_argument("--attempt-json",type=Path,required=True)
         elif name=="update-attempt": p.add_argument("--event-dir",type=Path,required=True); p.add_argument("--status",choices=sorted(ATTEMPT_STATUSES)); p.add_argument("--gate",type=Path); p.add_argument("--session-id")
         elif name=="review": p.add_argument("--outcome",choices=("pass","fail","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
