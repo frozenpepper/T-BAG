@@ -472,7 +472,7 @@ class ComponentsTests(unittest.TestCase):
         self.assertGreaterEqual(compact['backlog_count'],20)
         self.assertLessEqual(len(compact['backlog_preview']),6)
         self.assertTrue(compact['backlog_preview_truncated'])
-        self.assertTrue(all('purpose' not in item for item in compact['backlog_preview']))
+        self.assertTrue(all('purpose' in item and len(item['purpose'])<=140 for item in compact['backlog_preview']))
         self.assertLess(len(json.dumps(compact)),5000)
         detailed=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id='P1',details=True,disk_usage={'owned_total_bytes':1234}))
         self.assertIn('disk_usage',detailed)
