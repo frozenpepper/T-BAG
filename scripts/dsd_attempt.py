@@ -1041,7 +1041,7 @@ def parser()->argparse.ArgumentParser:
     p=sub.add_parser("gate"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",action="append",required=True); p.add_argument("--event-dir",type=Path)
     for name in ("inspect","follow","retire"):
         p=sub.add_parser(name); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--event-dir",type=Path)
-        if name=="inspect": p.add_argument("--details",action="store_true")
+        if name=="inspect": p.add_argument("--summary",action="store_true",help="compact lifecycle snapshot (default)"); p.add_argument("--details",action="store_true")
         if name=="follow":
             p.add_argument("--interval",type=float,default=15.0); p.add_argument("--timeout",type=float)
         if name=="retire": p.add_argument("--reason",required=True)
