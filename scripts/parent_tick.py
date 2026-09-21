@@ -430,8 +430,8 @@ def compact_advance(result: dict[str, Any] | None, *, details: bool = False) -> 
     out={"stopped":stopped}
     if applied:
         out["applied"]=applied if details else [_compact_action(item) for item in applied]
-    if blocked:
-        out["blocked_actions"]=blocked if details else [_compact_blocked_action(item) for item in blocked]
+    # blocked_actions are surfaced once at the tick top level; repeating them inside
+    # the deterministic transition receipt is pure token duplication.
     if result.get("reason"): out["reason"]=str(result["reason"])[:700]
     return out
 
@@ -569,6 +569,11 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         else:
             launchable.append(item)
     pending=launchable
+    preparation_blocks=[
+        item for item in blocked_actions
+        if str(item.get("reason") or item.get("error") or "").startswith("PREPARATION_IN_FLIGHT")
+    ]
+    hard_blocked_actions=[item for item in blocked_actions if item not in preparation_blocks]
     live_now = list(state.get("live_attempts") or [])
     durable_questions=owner_questions(state)
     questions=durable_questions+runtime_config_questions(run,blocked_actions)
@@ -578,7 +583,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif completion_candidate(state):
         classification = "completion-candidate"
         turn = "finish-or-replan"
-    elif any(x.get("retirement_error") for x in monitors) or state.get("unresolved_state") or (blocked_actions and not pending):
+    elif any(x.get("retirement_error") for x in monitors) or state.get("unresolved_state") or (hard_blocked_actions and not pending):
         classification = "recovery-required"
         turn = "intervene"
     elif pending:
@@ -586,6 +591,9 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         turn = "continue"
     elif live_now:
         classification = "workers-running"
+        turn = "yield"
+    elif preparation_blocks:
+        classification = "workers-preparing"
         turn = "yield"
     else:
         classification = "active-idle"
@@ -701,8 +709,13 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     if advance_packet: out["advance"] = advance_packet
     if poison_result and poison_result.get("count"):
         out["poisoned_sessions_routed"] = poison_result if details else {"count":poison_result.get("count")}
-    if blocked_actions:
-        out["blocked_actions"] = blocked_actions if details else [_compact_blocked_action(x) for x in blocked_actions]
+    if hard_blocked_actions:
+        out["blocked_actions"] = hard_blocked_actions if details else [_compact_blocked_action(x) for x in hard_blocked_actions]
+    if preparation_blocks:
+        out["preparing"]=[
+            {k:x.get(k) for k in ("phase_id","task_id","action") if x.get(k) is not None}
+            for x in preparation_blocks
+        ]
     if loop_suspected:
         out["loop_suspected"] = loop_suspected if details else {
             "count":loop_suspected.get("count"),
