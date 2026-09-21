@@ -77,7 +77,7 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task
 python3 <skill>/scripts/dsd_attempt.py inspect --summary --run-root ... --phase-id P --task-id T01
 ```
 
-Launch → yield. Do not sleep/poll. Observer/heartbeat wake returns control. `inspect --summary` is diagnostic; `inspect --details` is cold forensics.
+Launch → yield. Do not sleep/poll. Tick handles final-report/no-terminal and silent anomalies. `inspect --summary` is diagnostic; `inspect --details` is cold forensics; `tbag_follow` is re-arm diagnostics only.
 
 ## Gate / Review / Fix / land
 
@@ -120,7 +120,7 @@ After `sweep-stale`, use `--resume-last` when continuity is valid:
 python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task-id T01 --role implementer --resume-last
 ```
 
-## Status / diagnostics
+## Owner-requested status
 
 Compact is the default; `--summary` makes intent explicit:
 
@@ -131,4 +131,4 @@ python3 <skill>/scripts/dsd_task.py reconcile-run --run-root ... [--phase-id P]
 python3 <skill>/scripts/report_surface.py --report .../report.md --lines 8 --chars 1600
 ```
 
-Use `--details` only when the compact surface cannot answer a concrete diagnostic question. Do not shadow-review worker semantics.
+Use `--details` only for a concrete diagnostic gap; do not shadow-review worker semantics.
