@@ -702,6 +702,15 @@ def command_launch(args:argparse.Namespace)->dict[str,Any]:
     if getattr(args,"background_prepare",False):
         return _background_launch(args)
     marker=os.environ.get("TBAG_LAUNCH_PREPARATION_MARKER")
+    if marker:
+        # The parent writes the child PID marker while holding the task preparation
+        # lock.  Wait for that publication before the detached child can reach the
+        # launch blocker.  This closes the spawn/write race where a very fast child
+        # could finish and unlink before the parent wrote the marker, leaving a stale
+        # dead-PID preparation record behind.
+        run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
+        with dsd_task.file_lock(_launch_preparation_lock_path(run,phase,tid)):
+            pass
     try:
         return _command_launch_foreground(args)
     finally:
@@ -944,7 +953,7 @@ def _gate_one(run:Path,phase:str,tid:str,event_arg:Path|None)->dict[str,Any]:
                     fallback_command=(
                         f"python3 {shlex.quote(str(helper))} {command} "
                         f"--run-root {shlex.quote(str(run))} --phase-id {shlex.quote(phase)} --task-id {shlex.quote(tid)} "
-                        f"--outcome <{'|'.join(fallback_values)}> --report {shlex.quote(str(report))}"
+                        f"--outcome OUTCOME --report {shlex.quote(str(report))}"
                     )
                 result["routing_protocol_error"]=(
                     f"{role} report lacks an exact first-line routing token. Allowed first lines: {', '.join(allowed)}. "
