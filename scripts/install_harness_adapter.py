@@ -27,6 +27,10 @@ def utc_stamp() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def env_flag(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1","true","yes","on"}
+
+
 def git_root(start: Path) -> Path:
     try:
         out = subprocess.check_output(["git", "-C", str(start), "rev-parse", "--show-toplevel"], text=True, stderr=subprocess.DEVNULL).strip()
@@ -274,7 +278,7 @@ def install_plugin_file(project_root: Path, harness: str, destination: Path, sou
     }
 
 
-def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
+def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = False) -> dict[str, Any]:
     version, major = detect_opencode_version()
     transport_source = "tbag-v2.js" if major == 2 else "tbag.js"
     transport_generation = "v2" if major == 2 else "v1"
@@ -353,7 +357,8 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         and live.get("transport_generation")==transport_generation
         and live.get("opencode_major")==major
     )
-    restart_required=not activation_verified
+    degraded_manual=bool(headless and not activation_verified)
+    restart_required=bool(not activation_verified and not headless)
     bootstrap_question=blocking_harness_question(
         question_id=f"opencode-restart:{activation_token[:16]}",
         header="Restart OpenCode",
@@ -385,24 +390,32 @@ def install_opencode(project_root: Path, skill_root: Path) -> dict[str, Any]:
         "tui_config_backup": str(tui_config_backup) if tui_config_backup else None,
         "status_surface": status_surface,
         "interactive_supervision": "detached-core-launch; optional-tbag-follow-rearm",
-        "autonomous_supervision": "two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm",
+        "autonomous_supervision": ("two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm" if activation_verified else "manual-parent-tick-only; live adapter not verified") if degraded_manual else "two-lane-heartbeat:60s-completion-pulse+slow-health; launch-auto-arm",
         "live_probe_tool": None if major == 2 else "tbag_follow",
         "live_capability_verified": activation_verified,
-        "activation": "live-current" if activation_verified else "restart-required-to-prove-live-adapter",
+        "activation": "live-current" if activation_verified else "headless-manual" if degraded_manual else "restart-required-to-prove-live-adapter",
         "activation_token": activation_token,
         "activation_request": str(activation_request),
         "activation_marker": str(activation_marker),
+        "headless_mode":bool(headless),
+        "degraded_manual":degraded_manual,
         "restart_required": restart_required,
-        "bootstrap_ready": activation_verified,
+        "bootstrap_ready": bool(activation_verified or degraded_manual),
         "blocking_question": bootstrap_question,
         "legacy_plugin_removed": legacy_removed,
         "stale_v1_companion_removed": stale_v1_removed,
-        "manual_step": ("Live activation is proven by the project-local adapter token." if activation_verified else "Restart/reload OpenCode; the run is bootstrap-blocked until the live adapter writes the matching activation token.") + " " + presentation_note + " Once live, normal tick/launch enrolls supervision automatically.",
+        "manual_step": (
+            "Live activation is proven by the project-local adapter token."
+            if activation_verified else
+            "Headless/manual mode: no restart question is actionable here. Continue with explicit parent_tick.py ticks; autonomous wake supervision remains unverified until a live OpenCode host later writes the matching activation token."
+            if degraded_manual else
+            "Restart/reload OpenCode; the run is bootstrap-blocked until the live adapter writes the matching activation token."
+        ) + " " + presentation_note + (" Once live, normal tick/launch enrolls supervision automatically." if not degraded_manual else ""),
     })
     return result
 
 
-def install_kilo(project_root: Path, skill_root: Path) -> dict[str, Any]:
+def install_kilo(project_root: Path, skill_root: Path, *, headless: bool = False) -> dict[str, Any]:
     result = install_plugin_file(
         project_root, "kilo", Path(".kilo/plugin/dsd-compaction.ts"),
         skill_root / "adapters" / "kilo" / "dsd-compaction.ts",
@@ -413,13 +426,16 @@ def install_kilo(project_root: Path, skill_root: Path) -> dict[str, Any]:
     write_json(request,{"format":"tbag-kilo-activation-request-v1","token":token,"requested_at":utc_stamp()})
     live=load_json(marker)
     ready=bool(live.get("token")==token)
+    degraded_manual=bool(headless and not ready)
     result.update({
         "activation_token":token,
         "activation_request":str(request),
         "activation_marker":str(marker),
-        "restart_required":not ready,
-        "bootstrap_ready":ready,
-        "blocking_question":None if ready else blocking_harness_question(
+        "headless_mode":bool(headless),
+        "degraded_manual":degraded_manual,
+        "restart_required":bool(not ready and not headless),
+        "bootstrap_ready":bool(ready or degraded_manual),
+        "blocking_question":None if ready or headless else blocking_harness_question(
             question_id=f"kilo-restart:{token[:16]}",
             header="Restart Kilo",
             question="T-BAG's project plugin is installed, but this Kilo process has not proven that it loaded this exact generation. Restart/reload Kilo, reopen the project, then continue.",
@@ -429,7 +445,11 @@ def install_kilo(project_root: Path, skill_root: Path) -> dict[str, Any]:
             ],
             after_answer="After restart, rerun install_harness_adapter.py and continue only when bootstrap_ready=true.",
         ),
-        "manual_step":"Live activation is proven by the project-local Kilo token." if ready else "Restart/reload Kilo; T-BAG bootstrap remains blocked until the loaded plugin writes the matching activation token.",
+        "manual_step":(
+            "Live activation is proven by the project-local Kilo token." if ready else
+            "Headless/manual mode: continue with explicit parent ticks; no restart question is emitted without a live host." if degraded_manual else
+            "Restart/reload Kilo; T-BAG bootstrap remains blocked until the loaded plugin writes the matching activation token."
+        ),
     })
     return result
 
@@ -438,6 +458,7 @@ def main() -> int:
     parser.add_argument("--harness", default="auto", choices=["auto", "codex", "claude-code", "opencode", "kilo"])
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
     parser.add_argument("--skill-root", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--headless", action="store_true", help="no live host/TUI is available; install files but use manual parent ticks instead of an impossible restart gate")
     args = parser.parse_args()
     project_root = git_root(args.project_root)
     skill_root = args.skill_root.resolve()
@@ -446,12 +467,15 @@ def main() -> int:
         if selected == "unknown":
             raise RuntimeError("Harness detection is ambiguous; pass --harness codex|claude-code|opencode|kilo")
         harness = selected
+        # Do not guess from isatty(): agent tool shells inside a live harness are often
+        # non-TTY too. CI/TBAG_HEADLESS are strong evidence; --headless is explicit.
+        headless=bool(args.headless or env_flag("TBAG_HEADLESS") or env_flag("CI"))
         helpers = install_helper(skill_root, project_root)
         if harness == "codex": result = install_codex(project_root, skill_root)
         elif harness == "claude-code": result = install_claude(project_root, skill_root)
-        elif harness == "opencode": result = install_opencode(project_root, skill_root)
-        else: result = install_kilo(project_root, skill_root)
-        result.update({"project_root": str(project_root), "helper": str(helpers["context_checkpoint"]), "helpers": {k: str(v) for k, v in helpers.items()}, "installed_at": utc_stamp()})
+        elif harness == "opencode": result = install_opencode(project_root, skill_root, headless=headless)
+        else: result = install_kilo(project_root, skill_root, headless=headless)
+        result.update({"project_root": str(project_root), "helper": str(helpers["context_checkpoint"]), "helpers": {k: str(v) for k, v in helpers.items()}, "headless_mode":headless, "installed_at": utc_stamp()})
         report = project_root / "TBag" / "harness-adapter-installation.md"
         report.write_text("# T-BAG Harness Adapter\n\n```json\n" + json.dumps(result, indent=2) + "\n```\n", encoding="utf-8")
         print(json.dumps(result, indent=2)); return 0
