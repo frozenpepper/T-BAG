@@ -420,11 +420,33 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(len(full['attempts']),5)
         self.assertIn('huge',full['attempts'][-1])
 
+    def test_owner_status_default_is_bounded_summary_not_task_inventory(self):
+        class A: pass
+        for i in range(20):
+            brief=self.root/f'brief-{i}.md'; brief.write_text(f'# A{i}\n\n## Objective\n' + ('Long orientation text. '*80))
+            a=A(); a.run_root=self.run; a.phase_id='P1'; a.task_id=f'A{i}'; a.brief=brief
+            a.kind='analysis'; a.role='discovery'; a.tier='analyst'; a.dependency=[]; a.requires_integration=False
+            a.reviews_task=None; a.owner_authority=None
+            dsd_task.command_register_direct(a)
+        compact=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id='P1',details=False,disk_usage={'owned_total_bytes':1234}))
+        self.assertGreaterEqual(compact['backlog_count'],20)
+        self.assertLessEqual(len(compact['backlog_preview']),6)
+        self.assertTrue(compact['backlog_preview_truncated'])
+        self.assertTrue(all('purpose' not in item for item in compact['backlog_preview']))
+        self.assertLess(len(json.dumps(compact)),5000)
+        detailed=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id='P1',details=True,disk_usage={'owned_total_bytes':1234}))
+        self.assertIn('disk_usage',detailed)
+        self.assertTrue(any('purpose' in item for item in detailed['backlog_preview']))
+
     def test_rendered_worker_prompt_repeats_machine_routing_contract_at_report_boundary(self):
         text=(SCRIPTS/'render_worker_prompt.py').read_text()
         self.assertIn('MACHINE-CRITICAL REPORT ROUTING',text)
         self.assertIn('Nothing may precede that token',text)
         self.assertIn('REPORT_OUTCOMES_BY_ROLE.get(args.role)',text)
+        gate=(SCRIPTS/'dsd_attempt.py').read_text()
+        self.assertIn('legacy_fallback_command',gate)
+        self.assertIn('--run-root',gate)
+        self.assertIn('do not relaunch solely to repair formatting',gate)
 
     def test_headless_opencode_install_uses_manual_mode_without_restart_question(self):
         project=self.root/'adapter-opencode-headless'; project.mkdir(); git(project,'init','-q')
