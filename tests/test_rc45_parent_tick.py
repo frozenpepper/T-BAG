@@ -78,9 +78,9 @@ class Rc45ParentTickTests(unittest.TestCase):
             out=parent_tick.command_tick(self.args)
         self.assertEqual(out["classification"],"completion-candidate")
         self.assertEqual(out["turn"],"finish-or-replan")
-        self.assertTrue(out["owner_update"]["due"])
-        self.assertIn("project-end-candidate",out["owner_update"]["reasons"])
-        token=out["owner_update"]["token"]
+        self.assertNotIn("owner_update",out)
+        self.assertIn("project-end-candidate",out["owner_notice"]["reasons"])
+        token=out["owner_notice"]["ack_token"]
         ack=parent_tick.command_ack_update(SimpleNamespace(run_root=self.run,token=token))
         self.assertTrue(ack["acknowledged"])
 
@@ -95,8 +95,9 @@ class Rc45ParentTickTests(unittest.TestCase):
         with mock.patch.object(parent_tick,"reconcile",side_effect=states):
             out=parent_tick.command_tick(self.args)
         _retire.assert_called_once()
-        self.assertTrue(out["monitoring"][0]["retirement_requested"]["retired"])
-        self.assertIn("worker-retired",out["owner_update"]["reasons"])
+        self.assertTrue(out["attention"][0]["retirement_requested"]["retired"])
+        self.assertIn("worker-retired",out["owner_notice"]["reasons"])
+        self.assertNotIn("monitoring",out)
 
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
@@ -110,7 +111,8 @@ class Rc45ParentTickTests(unittest.TestCase):
         with mock.patch.object(parent_tick,"reconcile",side_effect=states):
             out=parent_tick.command_tick(self.args)
         _retire.assert_called_once()
-        self.assertTrue(out["monitoring"][0]["retirement_requested"]["retired"])
+        self.assertTrue(out["attention"][0]["retirement_requested"]["retired"])
+        self.assertNotIn("monitoring",out)
 
 
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
@@ -163,6 +165,42 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertEqual(out["owner_questions"],[question])
         self.assertNotIn("owner_notice",out)
         self.assertEqual(out["run_status"],"human-blocked")
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    @mock.patch.object(parent_tick,"inspect_attempt",return_value={"state":"running","report_state":"in-progress","report_age_seconds":5.0,"log_age_seconds":1.0,"elapsed_seconds":20.0})
+    def test_stable_worker_tick_is_compact_and_marks_unchanged(self,_inspect,_load,_poison,_advance,_owner):
+        live={"phase_id":"P","task_id":"T","role":"implementer","event_dir":str(self.run/'e')}
+        state=self.base_state(live_attempts=[live],backlog_count=1,worker_budget={"max":2,"live":1,"free":1})
+        with mock.patch.object(parent_tick,"reconcile",return_value=state), \
+             mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={"owned_total_bytes":123456}):
+            first=parent_tick.command_tick(self.args)
+            second=parent_tick.command_tick(self.args)
+        self.assertTrue(first["state_changed"])
+        self.assertFalse(second["state_changed"])
+        self.assertEqual(second["classification"],"workers-running")
+        self.assertNotIn("monitoring",second)
+        self.assertNotIn("attention",second)
+        self.assertNotIn("disk_usage",second)
+        self.assertNotIn("owner_update",second)
+        self.assertLess(len(json.dumps(second)),1800)
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    @mock.patch.object(parent_tick.dsd_task,"command_set_run_status",side_effect=ValueError("ADVANCE_BEFORE_HUMAN_BLOCK: independent authorized work remains: P/X[ready]. Run parent_tick.py tick"))
+    def test_human_block_transition_error_is_actionable_not_tick_crash(self,_status,_load,_poison,_advance,_owner):
+        question={"id":"human-decision:P:T:1","blocking":True,"required_interface":"native-question","header":"T-BAG needs you","question":"Choose","options":[]}
+        state=self.base_state(human_blocks=[{"phase_id":"P","task_id":"T","action":"await-human-decision","owner_question":question}],backlog_count=1)
+        with mock.patch.object(parent_tick,"reconcile",return_value=state), \
+             mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
+            out=parent_tick.command_tick(self.args)
+        self.assertTrue(out["run_status_transition"]["deferred"])
+        self.assertIn("ADVANCE_BEFORE_HUMAN_BLOCK",out["run_status_transition"]["error"])
+        self.assertIn("Do not inspect control-plane source",out["run_status_transition"]["next"])
 
     @mock.patch.object(parent_tick.dsd_task,"command_set_run_status",return_value={"status":"completed"})
     def test_finish_refuses_nonquiescent_and_accepts_completion_candidate(self,set_status):
