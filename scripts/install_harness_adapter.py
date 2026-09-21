@@ -373,7 +373,9 @@ def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = F
         after_answer="After OpenCode restarts, rerun install_harness_adapter.py. Do not initialize or launch T-BAG workers until bootstrap_ready=true.",
     ) if restart_required else None
 
-    if major == 1:
+    if degraded_manual:
+        presentation_note = "Live transport/TUI activation is intentionally unverified in headless mode; verify the installed generation only after returning to a real OpenCode host."
+    elif major == 1:
         presentation_note = "OpenCode 1.x requires the T-BAG TUI file to be listed in .opencode/tui.json or tui.jsonc; the installer has merged that registration. After restart, /tbag and the sidebar should appear. In the built-in Plugins dialog, tbag.status.v1 should be listed enabled+active."
     elif major == 2:
         presentation_note = "OpenCode 2.x uses the native setup()-based T-BAG server adapter plus the separately shipped tbag-ui companion. Restart/reload after changes and confirm both plugins are active."
