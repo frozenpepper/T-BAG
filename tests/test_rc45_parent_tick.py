@@ -201,7 +201,8 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertNotIn("attention",second)
         self.assertNotIn("disk_usage",second)
         self.assertNotIn("owner_update",second)
-        self.assertLess(len(json.dumps(second)),1800)
+        self.assertNotIn("live_attempts",second)
+        self.assertLess(len(json.dumps(second)),900)
 
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
