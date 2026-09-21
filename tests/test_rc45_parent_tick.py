@@ -132,6 +132,22 @@ class Rc45ParentTickTests(unittest.TestCase):
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
     @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
     @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    def test_inflight_launch_preparation_is_yield_not_recovery(self,_load,_poison,_advance,_owner):
+        action={"action":"launch-ready-task","phase_id":"P","task_id":"T","role":"implementer"}
+        state=self.base_state(first_useful_actions=[action],backlog_count=1)
+        with mock.patch.object(parent_tick,"reconcile",return_value=state), \
+             mock.patch.object(parent_tick,"_launch_action_blocker",return_value="PREPARATION_IN_FLIGHT: P/T launch preparation is already running (pid=123)"), \
+             mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"workers-preparing")
+        self.assertEqual(out["turn"],"yield")
+        self.assertEqual(out["preparing"],[{"phase_id":"P","task_id":"T","action":"launch-ready-task"}])
+        self.assertNotIn("blocked_actions",out)
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
     def test_three_identical_action_ticks_stop_repeating_and_intervene(self,_load,_poison,_advance,_owner):
         action={"action":"launch-analyst-discovery","phase_id":"P","task_id":"T"}
         state=self.base_state(first_useful_actions=[action],backlog_count=1)
