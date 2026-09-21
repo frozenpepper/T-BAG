@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -937,16 +938,24 @@ def _gate_one(run:Path,phase:str,tid:str,event_arg:Path|None)->dict[str,Any]:
                 }
                 command=command_by_role.get(role)
                 fallback_values=sorted(set(v for v in dsd_task.REPORT_OUTCOMES_BY_ROLE[role].values() if v!="capability"))
+                fallback_command=None
+                if command:
+                    helper=Path(__file__).resolve().parent/"dsd_task.py"
+                    fallback_command=(
+                        f"python3 {shlex.quote(str(helper))} {command} "
+                        f"--run-root {shlex.quote(str(run))} --phase-id {shlex.quote(phase)} --task-id {shlex.quote(tid)} "
+                        f"--outcome <{'|'.join(fallback_values)}> --report {shlex.quote(str(report))}"
+                    )
                 result["routing_protocol_error"]=(
                     f"{role} report lacks an exact first-line routing token. Allowed first lines: {', '.join(allowed)}. "
-                    + (f"For this already-generated legacy/tokenless report, record the worker-owned outcome with dsd_task.py {command} --outcome <{'|'.join(fallback_values)}> --report {report}; do not relaunch solely to repair formatting."
-                       if command else "This role has no safe tokenless fallback; repair/re-run the bounded semantic step rather than inferring a verdict.")
+                    + (f"For this already-generated legacy/tokenless report, record the worker-owned outcome with: {fallback_command}. Do not relaunch solely to repair formatting."
+                       if fallback_command else "This role has no safe tokenless fallback; repair/re-run the bounded semantic step rather than inferring a verdict.")
                 )
                 result["routing_protocol"]={
                     "code":"missing-first-line-routing-token",
                     "role":role,
                     "allowed_first_lines":allowed,
-                    "legacy_fallback_command":command,
+                    "legacy_fallback_command":fallback_command,
                     "legacy_fallback_outcomes":fallback_values if command else [],
                     "report":str(report),
                 }
