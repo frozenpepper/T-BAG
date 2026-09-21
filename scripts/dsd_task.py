@@ -2048,15 +2048,18 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
                 if details: item["finding"]=str(finding.get("text") or "")[:420]
                 open_followups.append(item)
             if task.get("role")=="phase-auditor" and status=="accepted": continue
-            purpose=task_brief_objective(task,max_chars=purpose_chars)
+            live_now=task_has_live_attempt(task)
+            purpose=task_brief_objective(task,max_chars=purpose_chars) if details or live_now else None
             if status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration")):
                 if status!="superseded":
                     outcome="integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
-                    completed.append({"phase":phase,"purpose":purpose,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
+                    row={"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")}
+                    if purpose is not None: row["purpose"]=purpose
+                    completed.append(row)
                 continue
             item={"phase":phase,"task_id":task.get("task_id"),"state":state_labels.get(status,status)}
-            if details or task_has_live_attempt(task): item["purpose"]=purpose
-            if task_has_live_attempt(task): running.append(item)
+            if purpose is not None: item["purpose"]=purpose
+            if live_now: running.append(item)
             else: backlog.append(item)
     backlog_by_state: dict[str,int]={}
     for item in backlog:
