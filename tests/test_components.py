@@ -505,6 +505,117 @@ class ComponentsTests(unittest.TestCase):
         self.assertFalse(again['activation_request_changed'])
         self.assertFalse(again['restart_required']); self.assertIsNone(again['blocking_question'])
 
+    def _write_failed_resume_attempt(self, task_id, name, role, session, *, changed=0, provider_error=None):
+        event=dsd_task.task_root(self.run,'P1',task_id)/'attempts'/name
+        event.mkdir(parents=True,exist_ok=True)
+        (event/'report.md').write_text('DSD_WORKER_REPORT_PLACEHOLDER_V2_1\n')
+        if provider_error:
+            (event/'worker.log').write_text(provider_error+'\n')
+        (event/'terminal.json').write_text(json.dumps({
+            'exit_code':1,'report_state':'launcher-placeholder','session_id':session,
+            'scope_diff':{'changed_count':changed},
+        }))
+        return {'task_id':task_id,'role':role,'tier':'grunt' if role=='fixer' else 'analyst',
+                'status':'report-resume','event_dir':str(event),'session_id':session}
+
+    def test_session_poison_is_cumulative_across_interleaved_failures_and_cold_retries_fixer(self):
+        self.register_impl('T-POISON')
+        task=dsd_task.load_task(self.run,'P1','T-POISON')
+        review_event=dsd_task.task_root(self.run,'P1','T-POISON')/'attempts'/'reviewer-0'; review_event.mkdir(parents=True,exist_ok=True)
+        review_report=review_event/'report.md'; review_report.write_text('FAIL — fix the recorded defect.\n')
+        reviewer={'role':'reviewer','tier':'grunt','status':'gated','event_dir':str(review_event),'session_id':'ses-bad'}
+        attempts=[reviewer]
+        for n in range(1,6):
+            attempts.append(self._write_failed_resume_attempt('T-POISON',f'fixer-{n}','fixer','ses-bad'))
+            if n<5:
+                attempts.append(self._write_failed_resume_attempt('T-POISON',f'discovery-{n}','discovery',f'ses-other-{n}'))
+        task['attempts']=attempts; task['last_review']={'outcome':'fail','report':str(review_report),'attempt':str(review_event)}; task['status']='active'
+        dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-POISON'),task)
+        candidate=dsd_task.poisoned_session_candidate(task)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate['session_id'],'ses-bad')
+        self.assertEqual(candidate['no_movement_failures'],5)
+        out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
+        self.assertEqual(len(out['poisoned_sessions']),1)
+        task=dsd_task.load_task(self.run,'P1','T-POISON')
+        self.assertIn('ses-bad',task['abandoned_sessions'])
+        self.assertEqual(task['status'],'needs-fix')
+        action=dsd_task._reconcile_action(self.run,'P1',task)
+        self.assertEqual(action['action'],'retry-same-role-retained-workspace')
+        self.assertEqual(action['role'],'fixer')
+        dsd_attempt.validate_launch_role(task,'fixer',continuing=False)
+        self.assertIsNone(dsd_attempt.resolve_resume_session(task,'fixer','needs-fix',None,False))
+        with self.assertRaisesRegex(ValueError,'mechanically abandoned'):
+            dsd_attempt.resolve_resume_session(task,'fixer','needs-fix','ses-bad',False)
+        groups=dsd_attempt.task_input_groups(self.run,'P1',task,'fixer',[])
+        self.assertIn(str(review_report.resolve()),groups['review_finding'])
+
+    def test_encrypted_content_nonretryable_resume_poison_trips_after_three_not_consecutive(self):
+        self.register_impl('T-ENC')
+        task=dsd_task.load_task(self.run,'P1','T-ENC')
+        error='Upstream request failed: [invalid_request_error] reasoning encrypted_content was not issued to this caller HTTP 400 isRetryable: false'
+        attempts=[]
+        for n in range(1,4):
+            attempts.append(self._write_failed_resume_attempt('T-ENC',f'fixer-{n}','fixer','ses-enc',changed=1,provider_error=error))
+            if n<3:
+                attempts.append(self._write_failed_resume_attempt('T-ENC',f'discovery-{n}','discovery',f'ses-noise-{n}',changed=0))
+        task['attempts']=attempts; task['status']='active'
+        candidate=dsd_task.poisoned_session_candidate(task)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate['reason'],'deterministic-provider-session-poison')
+        self.assertEqual(candidate['deterministic_provider_failures'],3)
+        self.assertEqual(candidate['provider_failures']['resume-encrypted-content-caller-mismatch'],3)
+
+    def test_attempt_budget_blocks_once_and_human_can_park_then_resume_new_window(self):
+        self.register_impl('T-BUDGET')
+        info=dsd_task.load_run(self.run); info['max_attempts_per_task']=3; dsd_task.write_json(dsd_task.run_file(self.run),info)
+        task=dsd_task.load_task(self.run,'P1','T-BUDGET')
+        task['attempts']=[{'role':'implementer','status':'gated','event_dir':str(self.root/f'b-{n}')} for n in range(3)]
+        task['status']='planned'; dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-BUDGET'),task)
+        out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
+        self.assertEqual(len(out['budget_blocks']),1)
+        task=dsd_task.load_task(self.run,'P1','T-BUDGET')
+        self.assertEqual(task['status'],'blocked')
+        q=dsd_task.human_decision_question(task)
+        values=[x['value'] for x in q['options']]
+        self.assertIn('park',values); self.assertIn('cancel',values); self.assertNotIn('defer',values)
+        decision=self.root/'park.md'; decision.write_text('Park this task until the lane exists.\n')
+        parked=dsd_task.command_resolve_escalation(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-BUDGET',decision=decision,route='park'))
+        self.assertEqual(parked['status'],'parked')
+        task=dsd_task.load_task(self.run,'P1','T-BUDGET')
+        self.assertIsNone(dsd_task._reconcile_action(self.run,'P1',task))
+        decision2=self.root/'resume.md'; decision2.write_text('Try again with a fresh budget window.\n')
+        resumed=dsd_task.command_resolve_escalation(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-BUDGET',decision=decision2,route='resume'))
+        self.assertEqual(resumed['status'],'planned')
+        self.assertEqual(resumed['attempt_budget_reset_at'],3)
+        task=dsd_task.load_task(self.run,'P1','T-BUDGET')
+        self.assertEqual(dsd_task.task_burn_metrics(task)['attempts_since_budget_reset'],0)
+
+    def test_human_cancel_closes_verification_without_satisfying_dependency(self):
+        self.register_impl('T-CANCEL')
+        path=dsd_task.task_file(self.run,'P1','T-CANCEL'); task=dsd_task.load_json(path)
+        task['kind']='verification'; task['role']='verification'; task['tier']='grunt'; task['requires_integration']=False; task['status']='planned'
+        dsd_task._record_control_human_block(task,reason='lane-unavailable',detail={'prior_status':'planned'})
+        dsd_task.write_json(path,task)
+        decision=self.root/'cancel.md'; decision.write_text('Cancel this verification obligation explicitly.\n')
+        out=dsd_task.command_resolve_escalation(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-CANCEL',decision=decision,route='cancel'))
+        self.assertEqual(out['status'],'cancelled')
+        task=dsd_task.load_task(self.run,'P1','T-CANCEL')
+        self.assertTrue(dsd_task._phase_task_success(self.run,'P1',task))
+        self.assertFalse(dsd_task.dependency_satisfied(self.run,'P1','T-CANCEL'))
+        self.assertIsNone(dsd_task._reconcile_action(self.run,'P1',task))
+        with self.assertRaisesRegex(ValueError,'closed/parked'):
+            dsd_attempt.validate_launch_role(task,'verification')
+
+    def test_raw_cancelled_status_without_human_authority_stays_unresolved(self):
+        self.register_impl('T-BAD-CANCEL')
+        path=dsd_task.task_file(self.run,'P1','T-BAD-CANCEL'); task=dsd_task.load_json(path)
+        task['status']='cancelled'; task.pop('human_cancellation',None); dsd_task.write_json(path,task)
+        state=dsd_task.command_reconcile_run(SimpleNamespace(run_root=self.run,phase_id='P1',no_sweep=True,details=False))
+        self.assertEqual(state['backlog_count'],1)
+        self.assertEqual(state['unresolved_state'][0]['task_id'],'T-BAD-CANCEL')
+        self.assertFalse(dsd_task._phase_task_success(self.run,'P1',task))
+
     def test_human_blocked_run_requires_no_other_authorized_work(self):
         self.register_impl('T1'); self.register_impl('T2')
         analyst,_=self.gated_attempt('T1','discovery','discovery-1','ESCALATE: owner choice required.\n',tier='analyst')

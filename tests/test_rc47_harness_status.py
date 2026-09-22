@@ -12,6 +12,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 import install_harness_adapter
 import tbag_render
+import tbag_status
+import dsd_task
 
 
 def sample_snapshot():
@@ -108,6 +110,32 @@ class RendererTests(unittest.TestCase):
         with mock.patch.object(tbag_render.tbag_status, "build_snapshot", side_effect=ValueError("no run")):
             lines = tbag_render.render_claude_payload({"cwd": "/tmp", "model": {"display_name": "Sonnet"}}, width=100, color=False)
         self.assertEqual(lines, ["T-BAG ○ no active run · Sonnet"])
+
+    def test_status_counts_live_launch_preparation_as_preparing_worker(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)/"project"; project.mkdir()
+            run=project/"TBag"/"runs"/"R"; task_root=run/"phases"/"P"/"tasks"/"T"; task_root.mkdir(parents=True)
+            dsd_task.write_json(run/"run.json",{
+                "format":dsd_task.RUN_FORMAT,"run_id":"R","project_root":str(project),
+                "runtime_root":str(project/"TBag"/"runtime"/"R"),"status":"active","max_workers":2,
+            })
+            brief=task_root/"brief.md"; brief.write_text("# Task\n\n## Objective\nPrepare a worker safely.\n")
+            dsd_task.write_json(task_root/"task.json",{
+                "format":dsd_task.FORMAT,"phase_id":"P","task_id":"T","kind":"implementation",
+                "role":"implementer","tier":"grunt","brief":str(brief),"dependencies":[],
+                "requires_integration":True,"status":"planned","attempts":[],
+            })
+            dsd_task.write_json(task_root/"launch-preparation.json",{
+                "format":"tbag-launch-preparation-v1","phase_id":"P","task_id":"T","role":"implementer",
+                "pid":os.getpid(),"started_at":__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+            })
+            snapshot=tbag_status.build_snapshot(project,run_root=run)
+            self.assertEqual(snapshot["worker_budget"]["live"],1)
+            self.assertEqual(len(snapshot["grunts_active"]),1)
+            worker=snapshot["workers"][0]
+            self.assertEqual(worker["state"],"preparing")
+            self.assertTrue(worker["process_alive"])
+            self.assertEqual(worker["role"],"implementer")
 
 
 class InstallerTests(unittest.TestCase):

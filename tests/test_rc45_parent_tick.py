@@ -144,25 +144,66 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertEqual(out["preparing"],[{"phase_id":"P","task_id":"T","action":"launch-ready-task"}])
         self.assertNotIn("blocked_actions",out)
 
+    def test_per_task_cycle_detector_survives_interleaved_packet_changes(self):
+        loop={}
+        calls={"n":0}
+        def task(_run,_phase,tid):
+            calls["n"]+=1
+            cycle=(calls["n"]-1)%8
+            status="planned" if cycle%2==0 else "needs-analysis"
+            return {
+                "task_id":tid,"phase_id":"P","role":"implementer","status":status,
+                "attempts":[{"role":"implementer","status":"gated"} for _ in range(calls["n"])],
+            }
+        actions=[
+            {"action":"resume-recorded-session","phase_id":"P","task_id":"T","role":"implementer","session_id":"ses-bad"},
+            {"action":"launch-analyst-discovery","phase_id":"P","task_id":"T"},
+        ]
+        blocked=[]
+        with mock.patch.object(parent_tick.dsd_task,"load_task",side_effect=task), \
+             mock.patch.object(parent_tick.dsd_task,"block_task_for_control_safety",return_value={"blocked":True}) as stop:
+            for i in range(8):
+                blocked=parent_tick._task_action_cycle_safety(loop,self.run,[actions[i%2]])
+        self.assertEqual(len(blocked),1)
+        self.assertEqual(blocked[0]["task_id"],"T")
+        self.assertEqual(blocked[0]["cycle"]["width"],2)
+        self.assertEqual(blocked[0]["cycle"]["repeats"],4)
+        stop.assert_called_once()
+
+    def test_normal_reviewer_fixer_alternation_is_not_a_control_loop(self):
+        loop={}
+        calls={"n":0}
+        def task(_run,_phase,tid):
+            calls["n"]+=1
+            return {
+                "task_id":tid,"phase_id":"P","role":"implementer",
+                "status":"needs-fix" if calls["n"]%2 else "awaiting-review",
+                "attempts":[{"role":"fixer","status":"gated"} for _ in range(calls["n"])],
+            }
+        actions=[
+            {"action":"launch-fixer","phase_id":"P","task_id":"T"},
+            {"action":"launch-fresh-reviewer","phase_id":"P","task_id":"T"},
+        ]
+        with mock.patch.object(parent_tick.dsd_task,"load_task",side_effect=task), \
+             mock.patch.object(parent_tick.dsd_task,"block_task_for_control_safety") as stop:
+            for n in range(10):
+                out=parent_tick._task_action_cycle_safety(loop,self.run,[actions[n%2]])
+        self.assertEqual(out,[])
+        stop.assert_not_called()
+
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
-    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
-    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0})
     @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
-    def test_three_identical_action_ticks_stop_repeating_and_intervene(self,_load,_poison,_advance,_owner):
-        action={"action":"launch-analyst-discovery","phase_id":"P","task_id":"T"}
-        state=self.base_state(first_useful_actions=[action],backlog_count=1)
+    def test_parked_only_run_is_quiescent_not_recovery(self,_load,_poison,_advance,_owner):
+        state=self.base_state(backlog_count=1,parked_count=1)
         with mock.patch.object(parent_tick,"reconcile",return_value=state), \
-             mock.patch.object(parent_tick,"_launch_action_blocker",return_value=None), \
              mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
-            first=parent_tick.command_tick(self.args)
-            second=parent_tick.command_tick(self.args)
-            third=parent_tick.command_tick(self.args)
-        self.assertEqual(first["classification"],"actions-ready")
-        self.assertEqual(second["classification"],"actions-ready")
-        self.assertEqual(third["classification"],"loop-suspected")
-        self.assertEqual(third["turn"],"intervene")
-        self.assertNotIn("actions",third)
-        self.assertEqual(third["loop_suspected"]["count"],3)
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"parked")
+        self.assertEqual(out["turn"],"owner")
+        self.assertEqual(out["parked"]["count"],1)
+        self.assertNotIn("control_error",out)
 
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})

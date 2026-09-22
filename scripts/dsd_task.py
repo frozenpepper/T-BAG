@@ -34,10 +34,13 @@ CONTROL_DIR = "TBag"
 CACHE_DIR = "t-bag"
 SUPPORTED_WORKER_DRIVERS = {"opencode", "opencode2", "codex", "claude"}
 DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
+DEFAULT_MAX_ATTEMPTS_PER_TASK = 25
+DEFAULT_SESSION_FAILURE_LIMIT = 3
+DETERMINISTIC_SESSION_FAILURE_LIMIT = 3
 RUN_STATUSES = {"active", "completed", "human-blocked", "paused-by-user", "abandoned"}
 STATUSES = {
     "planned", "ready", "active", "awaiting-review", "needs-fix", "needs-analysis",
-    "blocked", "review-passed", "accepted", "integrated", "superseded", "recovery-required",
+    "blocked", "parked", "cancelled", "review-passed", "accepted", "integrated", "superseded", "recovery-required",
 }
 ATTEMPT_STATUSES = {
     "started", "gated", "report-recovery", "report-resume", "mutating-report-resume",
@@ -710,6 +713,8 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         if owner.get("format")!="tbag-runtime-owner-v1" or owner.get("run_id")!=slug(args.run_id) or Path(str(owner.get("project_root") or "")).resolve()!=project or Path(str(owner.get("run_root") or "")).resolve()!=run:
             raise ValueError(f"runtime_root is owned by a different run/project: {runtime}")
     if args.max_workers < 1: raise ValueError("--max-workers must be >= 1")
+    max_attempts=int(getattr(args,"max_attempts_per_task",DEFAULT_MAX_ATTEMPTS_PER_TASK) or DEFAULT_MAX_ATTEMPTS_PER_TASK)
+    if max_attempts < 1: raise ValueError("--max-attempts-per-task must be >= 1")
     launch_interval=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS))
     if not math.isfinite(launch_interval) or launch_interval < 0:
         raise ValueError("--launch-start-interval-seconds must be a finite number >= 0")
@@ -727,6 +732,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "format": RUN_FORMAT, "run_id": slug(args.run_id), "project_root": str(project),
         "runtime_root": str(runtime), "created_at": now(), "status": "active",
         "max_workers": args.max_workers,
+        "max_attempts_per_task": max_attempts,
         "launch_start_interval_seconds": launch_interval,
         "escalation_enabled": getattr(args, "escalation", "on") == "on",
         "worker_runtimes": worker_runtimes,
@@ -744,6 +750,7 @@ def command_runtime_status(args: argparse.Namespace) -> dict[str, Any]:
         "run_id":info["run_id"],
         "status":info.get("status","active"),
         "escalation_enabled":escalation_enabled(info),
+        "max_attempts_per_task":int(info.get("max_attempts_per_task") or DEFAULT_MAX_ATTEMPTS_PER_TASK),
         "launch_start_interval_seconds":float(info.get("launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),
         "worker_runtimes":info.get("worker_runtimes",{}),
         "missing_runtime_config":missing_runtime_tiers(info),
@@ -826,9 +833,13 @@ def iter_run_tasks(run: Path):
         except (OSError,ValueError,json.JSONDecodeError): continue
 
 
+def valid_human_cancellation(task: dict[str, Any]) -> bool:
+    return str(task.get("status") or "")=="cancelled" and isinstance(task.get("human_cancellation"),dict) and bool(task["human_cancellation"].get("decision"))
+
+
 def task_can_advance_without_human(run: Path, task: dict[str, Any]) -> bool:
     status=str(task.get("status") or "")
-    if status in {"integrated","superseded"}: return False
+    if status in {"integrated","superseded","parked"} or valid_human_cancellation(task): return False
     if status=="accepted": return bool(task.get("requires_integration"))
     if status=="blocked": return False
     if _quiescent_reusable_review_conduit(task): return False
@@ -1288,7 +1299,7 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         source_state=load_json(source_path)
         analysis=source_state.get("last_analysis") if isinstance(source_state.get("last_analysis"),dict) else {}
         same_report=str(analysis.get("report") or "")==source["source_report"]
-        if source_state.get("kind")=="analysis" and source_state.get("status") not in {"accepted","integrated","superseded"} and analysis.get("outcome")=="replan" and same_report:
+        if source_state.get("kind")=="analysis" and source_state.get("status") not in {"accepted","integrated","superseded","cancelled","parked"} and analysis.get("outcome")=="replan" and same_report:
             source_state["status"]="accepted"; source_state["accepted_at"]=now(); source_state["accepted_report"]=source["source_report"]
             source_state["graph_consumed_at"]=now(); source_state["updated_at"]=now(); write_json(source_path,source_state); source_closed=True
             ids=[str(x) for x in source_state.get("followup_finding_ids",[]) if str(x)] if isinstance(source_state.get("followup_finding_ids"),list) else []
@@ -1347,9 +1358,19 @@ def command_show(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(value,dict):
             keep=("outcome","target","report","attempt","reviewer_attempt","recorded_at")
             result[key]={k:value.get(k) for k in keep if value.get(k) is not None}
+    burn=task.get("burn") if isinstance(task.get("burn"),dict) else task_burn_metrics(task)
+    if burn and any(burn.get(k) for k in ("attempts_total","resume_failures_scanned","no_movement_resume_failures")):
+        result["burn"]={k:burn.get(k) for k in (
+            "attempts_total","attempts_since_budget_reset","resume_failures_scanned",
+            "no_movement_resume_failures","current_failure_session","current_failure_role",
+            "current_session_resume_failures","current_session_no_movement_failures","provider_failures"
+        ) if burn.get(k) not in (None,0,{},[])}
     findings=open_review_findings(task)
     if findings:
         result["open_review_followups"]={"count":len(findings),"ids":[str(x.get("finding_id") or "") for x in findings[:8] if x.get("finding_id")]}
+    if task.get("status")=="parked" and task.get("parked_decision"): result["parked_decision"]=task.get("parked_decision")
+    if task.get("status")=="cancelled" and isinstance(task.get("human_cancellation"),dict):
+        result["human_cancellation"]={k:task["human_cancellation"].get(k) for k in ("decision","reason","recorded_at") if task["human_cancellation"].get(k)}
     if _quiescent_reusable_review_conduit(task):
         result["quiescent_reusable_conduit"]=True
     return result
@@ -1431,6 +1452,10 @@ def _phase_task_success(run: Path, phase: str, task: dict[str, Any]) -> bool:
     if status=="superseded":
         try: return dependency_satisfied(run,phase,str(task.get("task_id") or ""))
         except ValueError: return False
+    if status=="cancelled":
+        return valid_human_cancellation(task)
+    if status=="parked":
+        return False
     if task.get("requires_integration"): return status=="integrated"
     if status not in {"accepted","integrated"}: return False
     if task.get("kind")=="verification": return accepted_outcome(task)=="pass"
@@ -1455,7 +1480,7 @@ def phase_gate_state(run: Path, phase: str) -> dict[str, Any]:
         gate_at=str(latest.get("phase_gate_at") or latest.get("accepted_at") or "")
         if gate_at and gate_at>=latest_change:
             return {"required":True,"ready":False,"reason":"fresh-pass","gate_task":latest.get("task_id"),"gate_report":latest.get("owner_gate_report")}
-    live_or_open=[str(t.get("task_id")) for t in gates if str(t.get("status")) not in {"accepted","integrated","superseded"}]
+    live_or_open=[str(t.get("task_id")) for t in gates if str(t.get("status")) not in {"accepted","integrated","superseded","cancelled"}]
     if live_or_open: return {"required":True,"ready":False,"reason":"gate-in-progress","gate_tasks":live_or_open}
     return {"required":True,"ready":True,"reason":"phase-work-complete-needs-gate"}
 
@@ -1635,7 +1660,7 @@ def _stale_attempt_scope_disposition(attempt: dict[str, Any]) -> dict[str, Any]:
 
 def _stale_retry_status(task: dict[str, Any], attempt: dict[str, Any]) -> str:
     prior=str(attempt.get("prior_task_status") or "")
-    if prior in STATUSES and prior not in {"active","accepted","integrated","superseded","blocked"}:
+    if prior in STATUSES and prior not in {"active","accepted","integrated","superseded","cancelled","parked","blocked"}:
         return prior
     role=str(attempt.get("role") or "")
     base=str(task.get("role") or "")
@@ -1658,7 +1683,7 @@ def command_sweep_stale(args: argparse.Namespace) -> dict[str, Any]:
         for state_path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
             with file_lock(state_path.with_suffix(".lock")):
                 task=load_json(state_path)
-                if task.get("status") in {"accepted","integrated","superseded"}: continue
+                if task.get("status") in {"accepted","integrated","superseded","cancelled","parked"}: continue
                 changed=False; dispositions=[]
                 for attempt in task.get("attempts",[]):
                     if not isinstance(attempt,dict) or not attempt_is_unresolved(attempt) or attempt_is_live(attempt): continue
@@ -1700,7 +1725,7 @@ def _workspace_cleanup_candidate(run: Path, phase: str, task: dict[str, Any]) ->
     status=str(task.get("status") or "")
     if status=="superseded" and superseded_workspace_retention(run,phase,task).get("retain"):
         return False
-    return status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration"))
+    return status in {"integrated","superseded"} or valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration"))
 
 
 def _followup_triage_task_for(task: dict[str, Any], findings: list[dict[str, Any]]) -> str | None:
@@ -1778,6 +1803,16 @@ def _human_accept_route_allowed(task: dict[str, Any]) -> bool:
 
 def _human_escalation_excerpt(task: dict[str, Any], *, max_chars: int = 700) -> str:
     escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
+    reason=str(escalation.get("reason") or "")
+    detail=escalation.get("detail") if isinstance(escalation.get("detail"),dict) else {}
+    if reason:
+        suffix=""
+        if reason=="attempt-budget-exhausted":
+            suffix=(
+                f" ({detail.get('attempts_since_budget_reset')} attempts since the last Human budget reset; "
+                f"limit {detail.get('max_attempts_per_task')})"
+            )
+        return (reason.replace("-"," ")+suffix)[:max_chars]
     report=Path(str(escalation.get("report") or ""))
     if not report.is_file(): return "A Human decision is required before this task can continue."
     try:
@@ -1796,11 +1831,12 @@ def human_decision_question(task: dict[str, Any]) -> dict[str, Any]:
     purpose=task_brief_objective(task,max_chars=280) or tid
     options=[
         {"label":"Send to Analyst","value":"analysis","description":"Commission Analyst reasoning/replanning before resuming this task."},
-        {"label":"Resume","value":"resume","description":"Record my decision/instructions and continue under existing task authority."},
+        {"label":"Resume","value":"resume","description":"Continue under existing task authority and grant a fresh attempt-budget window."},
+        {"label":"Park task","value":"park","description":"Stop launching this task and stop asking about it; preserve its obligation/work for later."},
+        {"label":"Cancel task","value":"cancel","description":"Explicitly cancel this task obligation. Preserve the Human decision as authority; dependent tasks remain blocked until replanned/cancelled."},
     ]
     if _human_accept_route_allowed(task):
-        options.append({"label":"Accept despite red review","value":"accept","description":"Use explicit Human authority while preserving the recorded Reviewer FAIL/ESCALATE evidence."})
-    options.append({"label":"Keep blocked","value":"defer","description":"Do not resolve this blocker yet."})
+        options.insert(2,{"label":"Accept despite red review","value":"accept","description":"Use explicit Human authority while preserving the recorded Reviewer FAIL/ESCALATE evidence."})
     return {
         "id":f"human-decision:{phase}:{tid}:{seq}",
         "kind":"human-decision",
@@ -1815,8 +1851,9 @@ def human_decision_question(task: dict[str, Any]) -> dict[str, Any]:
         "task_id":tid,
         "decision_command":"resolve-escalation",
         "decision_file_required":True,
-        "allowed_routes":[str(item["value"]) for item in options if item["value"]!="defer"],
+        "allowed_routes":[str(item["value"]) for item in options],
     }
+
 
 
 def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
@@ -1838,7 +1875,8 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     findings=open_review_findings(task)
     if any(not str(f.get("triage_task_id") or "") for f in findings):
         return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}
-    if status in {"integrated","superseded"}: return None
+    if status in {"integrated","superseded","parked"}: return None
+    if status=="cancelled": return None
     if status=="accepted":
         return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None
     if status=="blocked":
@@ -1861,9 +1899,16 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     # so an older resumable session may not pull the task backward.
     if status=="recovery-required": return {**base,"action":"launch-recovery"}
 
-    if attempt_status in {"report-recovery","report-resume","mutating-report-resume"}:
+    if attempt_status in {"report-recovery","report-resume","mutating-report-resume","mutating-report-recovery"}:
         session=latest.get("session_id") or latest.get("resume_session")
-        return {**base,"action":"resume-recorded-session" if session else "retry-same-role-retained-workspace","role":role,"event_dir":str(event),**({"session_id":session} if session else {})}
+        abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
+        if session and str(session) not in abandoned:
+            return {**base,"action":"resume-recorded-session","role":role,"event_dir":str(event),"session_id":session}
+        return {
+            **base,"action":"retry-same-role-retained-workspace","role":role,"event_dir":str(event),
+            "reason":"recorded-session-poisoned" if session else "no-resumable-session",
+            **({"abandoned_session":session} if session else {}),
+        }
     if status=="needs-analysis": return {**base,"action":"launch-analyst-discovery"}
     if status=="needs-fix": return {**base,"action":"launch-fixer"}
     if status=="awaiting-review":
@@ -1963,19 +2008,19 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
                 actions.append(action)
                 if action.get("action")=="await-human-decision": human.append(action)
             if _workspace_cleanup_candidate(run,phase,task): cleanup.append({"phase_id":phase,"task_id":tid})
-            tasks.append({"phase_id":phase,"task_id":tid,"status":task.get("status"),"role":task.get("role"),"tier":task.get("tier"),"live":bool(current_live),"quiescent_conduit":_quiescent_reusable_review_conduit(task),"brief":task.get("brief"),"label":task_brief_label(task),"requires_integration":bool(task.get("requires_integration"))})
+            tasks.append({"phase_id":phase,"task_id":tid,"status":task.get("status"),"role":task.get("role"),"tier":task.get("tier"),"live":bool(current_live),"quiescent_conduit":_quiescent_reusable_review_conduit(task),"brief":task.get("brief"),"label":task_brief_label(task),"requires_integration":bool(task.get("requires_integration")),"valid_human_cancellation":valid_human_cancellation(task)})
     for phase in phases:
         gate=phase_gate_state(run,phase)
         if gate.get("required") and gate.get("ready"):
             actions.append({"phase_id":phase,"action":"prepare-phase-gate","reason":gate.get("reason")})
     limit=int(info.get("max_workers") or 1); slots=max(0,limit-len(live))
     ignored={"waiting-dependencies","await-human-decision"}
-    launch_actions={"launch-ready-task","launch-recovery","launch-analyst-discovery","launch-fixer","launch-fresh-reviewer","launch-or-reuse-fresh-plan-reviewer","resume-recorded-session"}
+    launch_actions={"launch-ready-task","launch-recovery","launch-analyst-discovery","launch-fixer","launch-fresh-reviewer","launch-or-reuse-fresh-plan-reviewer","resume-recorded-session","retry-same-role-retained-workspace"}
     nonlaunch=[a for a in actions if a.get("action") not in ignored|launch_actions]
     launches=[a for a in actions if a.get("action") in launch_actions]
     first_useful=nonlaunch+launches[:slots]
     classified={(a.get("phase_id"),a.get("task_id")) for a in actions}
-    unresolved_state=[t for t in tasks if not t.get("live") and not t.get("quiescent_conduit") and str(t.get("status") or "") not in {"accepted","integrated","superseded"} and (t.get("phase_id"),t.get("task_id")) not in classified]
+    unresolved_state=[t for t in tasks if not t.get("live") and not t.get("quiescent_conduit") and str(t.get("status") or "") not in {"accepted","integrated","superseded","parked"} and not (str(t.get("status") or "")=="cancelled" and t.get("valid_human_cancellation")) and (t.get("phase_id"),t.get("task_id")) not in classified]
     status_counts: dict[str,int] = {}
     for row in tasks:
         key=str(row.get("status") or "unknown"); status_counts[key]=status_counts.get(key,0)+1
@@ -1983,7 +2028,7 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     action_by_task={(str(a.get("phase_id")),str(a.get("task_id"))):a for a in actions}
     for row in tasks:
         status=str(row.get("status") or "")
-        closed=status in {"integrated","superseded"} or (status=="accepted" and not row.get("requires_integration")) or bool(row.get("quiescent_conduit"))
+        closed=status in {"integrated","superseded"} or (status=="cancelled" and bool(row.get("valid_human_cancellation"))) or (status=="accepted" and not row.get("requires_integration")) or bool(row.get("quiescent_conduit"))
         if closed: continue
         item=dict(row); action=action_by_task.get((str(row.get("phase_id")),str(row.get("task_id"))))
         if action: item["next_action"]=action.get("action"); item["blocked_by"]=action.get("blocked_by")
@@ -1999,6 +2044,7 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
         "run_id":info.get("run_id"),"run_status":info.get("status"),
         "worker_budget":{"max":limit,"live":len(live),"free":slots},
         "backlog_count":len(backlog),"waiting_dependency_count":waiting_count,
+        "parked_count":sum(1 for item in backlog if str(item.get("status") or "")=="parked"),
     }
     if first_useful: result["first_useful_actions"]=first_useful
     if len(live)==0 and any(a.get("action") in launch_actions for a in first_useful):
@@ -2026,9 +2072,10 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     state_labels={
         "planned":"queued","ready":"ready to start","active":"worker result pending","awaiting-review":"independent review pending",
         "needs-fix":"review findings being fixed","needs-analysis":"Analyst diagnosis/replanning needed","blocked":"owner decision required",
+        "parked":"parked by owner","cancelled":"cancelled by owner",
         "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
     }
-    running=[]; backlog=[]; completed=[]; gates=[]; open_followups=[]
+    running=[]; backlog=[]; completed=[]; gates=[]; open_followups=[]; burn_hotspots=[]
     backlog_sources: dict[tuple[str,str],dict[str,Any]]={}; completed_sources: dict[tuple[str,str],dict[str,Any]]={}
     purpose_chars=420 if details else 140
     for phase in phases:
@@ -2050,9 +2097,20 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
                 open_followups.append(item)
             if task.get("role")=="phase-auditor" and status=="accepted": continue
             live_now=task_has_live_attempt(task); tid=str(task.get("task_id") or "")
-            if status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration")):
+            burn=task.get("burn") if isinstance(task.get("burn"),dict) else {}
+            attempts_total=int(burn.get("attempts_total") or len([a for a in task.get("attempts",[]) if isinstance(a,dict)]))
+            no_move=int(burn.get("no_movement_resume_failures") or 0)
+            provider=burn.get("provider_failures") if isinstance(burn.get("provider_failures"),dict) else {}
+            if attempts_total or no_move or provider:
+                burn_hotspots.append({
+                    "phase":phase,"task_id":tid,"attempts_total":attempts_total,
+                    "attempts_since_budget_reset":int(burn.get("attempts_since_budget_reset") or attempts_total),
+                    "no_movement_resume_failures":no_move,
+                    **({"provider_failures":provider} if provider else {}),
+                })
+            if status in {"integrated","superseded"} or valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration")):
                 if status!="superseded":
-                    outcome="integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
+                    outcome="cancelled by Human" if status=="cancelled" else "integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
                     completed.append({"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
                     if details: completed_sources[(phase,tid)]=task
                 continue
@@ -2099,6 +2157,12 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
             if details: item["purpose"]=task_brief_objective(task,max_chars=420)
             human.append(item)
     if human: result["decisions_needed"]=human
+    burn_hotspots.sort(key=lambda x:(int(x.get("attempts_since_budget_reset") or 0),int(x.get("attempts_total") or 0)),reverse=True)
+    if burn_hotspots:
+        result["burn"]={
+            "attempts_total":sum(int(x.get("attempts_total") or 0) for x in burn_hotspots),
+            "hotspots":burn_hotspots[:3],
+        }
     disk=getattr(args,"disk_usage",None)
     if not isinstance(disk,dict):
         try:
@@ -2138,51 +2202,225 @@ def _attempt_session_identity(attempt:dict[str,Any],terminal:dict[str,Any]|None=
         except (OSError,ValueError,json.JSONDecodeError): pass
     return None
 
-def poisoned_session_candidate(task:dict[str,Any], *, failures:int=3)->dict[str,Any]|None:
-    base=str(task.get("role") or "")
+def _bounded_attempt_output(event: Path, *, max_bytes: int = 65536) -> str:
+    chunks=[]
+    for name in ("worker.log","worker.stderr.log"):
+        path=event/name
+        if not path.is_file(): continue
+        try:
+            with path.open("rb") as handle:
+                size=path.stat().st_size
+                if size>max_bytes: handle.seek(-max_bytes,os.SEEK_END)
+                chunks.append(handle.read(max_bytes).decode("utf-8",errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(chunks)
+
+
+def _provider_failure_taxonomy(event: Path) -> dict[str, Any] | None:
+    """Classify only narrow transport/provider failures; never interpret worker prose."""
+    text=_bounded_attempt_output(event).lower()
+    if not text: return None
+    if "encrypted_content" in text and "not issued to this caller" in text:
+        return {"kind":"resume-encrypted-content-caller-mismatch","deterministic":True}
+    compact=text.replace(" ","")
+    if "invalid_request_error" in text and ('"isretryable":false' in compact or "'isretryable':false" in compact) and ("400" in text or "bad request" in text):
+        return {"kind":"provider-nonretryable-invalid-request","deterministic":True}
+    return None
+
+
+def _attempt_failure_fact(attempt: dict[str, Any]) -> dict[str, Any] | None:
+    status=str(attempt.get("status") or "")
+    if status not in {"report-resume","report-recovery","mutating-report-resume","mutating-report-recovery"}:
+        return None
+    terminal=_attempt_terminal(attempt)
+    if terminal is None: return None
+    try: exit_code=int(terminal.get("exit_code"))
+    except (TypeError,ValueError): return None
+    if exit_code==0: return None
+    session=_attempt_session_identity(attempt,terminal)
+    if not session: return None
+    event=Path(str(attempt.get("event_dir") or ""))
+    provider=_provider_failure_taxonomy(event) if event.is_dir() else None
+    return {
+        "session_id":session,
+        "role":str(attempt.get("role") or ""),
+        "event":str(event),
+        "status":status,
+        "exit_code":exit_code,
+        "report_state":str(terminal.get("report_state") or ""),
+        "changed_count":_terminal_changed_count(terminal,attempt),
+        "provider_failure":provider,
+    }
+
+
+def task_burn_metrics(task: dict[str, Any], *, scan_limit: int = 200) -> dict[str, Any]:
     attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
-    if len(attempts)<failures or not base: return None
-    tail=attempts[-failures:]
-    session=None; events=[]
-    for attempt in tail:
-        if str(attempt.get("role") or "")!=base: return None
-        if str(attempt.get("status") or "") not in {"report-resume","report-recovery"}: return None
-        terminal=_attempt_terminal(attempt)
-        if terminal is None: return None
-        try: exit_code=int(terminal.get("exit_code"))
-        except (TypeError,ValueError): return None
-        if exit_code==0 or str(terminal.get("report_state") or "")!="launcher-placeholder": return None
-        if _terminal_changed_count(terminal,attempt)!=0: return None
-        current=_attempt_session_identity(attempt,terminal)
-        if not current: return None
-        if session is None: session=current
-        elif current!=session: return None
-        events.append(str(attempt.get("event_dir") or ""))
-    return {"session_id":session,"failures":failures,"events":events,"role":base}
+    checkpoint=max(0,int(task.get("attempt_budget_checkpoint") or 0))
+    facts=[fact for fact in (_attempt_failure_fact(x) for x in attempts[-scan_limit:]) if fact is not None]
+    no_movement=sum(1 for fact in facts if fact.get("changed_count")==0)
+    provider_counts: dict[str,int]={}
+    for fact in facts:
+        provider=fact.get("provider_failure") if isinstance(fact.get("provider_failure"),dict) else {}
+        kind=str(provider.get("kind") or "")
+        if kind: provider_counts[kind]=provider_counts.get(kind,0)+1
+    latest=facts[-1] if facts else None
+    current_session_failures=0; current_session_no_movement=0
+    if latest:
+        sid=str(latest.get("session_id") or ""); role=str(latest.get("role") or "")
+        matching=[x for x in facts if x.get("session_id")==sid and x.get("role")==role]
+        current_session_failures=len(matching)
+        current_session_no_movement=sum(1 for x in matching if x.get("changed_count")==0)
+    result={
+        "attempts_total":len(attempts),
+        "attempt_budget_checkpoint":checkpoint,
+        "attempts_since_budget_reset":max(0,len(attempts)-checkpoint),
+        "resume_failures_scanned":len(facts),
+        "no_movement_resume_failures":no_movement,
+    }
+    if latest:
+        result["current_failure_session"]=latest.get("session_id")
+        result["current_failure_role"]=latest.get("role")
+        result["current_session_resume_failures"]=current_session_failures
+        result["current_session_no_movement_failures"]=current_session_no_movement
+    if provider_counts: result["provider_failures"]=provider_counts
+    return result
+
+
+def poisoned_session_candidate(
+    task:dict[str,Any],
+    *,
+    failures:int=DEFAULT_SESSION_FAILURE_LIMIT,
+    deterministic_failures:int=DETERMINISTIC_SESSION_FAILURE_LIMIT,
+    scan_limit:int=200,
+)->dict[str,Any]|None:
+    """Detect cumulative same-session transport futility, even when attempts interleave."""
+    attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
+    if not attempts: return None
+    latest=_attempt_failure_fact(attempts[-1])
+    if latest is None: return None
+    facts=[fact for fact in (_attempt_failure_fact(x) for x in attempts[-scan_limit:]) if fact is not None]
+    session=str(latest.get("session_id") or ""); role=str(latest.get("role") or "")
+    same=[fact for fact in facts if str(fact.get("session_id") or "")==session and str(fact.get("role") or "")==role]
+    no_movement=[fact for fact in same if fact.get("changed_count")==0]
+    deterministic=[
+        fact for fact in same
+        if isinstance(fact.get("provider_failure"),dict) and fact["provider_failure"].get("deterministic")
+    ]
+    if len(no_movement)<failures and len(deterministic)<deterministic_failures:
+        return None
+    kinds: dict[str,int]={}
+    for fact in same:
+        provider=fact.get("provider_failure") if isinstance(fact.get("provider_failure"),dict) else {}
+        kind=str(provider.get("kind") or "")
+        if kind: kinds[kind]=kinds.get(kind,0)+1
+    return {
+        "session_id":session,
+        "role":role,
+        "failures":len(same),
+        "no_movement_failures":len(no_movement),
+        "deterministic_provider_failures":len(deterministic),
+        "provider_failures":kinds,
+        "events":[str(x.get("event") or "") for x in same[-12:]],
+        "reason":"deterministic-provider-session-poison" if len(deterministic)>=deterministic_failures else "cumulative-no-movement-resume-failures",
+    }
+
+
+def _cold_retry_status(task: dict[str, Any], role: str) -> str:
+    if role=="fixer": return "needs-fix"
+    if role=="reviewer": return "awaiting-review"
+    if role=="discovery": return "needs-analysis"
+    if role=="recovery": return "recovery-required"
+    if role==str(task.get("role") or ""): return "planned"
+    return str(task.get("status") or "planned")
+
+
+def _record_control_human_block(task: dict[str, Any], *, reason: str, detail: dict[str, Any]) -> None:
+    detail=dict(detail)
+    detail.setdefault("prior_status",str(task.get("status") or "planned"))
+    record={
+        "target":"human",
+        "source":"control-plane",
+        "reason":reason,
+        "detail":detail,
+        "recorded_at":now(),
+    }
+    task["last_escalation"]=record
+    task.setdefault("escalation_history",[]).append(record)
+    task["status"]="blocked"
+
 
 def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
-    """Route strict repeated same-session transport deaths to Analyst Recovery."""
-    run=args.run_root.resolve(); selected=slug(args.phase_id) if getattr(args,"phase_id",None) else None; marked=[]
+    """Bound transport futility and task burn before another automatic launch."""
+    run=args.run_root.resolve(); info=load_run(run)
+    selected=slug(args.phase_id) if getattr(args,"phase_id",None) else None
+    max_attempts=max(1,int(info.get("max_attempts_per_task") or DEFAULT_MAX_ATTEMPTS_PER_TASK))
+    poisoned=[]; budget_blocks=[]
+    terminal_statuses={"accepted","integrated","superseded","cancelled","parked"}
     for initial in list(iter_run_tasks(run) or []):
         phase=str(initial.get("phase_id") or ""); tid=str(initial.get("task_id") or "")
         if not phase or not tid or (selected and phase!=selected): continue
-        if initial.get("status") in {"accepted","integrated","superseded","blocked","recovery-required"}: continue
+        if initial.get("status") in terminal_statuses|{"blocked"}: continue
         if task_has_live_attempt(initial): continue
         path=task_file(run,phase,tid)
         with file_lock(path.with_suffix(".lock")):
             task=load_json(path)
             if task_has_live_attempt(task): continue
+            changed=False
             candidate=poisoned_session_candidate(task)
-            if candidate is None: continue
-            abandoned=task.setdefault("abandoned_sessions",[])
-            sid=str(candidate["session_id"])
-            if sid not in abandoned: abandoned.append(sid)
-            history=task.setdefault("session_poison_history",[])
-            if not any(isinstance(x,dict) and str(x.get("session_id") or "")==sid and x.get("events")==candidate.get("events") for x in history):
-                history.append({**candidate,"recorded_at":now(),"reason":"three-consecutive-no-work-nonzero-exits"})
-            task["status"]="recovery-required"; task["updated_at"]=now(); write_json(path,task)
-            marked.append({"phase_id":phase,"task_id":tid,**candidate,"action":"launch-recovery"})
-    return {"count":len(marked),"marked":marked}
+            if candidate is not None:
+                abandoned=task.setdefault("abandoned_sessions",[])
+                sid=str(candidate["session_id"])
+                if sid not in abandoned:
+                    abandoned.append(sid)
+                    history=task.setdefault("session_poison_history",[])
+                    history.append({**candidate,"recorded_at":now()})
+                    task["status"]=_cold_retry_status(task,str(candidate.get("role") or ""))
+                    poisoned.append({
+                        "phase_id":phase,"task_id":tid,**candidate,
+                        "action":"retry-same-role-retained-workspace",
+                        "cold_retry_role":candidate.get("role"),
+                    })
+                    changed=True
+
+            attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
+            checkpoint=max(0,int(task.get("attempt_budget_checkpoint") or 0))
+            used=max(0,len(attempts)-checkpoint)
+            if used>=max_attempts and task.get("status") not in terminal_statuses|{"blocked"}:
+                detail={
+                    "attempts_total":len(attempts),
+                    "attempts_since_budget_reset":used,
+                    "max_attempts_per_task":max_attempts,
+                    "session_poison":candidate,
+                }
+                _record_control_human_block(task,reason="attempt-budget-exhausted",detail=detail)
+                budget_blocks.append({"phase_id":phase,"task_id":tid,**detail,"action":"await-human-decision"})
+                changed=True
+
+            burn=task_burn_metrics(task)
+            if task.get("burn")!=burn:
+                task["burn"]=burn; changed=True
+            if changed:
+                task["updated_at"]=now(); write_json(path,task)
+    return {
+        "count":len(poisoned)+len(budget_blocks),
+        "poisoned_sessions":poisoned,
+        "budget_blocks":budget_blocks,
+    }
+
+
+def block_task_for_control_safety(run: Path, phase: str, task_id: str, *, reason: str, detail: dict[str, Any]) -> dict[str, Any]:
+    """Create a durable Human boundary when mechanical loop/futility safety trips."""
+    phase=slug(phase); tid=slug(task_id); path=task_file(run,phase,tid)
+    with file_lock(path.with_suffix(".lock")):
+        task=load_json(path); status=str(task.get("status") or "")
+        if status in {"accepted","integrated","superseded","cancelled","parked","blocked"}:
+            return {"blocked":False,"task_id":tid,"status":status,"reason":"already-terminal-or-blocked"}
+        if task_has_live_attempt(task):
+            return {"blocked":False,"task_id":tid,"status":status,"reason":"live-attempt"}
+        _record_control_human_block(task,reason=reason,detail=detail)
+        task["updated_at"]=now(); write_json(path,task)
+        return {"blocked":True,"task_id":tid,"status":"blocked","reason":reason,"detail":detail}
 
 
 def _control_subprocess_json(argv: list[str]) -> dict[str, Any]:
@@ -2732,7 +2970,7 @@ def command_plan_review(args: argparse.Namespace) -> dict[str, Any]:
         target_path=task_file(run,phase,target_id)
         with file_lock(target_path.with_suffix(".lock")):
             goal=load_json(target_path)
-            if goal.get("status") in {"accepted","integrated","superseded"}:
+            if goal.get("status") in {"accepted","integrated","superseded","cancelled","parked"}:
                 raise ValueError(f"cannot record another Plan Review after Goal-Planner task is {goal.get('status')!r}")
             gated=latest_gated_attempt(goal,"goal-planner")
             if gated is None or Path(str(gated.get("event_dir") or "")).resolve()!=planner_attempt.resolve():
@@ -2810,7 +3048,7 @@ def command_analysis_result(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path); report=args.report.resolve()
-        if task.get("status") in {"accepted","integrated","superseded"}: raise ValueError(f"cannot record a new analysis result for completed task status {task.get('status')!r}")
+        if task.get("status") in {"accepted","integrated","superseded","cancelled","parked"}: raise ValueError(f"cannot record a new analysis result for closed/parked task status {task.get('status')!r}")
         if not report.is_file(): raise ValueError(f"Analyst report missing: {report}")
         attempt=matching_gated_attempt(task,set(ANALYST_DISPOSITION_ROLES),report)
         if attempt is None or attempt_tier(attempt)!="analyst": raise ValueError("analysis result must refer to a gated disposition-owning Analyst attempt for this task")
@@ -2853,7 +3091,7 @@ def command_escalate(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path); report=args.report.resolve()
-        if task.get("status") in {"accepted","integrated","superseded"}: raise ValueError(f"cannot escalate completed task status {task.get('status')!r}")
+        if task.get("status") in {"accepted","integrated","superseded","cancelled","parked"}: raise ValueError(f"cannot escalate closed/parked task status {task.get('status')!r}")
         if not report.is_file(): raise ValueError(f"escalation report missing: {report}")
         attempt=matching_any_gated_attempt(task,report)
         if attempt is None:
@@ -2880,8 +3118,9 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path); decision=args.decision.resolve()
         escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-        if task.get("status")!="blocked" or escalation.get("target")!="human":
-            raise ValueError(f"resolve-escalation requires a Human-targeted blocked escalation; current status is {task.get('status')!r}")
+        status=str(task.get("status") or "")
+        if status not in {"blocked","parked"} or escalation.get("target")!="human":
+            raise ValueError(f"resolve-escalation requires a Human-targeted blocked/parked escalation; current status is {status!r}")
         if not decision.is_file(): raise ValueError(f"decision file missing: {decision}")
         if decision.is_symlink(): raise ValueError("Human decision input must be a regular file, not a symlink")
         route=getattr(args,"route","resume")
@@ -2895,7 +3134,10 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         while snapshot.exists():
             seq+=1; snapshot=authority_dir/f"{phase}--{tid}--{seq:03d}.md"
         snapshot.write_bytes(decision.read_bytes())
-        recorded={"path":str(snapshot.resolve()),"source_path":str(decision.resolve()),"recorded_at":now(),"escalation_report":escalation.get("report"),"route":route}
+        recorded={
+            "path":str(snapshot.resolve()),"source_path":str(decision.resolve()),"recorded_at":now(),
+            "escalation_report":escalation.get("report"),"route":route,
+        }
         task.setdefault("human_decision_history",[]).append(recorded); task["last_human_decision"]=recorded
         if route=="accept":
             task["status"]="accepted"; task["accepted_at"]=now(); task["accepted_report"]=str(snapshot.resolve())
@@ -2909,8 +3151,30 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
                     "review_checkpoint_ref":review.get("checkpoint_ref"),
                     "recorded_at":now(),
                 }
+        elif route=="park":
+            task["status"]="parked"
+            task["parked_at"]=now()
+            task["parked_decision"]=str(snapshot.resolve())
+        elif route=="cancel":
+            task["status"]="cancelled"
+            task["cancelled_at"]=now()
+            task["human_cancellation"]={
+                "decision":str(snapshot.resolve()),
+                "escalation_report":escalation.get("report"),
+                "reason":escalation.get("reason"),
+                "recorded_at":now(),
+            }
         else:
-            task["status"]="needs-analysis" if route=="analysis" else "planned"
+            # A Human choosing to continue explicitly opens a fresh automatic-attempt
+            # budget window. This prevents the old exhausted window from re-blocking
+            # immediately on the very next tick.
+            task["attempt_budget_checkpoint"]=len([x for x in task.get("attempts",[]) if isinstance(x,dict)])
+            if route=="analysis":
+                task["status"]="needs-analysis"
+            else:
+                detail=escalation.get("detail") if isinstance(escalation.get("detail"),dict) else {}
+                prior=str(detail.get("prior_status") or "")
+                task["status"]=prior if prior in STATUSES-{"blocked","parked","cancelled"} else "planned"
         task["updated_at"]=now(); write_json(path,task)
         followup_cancel=(str(task.get("followup_triage_for") or ""),[str(x) for x in task.get("followup_finding_ids",[]) if str(x)],Path(str(escalation.get("report") or ""))) if followup_accept else None
     if followup_cancel is not None:
@@ -2924,6 +3188,9 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
     result={"task_id":tid,"status":task["status"],"decision":str(snapshot.resolve()),"route":route}
     if run_reactivated: result["run_status"]="active"
     if route=="accept": result["acceptance_basis"]="explicit-human-authority"
+    if route=="park": result["parked"]=True
+    if route=="cancel": result["cancelled"]=True
+    if route in {"resume","analysis"}: result["attempt_budget_reset_at"]=task.get("attempt_budget_checkpoint")
     if followup_cancel is not None: result["cancelled_findings"]=followup_cancel[1]
     return result
 
@@ -3094,7 +3361,7 @@ def command_supersede(args: argparse.Namespace) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
-    p=sub.add_parser("init-run"); p.add_argument("--project-root",type=Path,required=True); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--run-id",required=True); p.add_argument("--runtime-root"); p.add_argument("--max-workers",type=int,default=4); p.add_argument("--launch-start-interval-seconds",type=float,default=DEFAULT_LAUNCH_START_INTERVAL_SECONDS); p.add_argument("--grunt-driver"); p.add_argument("--grunt-model"); p.add_argument("--analyst-driver"); p.add_argument("--analyst-model"); p.add_argument("--escalation",choices=("on","off"),default="on")
+    p=sub.add_parser("init-run"); p.add_argument("--project-root",type=Path,required=True); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--run-id",required=True); p.add_argument("--runtime-root"); p.add_argument("--max-workers",type=int,default=4); p.add_argument("--max-attempts-per-task",type=int,default=DEFAULT_MAX_ATTEMPTS_PER_TASK); p.add_argument("--launch-start-interval-seconds",type=float,default=DEFAULT_LAUNCH_START_INTERVAL_SECONDS); p.add_argument("--grunt-driver"); p.add_argument("--grunt-model"); p.add_argument("--analyst-driver"); p.add_argument("--analyst-model"); p.add_argument("--escalation",choices=("on","off"),default="on")
     p=sub.add_parser("runtime-status"); p.add_argument("--run-root",type=Path,required=True)
     p=sub.add_parser("set-runtime"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--tier",choices=sorted(TIERS),required=True); p.add_argument("--driver",required=True); p.add_argument("--model",required=True); p.add_argument("--effort")
     p=sub.add_parser("set-runtime-profile"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--tier",choices=sorted(TIERS),required=True); p.add_argument("--name",required=True); p.add_argument("--driver",required=True); p.add_argument("--model",required=True); p.add_argument("--effort"); p.add_argument("--max-uses",type=int)
@@ -3123,7 +3390,7 @@ def parser() -> argparse.ArgumentParser:
         elif name=="verification-result": p.add_argument("--outcome",choices=("pass","blocked","escalate"),help="legacy/tokenless report fallback; a routing token in the report is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="analysis-result": p.add_argument("--outcome",choices=("resume","replan","replan-resume","escalate"),help="legacy/tokenless report fallback; Analyst disposition token is authoritative"); p.add_argument("--report",type=Path,required=True)
         elif name=="escalate": p.add_argument("--report",type=Path,required=True)
-        elif name=="resolve-escalation": p.add_argument("--decision",type=Path,required=True); p.add_argument("--route",choices=("resume","analysis","accept"),default="resume")
+        elif name=="resolve-escalation": p.add_argument("--decision",type=Path,required=True); p.add_argument("--route",choices=("resume","analysis","accept","park","cancel"),default="resume")
         elif name=="accept": p.add_argument("--report",type=Path)
         elif name=="supersede": p.add_argument("--by")
     return ap

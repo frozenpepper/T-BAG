@@ -2,6 +2,16 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC66 — bounded autonomy and poisoned-session escape
+
+- Added a hard per-task automatic-attempt budget (default 25, configurable at run initialization). Exhaustion becomes one durable Human decision boundary rather than an unbounded retry loop; explicit Human resume/analysis opens a fresh budget window.
+- Reworked session-poison detection from consecutive-tail matching to cumulative same-session failure accounting, preserving the three-strike threshold. Known nonretryable provider/session failures such as encrypted reasoning content issued to another caller are classified narrowly and poison after three occurrences even when unrelated attempts interleave.
+- A poisoned conversational session is now abandoned as transport state and retried cold in the same role on the retained workspace. Transport failure no longer consumes Analyst authority merely to escape an unusable session.
+- Replaced the packet-level three-identical-ticks alarm with bounded per-task action-cycle history. Repeating launch/resume cycles are detected despite interleaved work and durably block the affected task before another attempt starts.
+- Added explicit Human `park` and `cancel` routes. Park is quiescent and preserves the task/workspace without repeated questions; cancellation records Human authority, permits safe runtime disposal, closes that obligation for phase accounting, but does not falsely satisfy downstream dependencies.
+- Made OpenCode `--background-prepare` adapter-private and rejected direct parent use. Status snapshots now show live launch preparation as a real preparing worker instead of an empty slot, while parked-only runs stop autonomous heartbeats.
+- Added bounded burn telemetry to task/owner status and field-shaped regressions for interleaved poison, deterministic encrypted-content failures, budget exhaustion, park/resume/cancel, alternating action cycles, and preparation visibility.
+
 ## v2.2.0 RC65 — compact parent control and preparation race hardening
 
 - Made `parent_tick.py tick` a compact incremental routing packet by default: healthy monitoring detail, full disk telemetry, nested transition results and duplicate owner state move behind `--details`; stable ticks expose a state signature/change bit instead of re-sending the world.

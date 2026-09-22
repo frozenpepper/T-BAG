@@ -130,11 +130,43 @@ def _objective(task: dict[str, Any]) -> str:
 def _task_done(run: Path, phase: str, task: dict[str, Any]) -> bool:
     if str(task.get("role") or "") in CONTROL_ROLES:
         return False
+    if dsd_task.valid_human_cancellation(task):
+        return not dsd_task.open_review_findings(task)
     try:
         return bool(dsd_task.dependency_satisfied(run, phase, str(task.get("task_id") or "")))
     except Exception:
         status = str(task.get("status") or "")
         return status == "integrated" or (status == "accepted" and not task.get("requires_integration"))
+
+
+def _preparation_worker(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:
+    marker=dsd_task.task_root(run,phase,str(task.get("task_id") or ""))/"launch-preparation.json"
+    data=_load_json(marker)
+    if not data: return None
+    pid=data.get("pid")
+    if not _pid_alive(pid): return None
+    role=str(data.get("role") or task.get("role") or "")
+    tier=str(dsd_task.DEFAULT_TIER.get(role) or task.get("tier") or "")
+    started=_epoch(data.get("started_at"))
+    elapsed=max(0.0,time.time()-started) if started is not None else None
+    return {
+        "phase_id":phase,
+        "task_id":task.get("task_id"),
+        "objective":_objective(task),
+        "authority":"Analyst" if tier=="analyst" else "Grunt",
+        "tier":tier,
+        "role":role,
+        "driver":None,
+        "model":"preparing worker context",
+        "runtime_profile":"default",
+        "state":"preparing",
+        "process_alive":True,
+        "process":{"worker":{"pid":pid,"alive":True}},
+        "elapsed_seconds":round(elapsed,1) if elapsed is not None else None,
+        "session":{"id":None,"known":False,"abandoned":False},
+        "observer":{"known":False,"healthy":False,"not_applicable":"launch-preparation"},
+        "preparation":str(marker),
+    }
 
 
 def _observer_for(transport: dict[str, Any], event_dir: str) -> dict[str, Any] | None:
@@ -236,6 +268,9 @@ def build_snapshot(project_root: Path, *, run_root: Path | None = None, parent_s
                     attention.append({"phase_id": phase, "task_id": task.get("task_id"), "status": task.get("status"), "objective": item["objective"]})
                 attempts = [x for x in task.get("attempts", []) if isinstance(x, dict)]
                 live_attempts = [x for x in attempts if dsd_task.attempt_is_live(x)]
+                preparation=_preparation_worker(run,phase,task)
+                if preparation is not None and not live_attempts:
+                    workers.append(preparation)
                 for attempt in live_attempts:
                     worker = _inspect_worker(run, phase, task, attempt, transport)
                     workers.append(worker)

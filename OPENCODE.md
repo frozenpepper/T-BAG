@@ -28,7 +28,7 @@ There is exactly one parent protocol, including across adapter upgrades:
 
 1. On every owner turn, resume, lifecycle wake or periodic heartbeat run `python3 TBag/tools/parent_tick.py tick --run-root <run>`. Its default output is deliberately compact and incremental; reserve `--details` for bounded diagnosis. Do not separately reconstruct reconcile/advance/monitor/update state.
 2. Process the tick packet until it reaches a launch/semantic/owner boundary. If it says `actions-ready`, execute only those authorized actions and tick again.
-3. For each new attempt run normal `dsd_attempt.py launch`, then yield. The OpenCode adapter transparently backgrounds expensive workspace preparation, watches that preparation, and arms the resulting worker observer. Multiple launch commands may share one Bash call; structured results are parsed independently.
+3. For each new attempt run normal `dsd_attempt.py launch`, then yield. The OpenCode adapter transparently backgrounds expensive workspace preparation, watches that preparation, and arms the resulting worker observer. `--background-prepare` is adapter-private and direct parent use is rejected. Multiple launch commands may share one Bash call; structured results are parsed independently.
 4. Missing observer state is repaired automatically after a normal tick. `tbag_follow`, when the host exposes it, is diagnostics only and is never a required lifecycle step.
 5. If the tick says `owner_question_required`, run `actions_before_question`, call `parent_tick.py wait-owner --question-id <id>`, then invoke OpenCode's native `question` tool and end the turn. While it is open, **both heartbeat lanes are unenrolled** even if detached workers continue. After applying the answer, call `resume-owner --question-id <id>` then tick; completed workers reconcile then. Otherwise render `owner_notice` with `━━ T-BAG UPDATE ━━` and acknowledge it.
 6. If the tick says `completion-candidate`, explicitly finish after confirming accepted-plan obligations are exhausted, or replan remaining work. If it says `workers-running`, yield.
@@ -60,7 +60,7 @@ Credential/config rotation is not assumed to hot-reload inside an already-runnin
 
 OpenCode session lifecycle events are used only as a thin transport interlock. If an observer finishes while the parent is still busy, the plugin coalesces one **in-memory wake bit** for that session and flushes it when OpenCode reports idle (or releases the busy turn on a terminal session error). A completion that races the wake-generated parent turn receives one final non-blocking flush when that turn releases.
 
-Wake state is disposable. Per-attempt wakes are the primary completion edge; the 60-second deterministic attempt-liveness pulse recovers a lost completion wake without spending parent-model tokens, and the slower health lane recovers broader orchestration drift. `human-blocked` and `paused-by-user` suspend both lanes; `completed` and `abandoned` end them. Recording a Human escalation decision automatically reactivates `human-blocked`; an explicit pause requires explicit `set-run-status active`. A subsequent tick/worker launch re-enrolls transport automatically.
+Wake state is disposable. Per-attempt wakes are the primary completion edge; the 60-second deterministic attempt-liveness pulse recovers a lost completion wake without spending parent-model tokens, and the slower health lane recovers broader orchestration drift. `human-blocked`, `paused-by-user`, and a parked-only orchestration state suspend autonomous wake activity; `completed` and `abandoned` end it. Recording a Human escalation decision automatically reactivates `human-blocked`; an explicit pause requires explicit `set-run-status active`. A subsequent tick/worker launch re-enrolls transport automatically.
 
 The adapter never polls idleness, chooses models/tasks, launches additional work, gates evidence, accepts tasks, integrates, or persists semantic notification state.
 
@@ -83,7 +83,7 @@ After a restart, open OpenCode's built-in **Plugins** dialog. On 1.x this is the
 
 Observer registrations are mirrored into run-local `.transport/opencode.json` only as disposable transport diagnostics. Durable task/run files remain semantic authority. Missing observer state is a reason to re-arm the exact live attempt, not evidence that the task failed.
 
-Repeated same-session instant deaths with a launcher-placeholder report and zero project movement are mechanically routed to `recovery-required` after three consecutive failures. That poisoned session is then abandoned and the existing `launch-recovery` action commissions an Analyst. Human authority is not consumed merely because a worker session became unusable.
+Repeated same-session failures are transport facts, not Analyst work. After three cumulative zero-movement failures of the currently failing session/role—or three narrowly recognized deterministic nonretryable provider/session failures such as encrypted reasoning content issued to another caller—the session is abandoned and the same role is cold-retried on the retained workspace. Unrelated attempts may interleave without resetting this count. The per-task automatic-attempt budget still bounds total burn and escalates to one Human decision when exhausted.
 
 ## Forbidden substitutes
 

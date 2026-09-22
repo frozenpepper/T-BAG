@@ -33,7 +33,7 @@ python3 <skill>/scripts/install_harness_adapter.py --project-root /abs/project -
 ```bash
 python3 <skill>/scripts/dsd_task.py init-run \
   --project-root /abs/project --run-root /abs/project/TBag/runs/R1 \
-  --run-id R1 --max-workers 4 --escalation on
+  --run-id R1 --max-workers 4 --max-attempts-per-task 25 --escalation on
 python3 <skill>/scripts/dsd_task.py set-runtime ...
 python3 <skill>/scripts/prepare_worker_rules.py \
   --project-root /abs/project --run-root ... --revision 1 [--plan /abs/PLAN.md]
@@ -77,7 +77,7 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task
 python3 <skill>/scripts/dsd_attempt.py inspect --summary --run-root ... --phase-id P --task-id T01
 ```
 
-Launch → yield. Do not sleep/poll. Tick handles final-report/no-terminal and silent anomalies. `inspect --summary` is diagnostic; `inspect --details` is cold forensics; `tbag_follow` is re-arm diagnostics only.
+Launch → yield. Do not sleep/poll. Tick handles final-report/no-terminal and silent anomalies. `inspect --summary` is diagnostic; `--details` is cold forensics; `tbag_follow` is re-arm diagnostics only. Never invoke `--background-prepare` directly.
 
 ## Gate / Review / Fix / land
 
@@ -101,10 +101,10 @@ Use `--outcome` only for already-generated legacy/tokenless reports.
 ```bash
 python3 <skill>/scripts/dsd_task.py escalate --run-root ... --phase-id P --task-id T01 --report .../report.md
 python3 <skill>/scripts/dsd_task.py resolve-escalation --run-root ... --phase-id P --task-id T01 \
-  --decision .../decision.md --route resume|analysis|accept
+  --decision .../decision.md --route resume|analysis|accept|park|cancel
 ```
 
-`resume` returns the existing lane; `analysis` opens bounded Analyst authority; `accept` records explicit Human acceptance/cancellation at that boundary.
+Routes are lifecycle-owned; see `WORKSPACE.md` for resume/analysis/accept/park/cancel semantics.
 
 ## Interrupted work / cleanup
 

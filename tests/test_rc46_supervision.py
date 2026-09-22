@@ -67,9 +67,10 @@ class PoisonedSessionTests(unittest.TestCase):
             task["attempts"][-1]["event_dir"] = self._attempt(root,9,"different")["event_dir"]
             self.assertIsNone(dsd_task.poisoned_session_candidate(task))
 
-    def test_poison_scan_routes_to_recovery_and_abandons_session(self):
+    def test_poison_scan_cold_retries_same_role_and_abandons_session(self):
         with tempfile.TemporaryDirectory() as td:
             run=Path(td)/"run"; task_root=run/"phases"/"P"/"tasks"/"T"; task_root.mkdir(parents=True)
+            dsd_task.write_json(run/"run.json",{"format":dsd_task.RUN_FORMAT,"run_id":"r","status":"active","max_attempts_per_task":25})
             attempts=[self._attempt(task_root/"attempts",i) for i in range(3)]
             state={"format":dsd_task.FORMAT,"phase_id":"P","task_id":"T","role":"verification","kind":"verification","status":"active","attempts":attempts}
             dsd_task.write_json(task_root/"task.json",state)
@@ -77,9 +78,10 @@ class PoisonedSessionTests(unittest.TestCase):
                 out=dsd_task.command_poison_scan(SimpleNamespace(run_root=run,phase_id=None))
             self.assertEqual(out["count"],1)
             updated=dsd_task.load_json(task_root/"task.json")
-            self.assertEqual(updated["status"],"recovery-required")
+            self.assertEqual(updated["status"],"planned")
             self.assertEqual(updated["abandoned_sessions"],["ses-poison"])
-            self.assertEqual(out["marked"][0]["action"],"launch-recovery")
+            self.assertEqual(out["poisoned_sessions"][0]["action"],"retry-same-role-retained-workspace")
+            self.assertEqual(out["poisoned_sessions"][0]["cold_retry_role"],"verification")
 
     def test_abandoned_session_cannot_be_explicitly_resumed(self):
         task={"abandoned_sessions":["ses-poison"],"attempts":[]}

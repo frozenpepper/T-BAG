@@ -24,7 +24,7 @@ Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an an
 4. **Schedule safely.** Launch dependency-ready work to budget. Mutations use isolated worktrees; standalone read-only roles use a shared frozen project view. State-changing dependencies integrate first.
 5. **Grunt loop.** Implementer → fresh Reviewer; FAIL → Fixer resumes that Reviewer → fresh Review; PASS → land. Out-of-brief obligations go to Analyst triage; ESCALATE uses the central ladder.
 6. **Authority ladder.** Grunt → Analyst → Human. Stronger runtime profiles do not widen authority.
-7. **Durable truth.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, silence and final-report/no-terminal hangs; retirement preserves recovery state.
+7. **Durable truth + bounded autonomy.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, silence and final-report/no-terminal hangs; retirement preserves recovery state. Session poison cold-retries transport without spending Analyst authority; per-task attempt/cycle limits terminate autonomous retries at one Human boundary.
 8. **Harness wake.** `OPENCODE.md` is the sole protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. After launch, yield—never sleep/poll. Waiting/paused/ended runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops. Routine parent control uses compact tick/status/show surfaces; full details are diagnostic-only.
 
 ## Non-negotiable boundaries
@@ -32,7 +32,7 @@ Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an an
 - **Authority/acceptance:** brief + typed authority define scope; evidence never widens it. Red predicates stay red; contract correction needs Analyst/Human authority.
 - **Semantic truth:** accepted evidence is not automatically green. Preserve failed prerequisites and explicit `FAIL`/`BLOCKED`.
 - **Review ownership:** fresh Reviewer owns task acceptance; Human may explicitly accept a Human-targeted escalation without rewriting its red Review. After PASS the parent does not shadow-review.
-- **Succession:** supersession/deferral never erases obligations; closure needs a successor or Human cancellation.
+- **Succession:** supersession/deferral/parking never erases obligations; closure needs a successor or explicit Human cancellation. Cancellation does not make a downstream dependency green.
 - **Context:** workers get frozen rules, one role, selected skills, brief and typed inputs—not rich parent history or raw logs.
 - **Cleanup:** lifecycle owns runtime cleanup. Never raw-delete shared `~/.cache/t-bag`.
 - **Project-local scratch:** T-BAG diagnostics/repros/temp/handoffs stay under project `TBag/`; never `$TMPDIR`, `/tmp`, `/private/var/...` or external paths unless the Human explicitly requests them.

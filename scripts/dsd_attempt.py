@@ -191,6 +191,37 @@ def latest_session(task:dict[str,Any],role:str)->str|None:
 
 
 
+def current_review_attempt(task:dict[str,Any])->dict[str,Any]|None:
+    review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
+    raw=str(review.get("attempt") or "")
+    if not raw: return None
+    target=Path(raw).resolve()
+    for attempt in reversed(task.get("attempts",[])):
+        if not isinstance(attempt,dict) or attempt.get("role")!="reviewer": continue
+        try: event=Path(str(attempt.get("event_dir") or "")).resolve()
+        except OSError: continue
+        if event==target: return attempt
+    return None
+
+
+def poisoned_current_review_session(task:dict[str,Any])->str|None:
+    review_attempt=current_review_attempt(task)
+    if review_attempt is None: return None
+    abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
+    sid=attempt_session_id(review_attempt)
+    if sid and sid in abandoned: return sid
+    # Older transports may have learned the session only during the Fixer turn.
+    # Restrict fallback to Fixer attempts after this exact current Reviewer attempt.
+    attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
+    try: index=attempts.index(review_attempt)
+    except ValueError: return None
+    for attempt in reversed(attempts[index+1:]):
+        if attempt.get("role")!="fixer": continue
+        sid=attempt_session_id(attempt)
+        if sid and sid in abandoned: return sid
+    return None
+
+
 def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:str|None, resume_last:bool)->str|None:
     """Choose session continuity for one role without inferring semantic completion.
 
@@ -203,13 +234,19 @@ def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:st
     """
     abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
     if explicit and explicit in abandoned:
-        raise ValueError("requested session was mechanically abandoned after repeated no-work failures; route Analyst Recovery and cold-relaunch after Recovery RESUME")
+        raise ValueError("requested session was mechanically abandoned after repeated transport failures; cold-relaunch the retained workspace instead of resuming it")
     if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"}:
         if explicit or resume_last:
             raise ValueError(f"{role} must always start in a fresh session")
         return None
     if role=="fixer" and status=="needs-fix":
-        reviewer_sid=latest_session(task,"reviewer")
+        poisoned_review_sid=poisoned_current_review_session(task)
+        if poisoned_review_sid:
+            if explicit or resume_last:
+                raise ValueError("current Reviewer/Fixer session is mechanically abandoned; launch this Fixer cold on the retained workspace")
+            return None
+        current_review=current_review_attempt(task)
+        reviewer_sid=attempt_session_id(current_review) if current_review is not None else latest_session(task,"reviewer")
         if explicit:
             if reviewer_sid and explicit != reviewer_sid:
                 raise ValueError("Fixer must resume the Reviewer session that produced the current findings; explicit session does not match it")
@@ -217,7 +254,7 @@ def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:st
         if resume_last:
             raise ValueError("A new Fixer round must resume the current Reviewer session automatically; --resume-last is only for continuing an interrupted Fixer turn")
         if not reviewer_sid:
-            raise ValueError("Fixer must resume the Reviewer session that produced the current findings; no Reviewer session ID is recorded (recover it explicitly or route transport recovery)")
+            raise ValueError("Fixer must resume the Reviewer session that produced the current findings; no Reviewer session ID is recorded")
         return reviewer_sid
     if resume_last:
         sid=latest_session(task,role)
@@ -244,7 +281,7 @@ def plan_review_target(run:Path, phase:str, task:dict[str,Any]) -> dict[str,str]
     target=dsd_task.load_task(run,phase,target_id)
     if target.get("role")!="goal-planner":
         raise ValueError("Plan Reviewer target is not a Goal-Planner task")
-    if target.get("status") in {"accepted","integrated","superseded"}:
+    if target.get("status") in {"accepted","integrated","superseded","cancelled","parked"}:
         raise ValueError(f"Goal-Planner target is already {target.get('status')!r}; do not launch another Plan Review")
     if target.get("status")=="blocked":
         raise ValueError("Goal-Planner target is blocked on an owner decision; do not launch another Plan Review")
@@ -403,6 +440,8 @@ def validate_launch_role(task:dict[str,Any], role:str, *, continuing:bool=False)
     kind=str(task.get("kind") or "")
     status=str(task.get("status") or "")
     base=str(task.get("role") or "")
+    if status in {"accepted","integrated","superseded","cancelled","parked","blocked"}:
+        raise ValueError(f"task is closed/parked/owner-blocked and cannot launch role {role!r}: {status}")
     if role==base:
         if status=="recovery-required":
             raise ValueError("task requires Analyst Recovery before the base role may continue")
@@ -471,7 +510,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     live=live_same_task(task)
     if live: raise ValueError(f"task already has a live attempt: {live[-1].get('event_dir')}")
     status=str(task.get("status") or "")
-    if status in {"accepted","integrated","superseded"}: raise ValueError(f"task is complete and cannot launch another worker: {status}")
+    if status in {"accepted","integrated","superseded","cancelled","parked"}: raise ValueError(f"task is closed/parked and cannot launch another worker: {status}")
     if status=="blocked": raise ValueError("task is blocked on a Human-targeted escalation; resolve the escalation before launching more technical work")
     role=args.role or str(task.get("role") or "")
     if role not in ROLE_NAMES: raise ValueError(f"unknown role: {role}")
@@ -491,7 +530,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     if role=="implementer":
         if status=="awaiting-review" and not continuing:
             raise ValueError("implementation turn is awaiting Review; use --resume-last only when the same task is genuinely unfinished, otherwise launch the Reviewer")
-        if status in {"needs-analysis","needs-fix","review-passed","accepted","superseded","integrated","recovery-required","blocked"}:
+        if status in {"needs-analysis","needs-fix","review-passed","accepted","superseded","integrated","cancelled","parked","recovery-required","blocked"}:
             raise ValueError(f"task is not implementation-runnable: {status}")
     if role=="goal-planner":
         latest=(task.get("attempts") or [{}])[-1] if isinstance(task.get("attempts"),list) and task.get("attempts") else {}
@@ -508,6 +547,9 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         if pinned is None:
             raise ValueError("cannot determine the worker-rules revision originally supplied to the resumed session; pass --worker-rules explicitly only if deliberate rebriefing is intended")
         rules=pinned
+    elif role=="fixer" and status=="needs-fix" and (poisoned_review_sid:=poisoned_current_review_session(task)):
+        pinned=rules_for_resumed_session(task,poisoned_review_sid)
+        rules=pinned if pinned is not None else latest_rules(run)
     else:
         rules=latest_rules(run)
     rules_snapshot=validate_plan_authority_for_launch(rules,phase,role,task)
@@ -618,7 +660,7 @@ def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
     # snapshot cost. _command_launch rechecks lifecycle/dependencies under the final
     # slot lock before a worker process is actually started.
     task=dsd_task.load_task(run,phase,tid); status=str(task.get("status") or "")
-    if status not in {"accepted","integrated","superseded","blocked"}:
+    if status not in {"accepted","integrated","superseded","cancelled","parked","blocked"}:
         role=getattr(args,"role",None) or str(task.get("role") or "")
         continuing=bool(getattr(args,"resume_last",False) or getattr(args,"resume_session",None))
         validate_launch_role(task,role,continuing=continuing)
@@ -700,6 +742,11 @@ def _background_launch(args:argparse.Namespace)->dict[str,Any]:
 
 def command_launch(args:argparse.Namespace)->dict[str,Any]:
     if getattr(args,"background_prepare",False):
+        if str(os.environ.get("TBAG_INTERNAL_BACKGROUND_PREPARE") or "")!="1":
+            raise ValueError(
+                "BACKGROUND_PREPARE_INTERNAL_ONLY: --background-prepare is owned by the parent harness adapter. "
+                "Use the documented normal dsd_attempt.py launch command and yield."
+            )
         return _background_launch(args)
     marker=os.environ.get("TBAG_LAUNCH_PREPARATION_MARKER")
     if marker:

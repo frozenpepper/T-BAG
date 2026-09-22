@@ -455,14 +455,14 @@ _LAUNCH_ACTION_ROLES={
 
 def _launch_action_blocker(run:Path, action:dict[str,Any])->str|None:
     name=str(action.get("action") or "")
-    if name not in set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session"}:
+    if name not in set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session","retry-same-role-retained-workspace"}:
         return None
     phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
     if not phase or not tid: return "launch action is missing phase/task identity"
     if name=="launch-ready-task":
         try: role=str(dsd_task.load_task(run,phase,tid).get("role") or "")
         except Exception as exc: return str(exc)
-    elif name=="resume-recorded-session":
+    elif name in {"resume-recorded-session","retry-same-role-retained-workspace"}:
         role=str(action.get("role") or "")
         if not role:
             try: role=str(dsd_task.load_task(run,phase,tid).get("role") or "")
@@ -470,6 +470,99 @@ def _launch_action_blocker(run:Path, action:dict[str,Any])->str|None:
     else:
         role=_LAUNCH_ACTION_ROLES[name]
     return dsd_attempt.launch_blocker(run,phase,tid,role,continuing=name=="resume-recorded-session")
+
+
+def _pending_launch_state(
+    run: Path,
+    state: dict[str, Any],
+    blocked_actions: list[dict[str, Any]],
+) -> tuple[list[dict[str,Any]],list[dict[str,Any]],list[dict[str,Any]],list[dict[str,Any]]]:
+    blocked=list(blocked_actions)
+    blocked_keys={str(item.get("key") or "") for item in blocked if isinstance(item,dict)}
+    pending=[item for item in list(state.get("first_useful_actions") or []) if action_key(item) not in blocked_keys]
+    launchable=[]
+    for item in pending:
+        blocker=_launch_action_blocker(run,item)
+        if blocker:
+            blocked.append({**item,"key":action_key(item),"reason":blocker,"waiting_on":"launch-precondition"})
+        else:
+            launchable.append(item)
+    preparation=[
+        item for item in blocked
+        if str(item.get("reason") or item.get("error") or "").startswith("PREPARATION_IN_FLIGHT")
+    ]
+    hard=[item for item in blocked if item not in preparation]
+    return launchable,blocked,preparation,hard
+
+
+def _task_action_cycle_safety(loop: dict[str, Any], run: Path, pending: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detect durable per-task action cycles, independent of packet ordering/interleaving."""
+    histories=loop.setdefault("task_action_history",{})
+    if not isinstance(histories,dict):
+        histories={}; loop["task_action_history"]=histories
+    violations=[]
+    launch_names=set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session","retry-same-role-retained-workspace"}
+    for action in pending:
+        name=str(action.get("action") or "")
+        if name not in launch_names: continue
+        phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
+        if not phase or not tid: continue
+        try: task=dsd_task.load_task(run,phase,tid)
+        except Exception: continue
+        attempts=len([x for x in task.get("attempts",[]) if isinstance(x,dict)])
+        role=str(action.get("role") or task.get("role") or "")
+        status=str(task.get("status") or "")
+        fingerprint=f"{name}|{status}|{role}|{attempts}"
+        key=f"{phase}/{tid}"
+        record=histories.get(key) if isinstance(histories.get(key),dict) else {}
+        budget_checkpoint=max(0,int(task.get("attempt_budget_checkpoint") or 0))
+        prior_checkpoint=max(0,int(record.get("budget_checkpoint") or 0))
+        # An explicit Human resume/analysis decision opens a new attempt window and
+        # therefore a new loop-detection epoch. Old cycles remain in task history, but
+        # they must not immediately re-block the freshly authorized window.
+        events=[] if budget_checkpoint!=prior_checkpoint else list(record.get("events") or []) if isinstance(record.get("events"),list) else []
+        if budget_checkpoint==prior_checkpoint and str(record.get("last_fingerprint") or "")==fingerprint:
+            continue
+        event={"action":name,"status":status,"role":role,"attempts_total":attempts,"at":now()}
+        events=(events+[event])[-16:]
+        record={"last_fingerprint":fingerprint,"events":events,"budget_checkpoint":budget_checkpoint,"updated_at":now()}
+        histories[key]=record
+
+        tokens=[f"{x.get('action')}:{x.get('role')}:{x.get('status')}" for x in events]
+        same_action=sum(1 for x in events[-12:] if str(x.get("action") or "")==name)
+        cycle=None
+        for width in range(2,5):
+            need=width*4
+            if len(tokens)<need: continue
+            tail=tokens[-need:]; pattern=tail[:width]
+            if all(tail[offset:offset+width]==pattern for offset in range(0,need,width)):
+                cycle={"width":width,"repeats":4,"pattern":pattern}; break
+        retry_actions={"resume-recorded-session","retry-same-role-retained-workspace"}
+        cycle_has_retry=bool(cycle and any(str(token).split(":",1)[0] in retry_actions for token in cycle.get("pattern",[])))
+        if (name in retry_actions and same_action>=8) or cycle_has_retry:
+            detail={
+                "action":name,
+                "same_action_count_recent":same_action,
+                "cycle":cycle,
+                "history":events[-12:],
+                "attempts_total":attempts,
+                "prior_status":status,
+            }
+            result=dsd_task.block_task_for_control_safety(
+                run,phase,tid,reason="repeated-control-cycle",detail=detail,
+            )
+            if result.get("blocked"):
+                violations.append({"phase_id":phase,"task_id":tid,**detail})
+    # Keep the loop file bounded when tasks close/disappear.
+    if len(histories)>128:
+        ordered=sorted(
+            ((str(v.get("updated_at") or ""),k) for k,v in histories.items() if isinstance(v,dict)),
+            reverse=True,
+        )
+        keep={k for _,k in ordered[:128]}
+        for key in list(histories):
+            if key not in keep: histories.pop(key,None)
+    return violations
 
 def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     run = args.run_root.resolve()
@@ -566,22 +659,11 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
 
     run_status = str(state.get("run_status") or "active")
     blocked_actions=list(advance_result.get("blocked_actions") or []) if isinstance(advance_result,dict) else []
-    blocked_keys={str(item.get("key") or "") for item in blocked_actions if isinstance(item,dict)}
-    pending_all=list(state.get("first_useful_actions") or [])
-    pending=[item for item in pending_all if action_key(item) not in blocked_keys]
-    launchable=[]
-    for item in pending:
-        blocker=_launch_action_blocker(run,item)
-        if blocker:
-            blocked_actions.append({**item,"key":action_key(item),"reason":blocker,"waiting_on":"launch-precondition"})
-        else:
-            launchable.append(item)
-    pending=launchable
-    preparation_blocks=[
-        item for item in blocked_actions
-        if str(item.get("reason") or item.get("error") or "").startswith("PREPARATION_IN_FLIGHT")
-    ]
-    hard_blocked_actions=[item for item in blocked_actions if item not in preparation_blocks]
+    pending,blocked_actions,preparation_blocks,hard_blocked_actions=_pending_launch_state(run,state,blocked_actions)
+    loop_violations=_task_action_cycle_safety(loop,run,pending) if str(state.get("run_status") or "active")=="active" else []
+    if loop_violations:
+        state=reconcile(run,getattr(args,"phase_id",None),sweep=False)
+        pending,blocked_actions,preparation_blocks,hard_blocked_actions=_pending_launch_state(run,state,blocked_actions)
     live_now = list(state.get("live_attempts") or [])
     durable_questions=owner_questions(state)
     questions=durable_questions+runtime_config_questions(run,blocked_actions)
@@ -603,37 +685,23 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif preparation_blocks:
         classification = "workers-preparing"
         turn = "yield"
+    elif int(state.get("parked_count") or 0) > 0:
+        classification = "parked"
+        turn = "owner"
     else:
         classification = "active-idle"
         turn = "intervene"
 
     loop_suspected=None
-    repeated_actions=None
-    if not questions and classification=="actions-ready" and pending:
-        signature="|".join(action_key(item) for item in pending)
-        prior=loop.get("action_repeat") if isinstance(loop.get("action_repeat"),dict) else {}
-        same=str(prior.get("signature") or "")==signature
-        count=int(prior.get("count") or 0)+1 if same else 1
-        record={
-            "signature":signature,
-            "count":count,
-            "first_seen_at":prior.get("first_seen_at") if same else now(),
-            "last_seen_at":now(),
+    loop.pop("action_repeat",None)  # RC65 packet-signature breaker is superseded by per-task durable cycle safety.
+    if loop_violations:
+        loop_suspected={
+            "count":len(loop_violations),
+            "tasks":loop_violations,
+            "next":"Affected tasks were durably blocked before another launch. Ask the Human once; resume grants a fresh attempt window, or park/cancel the task.",
         }
-        loop["action_repeat"]=record
-        if count>=3:
-            repeated_actions=list(pending)
-            pending=[]
-            loop_suspected={
-                "count":count,
-                "since":record.get("first_seen_at"),
-                "actions":repeated_actions,
-                "next":"Do not issue the same launch/resume suggestion again. Diagnose why durable state did not change; use Analyst/recovery for semantic uncertainty rather than repeating the loop.",
-            }
-            classification="loop-suspected"
-            turn="intervene"
-    else:
-        loop.pop("action_repeat",None)
+        classification="owner-question-required"
+        turn="ask-owner"
 
     # Human blockers are an interaction boundary, not a status footnote. Independent
     # work may still be launched first, but the parent turn must end in the harness's
@@ -716,7 +784,13 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     advance_packet=compact_advance(advance_result,details=details)
     if advance_packet: out["advance"] = advance_packet
     if poison_result and poison_result.get("count"):
-        out["poisoned_sessions_routed"] = poison_result if details else {"count":poison_result.get("count")}
+        poisoned=list(poison_result.get("poisoned_sessions") or [])
+        budgets=list(poison_result.get("budget_blocks") or [])
+        out["safety_transitions"] = poison_result if details else {
+            "count":int(poison_result.get("count") or 0),
+            "poisoned_sessions":len(poisoned),
+            "attempt_budget_blocks":len(budgets),
+        }
     if hard_blocked_actions:
         out["blocked_actions"] = hard_blocked_actions if details else [_compact_blocked_action(x) for x in hard_blocked_actions]
     if preparation_blocks and (details or state_changed or classification!="workers-preparing"):
@@ -750,6 +824,11 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         ]
     if classification == "completion-candidate":
         out["project_end"] = {"candidate": True, "next": "finish after confirming accepted plan obligations are exhausted; otherwise replan/register remaining work"}
+    if classification == "parked":
+        out["parked"]={
+            "count":int(state.get("parked_count") or 0),
+            "next":"Parked tasks are quiescent and will not be relaunched or re-asked. Resume/cancel them explicitly, or continue independent work when available.",
+        }
     if classification == "active-idle":
         out["control_error"] = {
             "code":"active-idle",

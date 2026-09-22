@@ -48,6 +48,7 @@ function TierGlyph(props: { tier: unknown }) {
 }
 
 function workerHealth(worker: any) {
+  if (worker?.state === "preparing") return "preparing"
   const processAlive = Boolean(worker?.process?.worker?.alive ?? worker?.process_alive ?? worker?.state === "running")
   if (worker?.attention) return `⚠ ${worker.attention}`
   if (!processAlive) return "process down"

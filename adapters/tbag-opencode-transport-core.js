@@ -38,7 +38,14 @@ export function isParentControlCommand(command) {
 }
 
 export function backgroundLaunchCommand(command) {
-  return String(command || "").replace(/(dsd_attempt\.py["']?\s+launch)(?!\s+--background-prepare)/g, "$1 --background-prepare")
+  const source = String(command || "")
+  // Background preparation is an adapter implementation detail, not a parent CLI
+  // mode. Scope the internal marker only to the exact Python launch command so
+  // shell prefixes such as "cd ... &&" keep working without exporting it globally.
+  const pattern = /(^|(?:&&|\|\||;)\s*)((?:\S*python3)\s+(?:"[^"]*dsd_attempt\.py"|'[^']*dsd_attempt\.py'|[^\s;&|]*dsd_attempt\.py)\s+launch)(?!\s+--background-prepare)/g
+  return source.replace(pattern, (_match, prefix, launch) =>
+    `${prefix}TBAG_INTERNAL_BACKGROUND_PREPARE=1 ${launch} --background-prepare`
+  )
 }
 
 export function structuredObjects(text) {
@@ -173,7 +180,7 @@ export function createHeartbeatRegistry({
     let item = runHeartbeats.get(heartbeatKey(sessionID, runRoot))
     const statusState = heartbeatStateForStatus(packet.run_status)
     const questionWaiting = packet.heartbeat_state === "waiting" || packet.classification === "owner-question-open" || packet.owner_question_required === true
-    if (statusState !== "running" || questionWaiting || packet.classification === "run-human-blocked") {
+    if (statusState !== "running" || questionWaiting || packet.classification === "run-human-blocked" || packet.classification === "parked") {
       removeRunHeartbeat(sessionID, runRoot)
       return
     }

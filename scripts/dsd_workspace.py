@@ -1303,10 +1303,10 @@ def _command_cleanup_unlocked(args: argparse.Namespace) -> dict[str, Any]:
             )
     if force and not explicit_reason:
         raise ValueError("--force cleanup requires --reason so discarded workspace authority is auditable")
-    if task.get("requires_integration") and status not in {"integrated","superseded"} and not force:
-        raise ValueError("project-changing task is not integrated; refusing to delete the worktree needed for integration")
-    if status not in {"integrated","accepted","superseded"} and not force:
-        raise ValueError(f"task status {status!r} is not complete; use --force --reason only for explicit abandonment/recovery")
+    if task.get("requires_integration") and status not in {"integrated","superseded","cancelled"} and not force:
+        raise ValueError("project-changing task is not integrated or explicitly Human-cancelled; refusing to delete the worktree needed for integration")
+    if status not in {"integrated","accepted","superseded","cancelled"} and not force:
+        raise ValueError(f"task status {status!r} is not complete/disposed; use --force --reason only for explicit abandonment/recovery")
 
     if force:
         cleanup_reason=f"explicit-discard:{explicit_reason}"
@@ -1314,6 +1314,10 @@ def _command_cleanup_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         cleanup_reason="reviewed-delta-integrated"
     elif status=="accepted":
         cleanup_reason="durable-nonintegrating-result"
+    elif status=="cancelled":
+        if not task.get("human_cancellation"):
+            raise ValueError("cancelled workspace lacks explicit Human cancellation authority; refusing cleanup")
+        cleanup_reason="explicit-human-cancellation"
     elif retention is not None:
         cleanup_reason=str(retention.get("reason") or "superseded-safe")
     else:
@@ -1447,7 +1451,7 @@ def reap_safe_runtime(run: Path, *, phase_id: str | None = None, drop_current_an
             if live_attempt_exists(task):
                 skipped.append({"phase_id":phase,"task_id":tid,"reason":"live-attempt"}); continue
             status=str(task.get("status") or "")
-            complete=status in {"integrated","superseded"} or (status=="accepted" and not task.get("requires_integration"))
+            complete=status in {"integrated","superseded"} or dsd_task.valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration"))
             if not complete:
                 skipped.append({"phase_id":phase,"task_id":tid,"reason":f"status:{status}"}); continue
             class A: pass
@@ -1484,13 +1488,15 @@ def _purge_run_blockers(run: Path) -> list[dict[str, str]]:
         ws_path=workspace_path(run,phase,tid)
         if not ws_path.is_file(): continue
         status=str(task.get("status") or "")
+        if status=="cancelled" and not task.get("human_cancellation"):
+            blockers.append({"phase_id":phase,"task_id":tid,"reason":"cancelled-without-human-authority"}); continue
         if status=="superseded":
             retention=dsd_task.superseded_workspace_retention(run,phase,task)
             if retention.get("retain"):
                 blockers.append({"phase_id":phase,"task_id":tid,"reason":"superseded-carry-forward-not-durable"}); continue
-        if task.get("requires_integration") and status not in {"integrated","superseded"}:
+        if task.get("requires_integration") and status not in {"integrated","superseded","cancelled"}:
             blockers.append({"phase_id":phase,"task_id":tid,"reason":f"project-change-not-integrated:{status}"}); continue
-        if status not in {"integrated","accepted","superseded"}:
+        if status not in {"integrated","accepted","superseded","cancelled"}:
             blockers.append({"phase_id":phase,"task_id":tid,"reason":f"task-not-complete:{status}"})
     return blockers
 

@@ -54,7 +54,7 @@ Before each attempt, mutable state is checkpointed; read-only work uses the froz
 
 ## Attempts and gate
 
-`dsd_attempt.py launch` checks lifecycle/dependencies, resolves the project view, freezes the baseline, renders context, launches detached, and records the attempt. Different tasks may prepare concurrently; same-task workspace creation/preparation is serialized. A second launch sees the existing preparation instead of racing its checkout; the child recognizes its own reservation and cannot self-block. One task cannot have two live attempts.
+`dsd_attempt.py launch` validates lifecycle/dependencies, freezes context/baseline, and starts one detached attempt. Preparation is serialized per task; `--background-prepare` is adapter-private.
 
 Every backend must preserve budget reservation, baseline/scope evidence, attempt/report/terminal records, resumable identity where supported, and inspection. Capture session identity in live attempt evidence as soon as the host exposes it; killed workers need not wait for `terminal.json` to remain resumable. Raw CLI wrappers are unsupported. Exit `0` is not semantic success.
 
@@ -67,6 +67,8 @@ After a mutating Implementer/Fixer gate, a **fresh Grunt Reviewer** judges the f
 A Reviewer may also discover a concrete material obligation outside that task's acceptance. It records those only under exact `## Follow-up obligations` single-line bullets. They stay in review history; the source may still PASS/land, but new phase launches pause for one read-only Planner triage. The Planner either proves the frozen plan already covers every finding (`analysis-result resume`) or emits replacement/amending work (`replan`). Finding IDs stay bound to the triage, not the graph. An insufficient unstarted brief is replaced with `supersedes`; integrated work gets a dependent amendment. Only explicit Human cancellation may close it without plan coverage.
 
 `needs-analysis` uses fresh same-task Discovery. Recovery is only for unexplained/out-of-authority residual state, not ordinary process death. Analyst results are `resume|replan|replan-resume|escalate`. Worker escalation remains **Grunt → Analyst → Human**; Human decisions are frozen typed inputs. Human may explicitly accept a blocked implementation only after fresh Reviewer FAIL/ESCALATE, whose red record is preserved.
+
+Three cumulative same-session no-movement/nonretryable failures abandon it and cold-retry the same role. Automatic work is capped per task (default 25); cycles stop at a Human boundary. `resume|analysis` resets it; `park` is quiescent; `cancel` never satisfies dependencies.
 
 ## Integration
 
