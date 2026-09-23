@@ -33,7 +33,7 @@ python3 <skill>/scripts/install_harness_adapter.py --project-root /abs/project -
 ```bash
 python3 <skill>/scripts/dsd_task.py init-run \
   --project-root /abs/project --run-root /abs/project/TBag/runs/R1 \
-  --run-id R1 --max-workers 4 --max-attempts-per-task 25 --escalation on
+  --run-id R1 --max-workers 4 --max-attempts-per-task 10 --escalation on
 python3 <skill>/scripts/dsd_task.py set-runtime ...
 python3 <skill>/scripts/prepare_worker_rules.py \
   --project-root /abs/project --run-root ... --revision 1 [--plan /abs/PLAN.md]

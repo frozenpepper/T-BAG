@@ -68,7 +68,7 @@ A Reviewer may also discover a concrete material obligation outside that task's 
 
 `needs-analysis` uses fresh same-task Discovery. Recovery is only for unexplained/out-of-authority residual state, not ordinary process death. Analyst results are `resume|replan|replan-resume|escalate`. Worker escalation remains **Grunt → Analyst → Human**; Human decisions are frozen typed inputs. Human may explicitly accept a blocked implementation only after fresh Reviewer FAIL/ESCALATE, whose red record is preserved.
 
-Three cumulative same-session no-movement/nonretryable failures abandon it and cold-retry the same role. Automatic work is capped per task (default 25); cycles stop at a Human boundary. `resume|analysis` resets it; `park` is quiescent; `cancel` never satisfies dependencies.
+Three cumulative same-session no-movement/nonretryable failures abandon it and cold-retry the same role. Automatic work is capped per task (default 10); cycles stop at a Human boundary. `resume|analysis` resets it; `park` is quiescent; `cancel` never satisfies dependencies.
 
 ## Integration
 

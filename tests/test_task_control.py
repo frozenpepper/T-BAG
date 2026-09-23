@@ -1307,7 +1307,7 @@ class RuntimeBootstrapTests(unittest.TestCase):
         class A: pass
         a=A(); a.project_root=self.project; a.run_root=self.run; a.run_id='r'; a.runtime_root=str(self.root/'runtime'); a.max_workers=4; a.grunt_driver=None; a.grunt_model=None; a.analyst_driver=None; a.analyst_model=None; return a
     def test_new_run_has_no_silent_worker_defaults(self):
-        out=dsd_task.command_init(self.args()); self.assertEqual(out['missing_runtime_config'],['analyst','grunt']); info=dsd_task.load_run(self.run); self.assertIsNone(info['worker_runtimes']['analyst']); self.assertIsNone(info['worker_runtimes']['grunt']); self.assertTrue(info['escalation_enabled'])
+        out=dsd_task.command_init(self.args()); self.assertEqual(out['missing_runtime_config'],['analyst','grunt']); info=dsd_task.load_run(self.run); self.assertIsNone(info['worker_runtimes']['analyst']); self.assertIsNone(info['worker_runtimes']['grunt']); self.assertTrue(info['escalation_enabled']); self.assertEqual(info['max_attempts_per_task'],10)
     def test_new_run_refuses_to_claim_nonempty_unowned_runtime_root(self):
         a=self.args(); runtime=Path(a.runtime_root); runtime.mkdir(); (runtime/'foreign.txt').write_text('foreign\n')
         with self.assertRaisesRegex(ValueError,'no T-BAG ownership marker'): dsd_task.command_init(a)

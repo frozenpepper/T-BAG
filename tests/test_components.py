@@ -520,6 +520,7 @@ class ComponentsTests(unittest.TestCase):
 
     def test_session_poison_is_cumulative_across_interleaved_failures_and_cold_retries_fixer(self):
         self.register_impl('T-POISON')
+        info=dsd_task.load_run(self.run); info['max_attempts_per_task']=50; dsd_task.write_json(dsd_task.run_file(self.run),info)
         task=dsd_task.load_task(self.run,'P1','T-POISON')
         review_event=dsd_task.task_root(self.run,'P1','T-POISON')/'attempts'/'reviewer-0'; review_event.mkdir(parents=True,exist_ok=True)
         review_report=review_event/'report.md'; review_report.write_text('FAIL — fix the recorded defect.\n')

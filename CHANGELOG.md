@@ -4,7 +4,7 @@ This release package keeps only recent architectural history. Detailed pre-RC22 
 
 ## v2.2.0 RC66 — bounded autonomy and poisoned-session escape
 
-- Added a hard per-task automatic-attempt budget (default 25, configurable at run initialization). Exhaustion becomes one durable Human decision boundary rather than an unbounded retry loop; explicit Human resume/analysis opens a fresh budget window.
+- Added a hard per-task automatic-attempt budget (default 10, configurable at run initialization). Exhaustion becomes one durable Human decision boundary rather than an unbounded retry loop; explicit Human resume/analysis opens a fresh budget window.
 - Reworked session-poison detection from consecutive-tail matching to cumulative same-session failure accounting, preserving the three-strike threshold. Known nonretryable provider/session failures such as encrypted reasoning content issued to another caller are classified narrowly and poison after three occurrences even when unrelated attempts interleave.
 - A poisoned conversational session is now abandoned as transport state and retried cold in the same role on the retained workspace. Transport failure no longer consumes Analyst authority merely to escape an unusable session.
 - Replaced the packet-level three-identical-ticks alarm with bounded per-task action-cycle history. Repeating launch/resume cycles are detected despite interleaved work and durably block the affected task before another attempt starts.
