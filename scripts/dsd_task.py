@@ -312,17 +312,31 @@ def load_task(run: Path, phase: str, task: str) -> dict[str, Any]:
     return data
 
 
-def integration_delivered(run: Path, phase: str, task: dict[str, Any]) -> bool:
+def integration_delivered(
+    run: Path,
+    phase: str,
+    task: dict[str, Any],
+    *,
+    delivery_context: dict[str, Any] | None = None,
+) -> bool:
     if not task.get("requires_integration"):
         return True
     try:
         import dsd_workspace
-        return bool(dsd_workspace.task_delivery_status(run,phase,task).get("verified"))
+        return bool(dsd_workspace.task_delivery_status(
+            run,phase,task,delivery_context=delivery_context,
+        ).get("verified"))
     except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError):
         return False
 
 
-def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | None = None) -> bool:
+def dependency_satisfied(
+    run: Path,
+    phase: str,
+    task_id: str,
+    _seen: set[str] | None = None,
+    _delivery_context: dict[str, Any] | None = None,
+) -> bool:
     """Return whether one dependency obligation has been discharged.
 
     Supersession preserves the obligation: a predecessor is satisfied only when every
@@ -345,9 +359,16 @@ def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | 
         raw = dep.get("superseded_by")
         successors = [raw] if isinstance(raw, str) and raw.strip() else list(raw) if isinstance(raw, list) else []
         successors = [slug(str(item)) for item in successors if str(item).strip()]
-        return bool(successors) and all(dependency_satisfied(run, phase, successor, seen) for successor in successors)
+        return bool(successors) and all(
+            dependency_satisfied(
+                run,phase,successor,_seen=seen,_delivery_context=_delivery_context,
+            )
+            for successor in successors
+        )
     if dep.get("requires_integration"):
-        return dep.get("status") == "integrated" and integration_delivered(run,phase,dep)
+        return dep.get("status") == "integrated" and integration_delivered(
+            run,phase,dep,delivery_context=_delivery_context,
+        )
     if dep.get("status") not in {"accepted", "integrated"}:
         return False
     # Verification and phase gates are predicates, not merely evidence-producing

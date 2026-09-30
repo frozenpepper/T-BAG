@@ -66,10 +66,12 @@ The adapter never polls idleness, chooses models/tasks, launches additional work
 
 ## Status display
 
-The status UI is additive and read-only. Both host generations render the existing `TBag/tools/tbag_status.py` snapshot: registered-plan progress, phase gates, active Grunt/Analyst sessions, task purpose, model, process/observer health, elapsed/deadline state and attention items. Presentation never ticks, launches, retires, accepts or integrates work.
+The status UI is additive, read-only and **dormant by default**. Merely installing T-BAG must not start a status subprocess, Git scan, event-driven refresh loop or animation timer. Both host generations render the existing `TBag/tools/tbag_status.py` snapshot only when the Human opens `/tbag`; while that panel/route is open it refreshes asynchronously at a low cadence. Closing it stops the refresh. Presentation never ticks, launches, retires, accepts or integrates work.
 
-- **OpenCode 1.x:** the installer writes `.opencode/plugins/tbag-status-tui-v1.tsx` and merges `./plugins/tbag-status-tui-v1.tsx` into the local TUI config. `/tbag` opens the detail route; the sidebar carries the compact status card. The v1 companion id is `tbag.status.v1`.
-- **OpenCode 2.x:** the installer writes the existing `.opencode/plugins/tbag-ui/` companion and removes T-BAG's stale v1 file/config registration when upgrading across the major-version boundary.
+A session-bound status request is strict: if the current OpenCode session is not recorded as a parent of a T-BAG run, status reports no bound run instead of falling back to some unrelated or historical run.
+
+- **OpenCode 1.x:** the installer writes `.opencode/plugins/tbag-status-tui-v1.tsx` and merges `./plugins/tbag-status-tui-v1.tsx` into the local TUI config. `/tbag` opens the detail route; cached status may appear in the sidebar after the dashboard has been opened. The v1 companion id is `tbag.status.v1`.
+- **OpenCode 2.x:** the installer writes the existing `.opencode/plugins/tbag-ui/` companion and removes T-BAG's stale v1 file/config registration when upgrading across the major-version boundary. Footer/sidebar status is cache-only outside the open dashboard.
 - **Unknown/unsupported major:** transport still installs, but presentation is deliberately skipped rather than guessing an incompatible TUI API.
 
 ### Fast troubleshooting

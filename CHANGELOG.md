@@ -2,6 +2,14 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC70 — dormant status surfaces and cheap snapshots
+
+- Corrected the status architecture: installing T-BAG no longer means running T-BAG. OpenCode 1.x and 2.x status companions do no recurring status work while the dashboard is closed—no Python snapshot subprocess, generic-event refresh loop, or idle animation timer. Opening `/tbag` performs an immediate asynchronous refresh and refreshes only while that route/panel remains open.
+- Removed synchronous `spawnSync` from both OpenCode status companions. Dashboard refresh uses asynchronous Bun subprocesses with stdio piped away from the controlling terminal and overlapping reads coalesced; the open-dashboard cadence is 60 seconds.
+- Made session-bound status lookup strict. A current OpenCode session with no T-BAG parent binding can no longer fall back to a stopped, active-but-unrelated, or historical run.
+- Collapsed repeated delivery identity work inside one snapshot/audit pass: primary branch + HEAD are captured once, recursive dependency checks reuse them, and commit ancestry proofs are memoized against that captured HEAD. This removes the field-observed O(tasks) branch/HEAD fork storm without weakening delivery truth.
+- Added regressions for v1/v2 dormancy, strict session affinity and shared delivery identity.
+
 ## v2.2.0 RC69 — nonblocking heartbeat and transport hygiene
 
 - Replaced the OpenCode heartbeat's synchronous `Bun.spawnSync` Python pulse with an asynchronous subprocess. Completion probes are coalesced per session/run while one is in flight, preserving the same 60-second semantics without blocking the host event loop or stacking overlapping pulse processes.

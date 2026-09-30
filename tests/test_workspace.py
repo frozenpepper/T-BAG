@@ -1,5 +1,6 @@
 import json, subprocess, sys, tempfile, unittest, time
 from pathlib import Path
+from unittest import mock
 SCRIPTS=Path(__file__).resolve().parents[1]/"scripts"; sys.path.insert(0,str(SCRIPTS))
 import dsd_task, dsd_workspace, scope_snapshot
 
@@ -57,6 +58,27 @@ class WorkspaceTests(unittest.TestCase):
         r=A();r.run_root=self.run;r.phase_id="P";r.task_id=tid;r.outcome="pass";r.report=report;dsd_task.command_review(r)
         a=A();a.run_root=self.run;a.phase_id="P";a.task_id=tid;a.report=report;dsd_task.command_accept(a)
 
+
+    def test_shared_delivery_context_reads_primary_identity_once(self):
+        tids=("LEGACY-STATUS-A","LEGACY-STATUS-B")
+        for tid in tids:
+            self.register(tid)
+            task=dsd_task.load_task(self.run,"P",tid)
+            task["status"]="integrated"
+            dsd_task.write_json(dsd_task.task_file(self.run,"P",tid),task)
+        with mock.patch.object(dsd_workspace,"primary_branch",wraps=dsd_workspace.primary_branch) as branch_probe, \
+             mock.patch.object(dsd_workspace,"git_text",wraps=dsd_workspace.git_text) as git_probe:
+            context=dsd_workspace.primary_delivery_context(self.run)
+            identity_calls=git_probe.call_count
+            self.assertEqual(branch_probe.call_count,1)
+            self.assertEqual(identity_calls,2)
+            for tid in tids:
+                task=dsd_task.load_task(self.run,"P",tid)
+                self.assertFalse(dsd_task.dependency_satisfied(
+                    self.run,"P",tid,_delivery_context=context,
+                ))
+            self.assertEqual(branch_probe.call_count,1)
+            self.assertEqual(git_probe.call_count,identity_calls)
 
     def test_integrate_can_collapse_explicit_reviewer_pass_accept_and_land(self):
         self.register("T-FAST-LAND"); ws=self.ws("T-FAST-LAND"); wt=Path(ws["worktree"]); (wt/"a.txt").write_text("landed\n")

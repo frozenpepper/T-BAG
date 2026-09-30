@@ -4,7 +4,7 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule, TuiSlotPlugin } from "@o
 import { For, Show, createSignal, onCleanup } from "solid-js"
 import path from "node:path"
 
-const REFRESH_MS = 5000
+const REFRESH_MS = 60000
 const ROUTE = "tbag"
 const MODE = "tbag.status.v1"
 
@@ -119,21 +119,26 @@ const tui: TuiPlugin = async (api) => {
     return value || lastSessionID
   }
 
-  function readSnapshot(sessionID?: string) {
+  async function readSnapshot(sessionID?: string) {
     const root = projectRoot()
     if (!root || !sessionID || refreshing.has(sessionID)) return
     refreshing.add(sessionID)
     try {
       const bun = (globalThis as any).Bun
-      if (!bun?.spawnSync) return
+      if (!bun?.spawn) return
       const tool = path.join(root, "TBag", "tools", "tbag_status.py")
-      const result = bun.spawnSync([
+      const process = bun.spawn([
         "python3", tool,
         "--project-root", root,
         "--parent-session-id", sessionID,
-      ], { stdout: "pipe", stderr: "pipe" })
-      if (result.exitCode !== 0) return
-      const text = new TextDecoder().decode(result.stdout || new Uint8Array()).trim()
+      ], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      const [exitCode, stdout] = await Promise.all([
+        process.exited,
+        new Response(process.stdout).text(),
+        new Response(process.stderr).text(),
+      ])
+      if (exitCode !== 0) return
+      const text = stdout.trim()
       if (!text) return
       const value = JSON.parse(text)
       if (value?.format !== "tbag-status-v1") return
@@ -147,9 +152,7 @@ const tui: TuiPlugin = async (api) => {
 
   function snapshot(sessionID?: string) {
     if (!sessionID) return null
-    const current = snapshots()[sessionID] ?? null
-    if (!current) queueMicrotask(() => readSnapshot(sessionID))
-    return current
+    return snapshots()[sessionID] ?? null
   }
 
   api.slots.register(sidebarPlugin(api, snapshot, remember))
@@ -162,7 +165,10 @@ const tui: TuiPlugin = async (api) => {
         onCleanup(popMode)
         const sessionID = sessionFromRoute()
         const s = () => snapshot(sessionID)
-        queueMicrotask(() => readSnapshot(sessionID))
+        const timer = setInterval(() => { void readSnapshot(sessionID) }, REFRESH_MS)
+        ;(timer as any).unref?.()
+        queueMicrotask(() => { void readSnapshot(sessionID) })
+        onCleanup(() => clearInterval(timer))
         return (
           <box flexDirection="column" padding={1}>
             <Show when={s()} fallback={<text>T-BAG status unavailable for this session.</text>}>
@@ -207,7 +213,7 @@ const tui: TuiPlugin = async (api) => {
         run: () => {
           const sessionID = sessionFromRoute()
           if (!sessionID) return
-          readSnapshot(sessionID)
+          void readSnapshot(sessionID)
           api.route.navigate(ROUTE, { sessionID })
         },
       },
@@ -227,10 +233,7 @@ const tui: TuiPlugin = async (api) => {
     }],
   })
 
-  const timer = setInterval(() => readSnapshot(sessionFromRoute()), REFRESH_MS)
-  ;(timer as any).unref?.()
-  queueMicrotask(() => readSnapshot(sessionFromRoute()))
-  api.lifecycle.onDispose(() => clearInterval(timer))
+  // Deliberately no global refresh timer: installed must not mean active.
 }
 
 export default {

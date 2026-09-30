@@ -15,6 +15,18 @@ import parent_tick
 import scope_snapshot
 
 
+class OpenCodeStatusDormancyTests(unittest.TestCase):
+    def test_v2_status_companion_is_demand_driven(self):
+        text=(ROOT/"adapters"/"opencode"/"tbag-ui"/"tui.tsx").read_text()
+        self.assertIn("const REFRESH_MS = 60000",text)
+        self.assertIn("Bun.spawn([",text)
+        self.assertNotIn("spawnSync",text)
+        self.assertNotIn("context.data.listen",text)
+        self.assertNotIn("queueMicrotask(refreshCurrent)",text)
+        self.assertNotIn("const clock = setInterval",text)
+        self.assertIn("onCleanup(() => clearInterval(timer))",text)
+
+
 class CanonicalScopeEvidenceTests(unittest.TestCase):
     def test_inline_and_path_scope_evidence_share_one_reader(self):
         inline = {"changed_count": 0, "changed_since_attempt_baseline": []}

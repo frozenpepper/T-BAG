@@ -1,9 +1,9 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { For, Show, createSignal } from "solid-js"
+import { For, Show, createSignal, onCleanup } from "solid-js"
 
 declare const Bun: any
 
-const REFRESH_MS = 5000
+const REFRESH_MS = 60000
 
 type Snapshot = Record<string, any>
 
@@ -122,6 +122,14 @@ function Dashboard(props: { snapshot: Snapshot | null; panel: any; frame: number
   )
 }
 
+function LiveDashboard(props: { snapshot: Snapshot | null; panel: any; refresh: () => void }) {
+  const timer = setInterval(props.refresh, REFRESH_MS)
+  ;(timer as unknown as { unref?: () => void }).unref?.()
+  queueMicrotask(props.refresh)
+  onCleanup(() => clearInterval(timer))
+  return <Dashboard snapshot={props.snapshot} panel={props.panel} frame={0} />
+}
+
 export default Plugin.define({
   id: "tbag.status.tui",
   setup(context) {
@@ -134,18 +142,23 @@ export default Plugin.define({
       return route?.type === "session" ? route.sessionID : undefined
     }
 
-    function readSnapshot(sessionID: string) {
+    async function readSnapshot(sessionID: string) {
       if (!projectRoot || !sessionID || refreshing.has(sessionID)) return
       refreshing.add(sessionID)
       try {
         const tool = `${projectRoot}/TBag/tools/tbag_status.py`
-        const result = Bun.spawnSync([
+        const process = Bun.spawn([
           "python3", tool,
           "--project-root", projectRoot,
           "--parent-session-id", sessionID,
-        ], { stdout: "pipe", stderr: "pipe" })
-        if (result.exitCode !== 0) return
-        const text = new TextDecoder().decode(result.stdout || new Uint8Array()).trim()
+        ], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+        const [exitCode, stdout] = await Promise.all([
+          process.exited,
+          new Response(process.stdout).text(),
+          new Response(process.stderr).text(),
+        ])
+        if (exitCode !== 0) return
+        const text = stdout.trim()
         if (!text) return
         const value = JSON.parse(text)
         if (value?.format !== "tbag-status-v1") return
@@ -159,33 +172,8 @@ export default Plugin.define({
 
     function snapshot(sessionID?: string) {
       if (!sessionID) return null
-      const current = snapshots()[sessionID] ?? null
-      if (!current) queueMicrotask(() => readSnapshot(sessionID))
-      return current
+      return snapshots()[sessionID] ?? null
     }
-
-    function refreshCurrent() {
-      const sessionID = currentSessionID()
-      if (sessionID) readSnapshot(sessionID)
-    }
-
-    const timer = setInterval(refreshCurrent, REFRESH_MS)
-    ;(timer as unknown as { unref?: () => void }).unref?.()
-    queueMicrotask(refreshCurrent)
-
-    // Animation clock. Slot renders read frame() (footer spinner, panel wave
-    // bar and pulse), so every host re-render advances the motion. Cheap:
-    // one tiny signal, cleared with everything else on dispose.
-    const [frame, setFrame] = createSignal(0)
-    const clock = setInterval(() => setFrame((f) => (f + 1) % 100000), 500)
-    ;(clock as unknown as { unref?: () => void }).unref?.()
-
-    const stopEvents = context.data.listen(() => {
-      // Server/session events are cheap hints. The Python snapshot remains the only
-      // interpretation of T-BAG task state.
-      const sessionID = currentSessionID()
-      if (sessionID) queueMicrotask(() => readSnapshot(sessionID))
-    })
 
     const disposers: Array<() => void> = []
     const keep = (value: unknown) => { if (typeof value === "function") disposers.push(value as () => void) }
@@ -212,7 +200,7 @@ export default Plugin.define({
               run: () => {
                 const sessionID = currentSessionID()
                 if (!sessionID) return
-                readSnapshot(sessionID)
+                void readSnapshot(sessionID)
                 context.ui.panel.open("tbag.status")
               },
             },
@@ -221,9 +209,8 @@ export default Plugin.define({
         const sessionID = currentSessionID()
         const s = snapshot(sessionID)
         if (!s) return null
-        const f = frame()
         const live = (s.worker_budget?.live ?? 0) > 0
-        const spin = live ? SPINNER[f % SPINNER.length] : "●"
+        const spin = live ? SPINNER[0] : "●"
         const warn = s.attention?.length ? ` · ⚠${s.attention.length}` : ""
         return <text><span style={{ fg: live ? "#4ade80" : "#9ca3af" }}>{spin}</span>{` T-BAG ${String(s.run?.status ?? "?").toUpperCase()} · ${s.current_phase?.phase_id ?? "—"} · ${progressBar(s.progress?.registered_percent, 8)} ${s.progress?.registered_percent ?? 0}% · A${s.analysts_active?.length ?? 0}/G${s.grunts_active?.length ?? 0}${warn}`}</text>
       },
@@ -234,9 +221,8 @@ export default Plugin.define({
       render: ({ sessionID }: any) => {
         const s = snapshot(sessionID)
         if (!s) return null
-        const f = frame()
         const live = (s.worker_budget?.live ?? 0) > 0
-        const spin = live ? SPINNER[f % SPINNER.length] : "●"
+        const spin = live ? SPINNER[0] : "●"
         return (
           <box flexDirection="column" marginTop={1}>
             <text><span style={{ fg: live ? "#4ade80" : "#9ca3af" }}>{spin}</span>{` T-BAG · ${s.progress?.registered_percent ?? 0}% · ${s.worker_budget?.live ?? 0}/${s.worker_budget?.max ?? 0} workers`}</text>
@@ -254,15 +240,16 @@ export default Plugin.define({
       append: "session.panel",
       render: (panel: any) => (
         <Show when={panel.name === "tbag.status"}>
-          <Dashboard snapshot={snapshot(panel.sessionID)} panel={panel} frame={frame()} />
+          <LiveDashboard
+            snapshot={snapshot(panel.sessionID)}
+            panel={panel}
+            refresh={() => { if (panel.sessionID) void readSnapshot(panel.sessionID) }}
+          />
         </Show>
       ),
     }))
 
     return () => {
-      clearInterval(timer)
-      clearInterval(clock)
-      stopEvents?.()
       for (const dispose of disposers.reverse()) dispose()
     }
   },

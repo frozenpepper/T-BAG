@@ -135,8 +135,13 @@ class OpenCodeInstallerVersionTests(unittest.TestCase):
         self.assertIn('api.slots.register(', text)
         self.assertIn('slashName: "tbag"', text)
         self.assertIn('api.route.register', text)
-        self.assertIn('api.lifecycle.onDispose', text)
         self.assertIn('id: "tbag.status.v1"', text)
+        self.assertIn('const REFRESH_MS = 60000', text)
+        self.assertIn('bun.spawn([', text)
+        self.assertIn('await Promise.all([', text)
+        self.assertNotIn('spawnSync', text)
+        self.assertNotIn('queueMicrotask(() => readSnapshot(sessionFromRoute()))', text)
+        self.assertNotIn('setInterval(() => readSnapshot(sessionFromRoute())', text)
 
 
 if __name__ == "__main__":

@@ -64,20 +64,53 @@ def legacy_delivery_repair_hint(run: Path, phase: str, task: dict[str, Any]) -> 
     }
 
 
-def task_delivery_status(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any]:
-    """Prove that a claimed integration is committed on the run's primary branch."""
+def primary_delivery_context(run: Path) -> dict[str, Any]:
+    """Capture primary Git identity once for one read-only delivery pass."""
+    run=run.resolve()
+    info=dsd_task.load_run(run)
+    primary=Path(str(info["project_root"])).resolve()
+    context: dict[str, Any]={
+        "run_root":str(run),
+        "primary":str(primary),
+        "expected_branch":str(info.get("primary_branch") or ""),
+        "current_branch":None,
+        "current_head":None,
+        "error":None,
+        "commit_proofs":{},
+    }
+    try:
+        context["current_branch"]=primary_branch(primary)
+        context["current_head"]=git_text(primary,"rev-parse","HEAD")
+    except (OSError,ValueError) as exc:
+        context["error"]=str(exc)
+    return context
+
+
+def task_delivery_status(
+    run: Path,
+    phase: str,
+    task: dict[str, Any],
+    *,
+    delivery_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Prove that a claimed integration is committed on the captured primary HEAD."""
     tid=str(task.get("task_id") or "")
     if not task.get("requires_integration"):
         return {"task_id":tid,"required":False,"verified":True}
     if str(task.get("status") or "")!="integrated":
         return {"task_id":tid,"required":True,"verified":False,"reason":"task-not-integrated"}
-    info=dsd_task.load_run(run); primary=Path(str(info["project_root"])).resolve()
-    try:
-        current_branch=primary_branch(primary)
-        current_head=git_text(primary,"rev-parse","HEAD")
-    except ValueError as exc:
-        return {"task_id":tid,"required":True,"verified":False,"reason":"primary-branch-unavailable","error":str(exc)}
-    expected_run_branch=str(info.get("primary_branch") or "")
+    context=delivery_context if delivery_context is not None else primary_delivery_context(run)
+    if delivery_context is not None and str(context.get("run_root") or "")!=str(run.resolve()):
+        raise ValueError("delivery context belongs to a different T-BAG run")
+    primary=Path(str(context.get("primary") or "")).resolve()
+    current_branch=str(context.get("current_branch") or "")
+    current_head=str(context.get("current_head") or "")
+    if context.get("error") or not current_branch or not current_head:
+        return {
+            "task_id":tid,"required":True,"verified":False,"reason":"primary-branch-unavailable",
+            "error":str(context.get("error") or "primary Git identity unavailable"),
+        }
+    expected_run_branch=str(context.get("expected_branch") or "")
     integration_branch=str(task.get("integration_branch") or "")
     commit=str(task.get("integration_commit") or "")
     base={
@@ -105,16 +138,27 @@ def task_delivery_status(run: Path, phase: str, task: dict[str, Any]) -> dict[st
         return {**base,"verified":False,"reason":"delivery-receipt-mismatch"}
     if integration_branch!=current_branch:
         return {**base,"verified":False,"reason":"integration-branch-not-current"}
-    if run_cmd(["git","cat-file","-e",f"{commit}^{{commit}}"],primary,check=False).returncode!=0:
+    proofs=context.setdefault("commit_proofs",{})
+    proof_key=f"{commit}@{current_head}"
+    proof=proofs.get(proof_key)
+    if not isinstance(proof,dict):
+        exists=run_cmd(["git","cat-file","-e",f"{commit}^{{commit}}"],primary,check=False).returncode==0
+        ancestor=bool(
+            exists
+            and run_cmd(["git","merge-base","--is-ancestor",commit,current_head],primary,check=False).returncode==0
+        )
+        proof={"exists":exists,"ancestor":ancestor}
+        proofs[proof_key]=proof
+    if not proof.get("exists"):
         return {**base,"verified":False,"reason":"integration-commit-missing"}
-    if run_cmd(["git","merge-base","--is-ancestor",commit,"HEAD"],primary,check=False).returncode!=0:
+    if not proof.get("ancestor"):
         return {**base,"verified":False,"reason":"integration-commit-not-on-primary-head"}
     return {**base,"verified":True}
 
 
 def delivery_audit(run: Path, phase_id: str | None = None) -> dict[str, Any]:
     """Read-only delivery truth. Lifecycle labels never substitute for Git ancestry."""
-    run=run.resolve(); info=dsd_task.load_run(run); primary=Path(str(info["project_root"])).resolve()
+    run=run.resolve(); context=primary_delivery_context(run)
     selected=dsd_task.slug(phase_id) if phase_id else None
     claimed=[]
     for task in dsd_task.iter_run_tasks(run):
@@ -122,20 +166,24 @@ def delivery_audit(run: Path, phase_id: str | None = None) -> dict[str, Any]:
         if selected and phase!=selected: continue
         if task.get("requires_integration") and str(task.get("status") or "")=="integrated":
             claimed.append((phase,task))
-    blockers=[]; verified=0; expected=str(info.get("primary_branch") or "")
-    try:
-        branch=primary_branch(primary); head=git_text(primary,"rev-parse","HEAD")
-    except (OSError,ValueError):
+    blockers=[]; verified=0; expected=str(context.get("expected_branch") or "")
+    branch=str(context.get("current_branch") or "") or None
+    head=str(context.get("current_head") or "") or None
+    if context.get("error") or not branch or not head:
         if expected or claimed:
-            blockers.append({"reason":"primary-branch-unavailable","expected_branch":expected or None})
+            blockers.append({
+                "reason":"primary-branch-unavailable",
+                "expected_branch":expected or None,
+                "error":str(context.get("error") or "primary Git identity unavailable"),
+            })
         return {
-            "verified":not blockers,"branch":None,"head":None,"expected_branch":expected or None,
+            "verified":not blockers,"branch":branch,"head":head,"expected_branch":expected or None,
             "verified_integrations":0,"blockers":blockers,
         }
     if expected and branch!=expected:
         blockers.append({"reason":"primary-branch-changed","expected_branch":expected,"current_branch":branch})
     for phase,task in claimed:
-        status=task_delivery_status(run,phase,task)
+        status=task_delivery_status(run,phase,task,delivery_context=context)
         if status.get("verified"): verified+=1
         else: blockers.append(status)
     return {

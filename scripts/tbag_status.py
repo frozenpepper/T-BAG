@@ -13,6 +13,7 @@ from typing import Any
 
 import dsd_attempt
 import dsd_task
+import dsd_workspace
 
 FORMAT = "tbag-status-v1"
 CONTROL_ROLES = {"plan-reviewer", "context-reviewer", "phase-auditor"}
@@ -98,13 +99,22 @@ def _select_run(project_root: Path, run_root: Path | None, parent_session_id: st
     for root in candidates:
         info = _load_json(root / "run.json") or {}
         transport = _transport(root)
-        parent_match = bool(parent_session_id and any(str(x.get("session_id") or "") == parent_session_id for x in transport.get("parent_sessions", [])))
+        parent_match = bool(parent_session_id and any(
+            str(x.get("session_id") or "") == parent_session_id
+            for x in transport.get("parent_sessions", [])
+        ))
+        if parent_session_id and not parent_match:
+            continue
         active = str(info.get("status") or "active") == "active"
         try:
             modified = (root / "run.json").stat().st_mtime
         except OSError:
             modified = 0.0
-        ranked.append(((1 if parent_match else 0, 1 if active else 0, modified), root))
+        ranked.append(((1 if active else 0, modified), root))
+    if not ranked:
+        if parent_session_id:
+            raise ValueError(f"no T-BAG run is bound to OpenCode session {parent_session_id}")
+        raise ValueError(f"no T-BAG runs found under {project_root / 'TBag' / 'runs'}")
     ranked.sort(key=lambda x: x[0], reverse=True)
     return ranked[0][1]
 
@@ -127,17 +137,25 @@ def _objective(task: dict[str, Any]) -> str:
         return str(task.get("task_id") or "task")
 
 
-def _task_done(run: Path, phase: str, task: dict[str, Any]) -> bool:
+def _task_done(
+    run: Path,
+    phase: str,
+    task: dict[str, Any],
+    *,
+    delivery_context: dict[str, Any] | None = None,
+) -> bool:
     if str(task.get("role") or "") in CONTROL_ROLES:
         return False
     if dsd_task.valid_human_cancellation(task):
         return not dsd_task.open_review_findings(task)
     try:
-        return bool(dsd_task.dependency_satisfied(run, phase, str(task.get("task_id") or "")))
+        return bool(dsd_task.dependency_satisfied(
+            run,phase,str(task.get("task_id") or ""),_delivery_context=delivery_context,
+        ))
     except Exception:
         status = str(task.get("status") or "")
         if status=="integrated":
-            return dsd_task.integration_delivered(run,phase,task)
+            return dsd_task.integration_delivered(run,phase,task,delivery_context=delivery_context)
         return status == "accepted" and not task.get("requires_integration")
 
 
@@ -227,6 +245,7 @@ def build_snapshot(project_root: Path, *, run_root: Path | None = None, parent_s
     run = _select_run(project_root, run_root, parent_session_id)
     info = dsd_task.load_run(run)
     transport = _transport(run)
+    delivery_context = dsd_workspace.primary_delivery_context(run)
     phases_root = run / "phases"
     phase_ids = sorted(p.name for p in phases_root.iterdir() if p.is_dir()) if phases_root.is_dir() else []
     phases = []
@@ -249,7 +268,7 @@ def build_snapshot(project_root: Path, *, run_root: Path | None = None, parent_s
                 control = role in CONTROL_ROLES
                 obsolete = str(task.get("status") or "") == "superseded"
                 countable = not control and not obsolete
-                done = _task_done(run, phase, task)
+                done = _task_done(run,phase,task,delivery_context=delivery_context)
                 if countable:
                     registered_total += 1
                     if done:

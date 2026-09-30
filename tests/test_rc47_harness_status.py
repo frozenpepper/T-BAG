@@ -111,6 +111,22 @@ class RendererTests(unittest.TestCase):
             lines = tbag_render.render_claude_payload({"cwd": "/tmp", "model": {"display_name": "Sonnet"}}, width=100, color=False)
         self.assertEqual(lines, ["T-BAG ○ no active run · Sonnet"])
 
+    def test_session_bound_status_never_falls_back_to_unrelated_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)/"project"; project.mkdir()
+            for name,session,status in (("old","ses-old","completed"),("active","ses-other","active")):
+                run=project/"TBag"/"runs"/name; run.mkdir(parents=True)
+                dsd_task.write_json(run/"run.json",{
+                    "format":dsd_task.RUN_FORMAT,"run_id":name,"project_root":str(project),
+                    "runtime_root":str(project/"TBag"/"runtime"/name),"status":status,"max_workers":1,
+                })
+                transport=run/".transport"; transport.mkdir()
+                dsd_task.write_json(transport/"opencode.json",{
+                    "parent_sessions":[{"session_id":session}],
+                })
+            with self.assertRaisesRegex(ValueError,"no T-BAG run is bound"):
+                tbag_status.build_snapshot(project,parent_session_id="ses-current")
+
     def test_status_counts_live_launch_preparation_as_preparing_worker(self):
         with tempfile.TemporaryDirectory() as td:
             project=Path(td)/"project"; project.mkdir()
