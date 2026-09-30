@@ -139,6 +139,42 @@ class RendererTests(unittest.TestCase):
 
 
 class InstallerTests(unittest.TestCase):
+    def test_opencode_adapter_drift_compares_project_copy_to_current_skill(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td); run=project/'TBag'/'runs'/'R'; run.mkdir(parents=True)
+            dsd_task.write_json(run/'run.json',{
+                'format':dsd_task.RUN_FORMAT,'run_id':'R','status':'active',
+                'project_root':str(project),'runtime_root':str(project/'TBag'/'runtime'/'R'),
+            })
+            transport=run/'.transport'; transport.mkdir(); (transport/'opencode.json').write_text('{}\n')
+            opencode=project/'.opencode'; (opencode/'plugins').mkdir(parents=True)
+            (opencode/'tbag-activation.json').write_text(json.dumps({'transport_generation':'v1'})+'\n')
+            src_transport=ROOT/'adapters'/'opencode'/'tbag.js'
+            src_core=ROOT/'adapters'/'tbag-opencode-transport-core.js'
+            installed_transport=opencode/'plugins'/'tbag.js'; installed_transport.write_text(src_transport.read_text())
+            installed_core=opencode/'tbag-opencode-transport-core.js'; installed_core.write_text(src_core.read_text())
+            self.assertIsNone(install_harness_adapter.opencode_project_adapter_drift(run))
+            installed_core.write_text(installed_core.read_text()+'\n// stale project copy\n')
+            drift=install_harness_adapter.opencode_project_adapter_drift(run)
+            self.assertEqual(drift['reason'],'project-opencode-adapter-stale')
+            self.assertEqual(drift['mismatches'][0]['component'],'transport-core')
+
+    def test_plugin_backups_live_outside_autoload_dir_and_old_debris_is_pruned(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td); plugins=project/'.opencode'/'plugins'; plugins.mkdir(parents=True)
+            installed=plugins/'tbag.js'; installed.write_text('old\n')
+            stale=plugins/'tbag.js.dsd-backup-20260901T000000Z'; stale.write_text('stale\n')
+            legacy_tui=plugins/'tbag-status-tui.tsx'; legacy_tui.write_text('obsolete\n')
+            source=project/'source.js'; source.write_text('new\n')
+            result=install_harness_adapter.install_plugin_file(project,'opencode',Path('.opencode/plugins/tbag.js'),source)
+            backup=Path(result['backup'])
+            self.assertTrue(backup.is_file())
+            self.assertIn(str(project/'TBag'/'harness'/'backups'/'opencode'),str(backup))
+            self.assertNotEqual(backup.parent,plugins)
+            removed=install_harness_adapter.prune_opencode_plugin_debris(project)
+            self.assertIn(str(stale),removed); self.assertIn(str(legacy_tui),removed)
+            self.assertFalse(stale.exists()); self.assertFalse(legacy_tui.exists())
+
     def test_claude_installs_native_refreshing_status_line_when_free(self):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td)

@@ -80,6 +80,7 @@ class PoisonedSessionTests(unittest.TestCase):
             updated=dsd_task.load_json(task_root/"task.json")
             self.assertEqual(updated["status"],"planned")
             self.assertEqual(updated["abandoned_sessions"],["ses-poison"])
+            self.assertEqual(updated["attempts"][-1]["status"],"session-poisoned")
             self.assertEqual(out["poisoned_sessions"][0]["action"],"retry-same-role-retained-workspace")
             self.assertEqual(out["poisoned_sessions"][0]["cold_retry_role"],"verification")
 

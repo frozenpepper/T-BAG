@@ -84,6 +84,21 @@ class Rc45ParentTickTests(unittest.TestCase):
         state={"run_id":"R","run_status":"active","worker_budget":{"max":2,"live":0,"free":2},"backlog_count":0,"waiting_dependency_count":0}
         state.update(extra); return state
 
+    def test_tick_poison_scan_precedes_scheduling_and_stale_adapter_stops_advance(self):
+        order=[]
+        state=self.base_state(backlog_count=1)
+        with mock.patch.object(parent_tick.dsd_task,'load_run',return_value={'status':'active'}), \
+             mock.patch.object(parent_tick.dsd_task,'command_poison_scan',side_effect=lambda *a,**k: order.append('poison') or {'count':0}), \
+             mock.patch.object(parent_tick.install_harness_adapter,'opencode_project_adapter_drift',side_effect=lambda *a,**k: order.append('drift') or {'reason':'project-opencode-adapter-stale','repair':'rerun installer'}), \
+             mock.patch.object(parent_tick.dsd_task,'command_advance',side_effect=lambda *a,**k: order.append('advance') or {'stopped':'quiescent'} ) as advance, \
+             mock.patch.object(parent_tick,'reconcile',return_value=state), \
+             mock.patch.object(parent_tick.dsd_task,'command_owner_status',return_value={'status':'ok'}):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(order,['poison','drift'])
+        advance.assert_not_called()
+        self.assertEqual(out['classification'],'harness-drift')
+        self.assertEqual(out['control_error']['code'],'harness-drift')
+
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
     @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})

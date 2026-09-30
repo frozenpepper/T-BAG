@@ -18,6 +18,7 @@ from typing import Any
 
 import dsd_task
 import dsd_workspace
+import install_harness_adapter
 import report_surface as report_surface_helper
 from _roles import DEFAULT_TIER, ROLE_NAMES
 from _rules_snapshot import rules_revisions, verify_snapshot
@@ -507,6 +508,12 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     run_status=str(info.get("status") or "active")
     if run_status!="active":
         raise ValueError(f"run is {run_status!r}; set run status active before launching more workers")
+    adapter_drift=install_harness_adapter.opencode_project_adapter_drift(run)
+    if adapter_drift is not None:
+        raise ValueError(
+            "HARNESS_DRIFT: project-local OpenCode T-BAG adapter files do not match the installed skill generation; "
+            "rerun install_harness_adapter.py for this project and restart/reload OpenCode if requested before launching workers"
+        )
     delivery=dsd_workspace.delivery_audit(run)
     if delivery.get("blockers"):
         first=(delivery.get("blockers") or [{}])[0]

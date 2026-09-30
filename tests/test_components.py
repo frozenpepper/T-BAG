@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SCRIPTS=ROOT/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-import dsd_task, dsd_attempt, report_surface, run_worker
+import dsd_task, dsd_attempt, report_surface, run_worker, install_harness_adapter
 from _rules_snapshot import verify_snapshot
 
 
@@ -551,21 +551,24 @@ class ComponentsTests(unittest.TestCase):
         groups=dsd_attempt.task_input_groups(self.run,'P1',task,'fixer',[])
         self.assertIn(str(review_report.resolve()),groups['review_finding'])
 
-    def test_encrypted_content_nonretryable_resume_poison_trips_after_three_not_consecutive(self):
+    def test_encrypted_content_nonretryable_resume_poison_trips_on_first_failure(self):
         self.register_impl('T-ENC')
         task=dsd_task.load_task(self.run,'P1','T-ENC')
         error='Upstream request failed: [invalid_request_error] reasoning encrypted_content was not issued to this caller HTTP 400 isRetryable: false'
-        attempts=[]
-        for n in range(1,4):
-            attempts.append(self._write_failed_resume_attempt('T-ENC',f'fixer-{n}','fixer','ses-enc',changed=1,provider_error=error))
-            if n<3:
-                attempts.append(self._write_failed_resume_attempt('T-ENC',f'discovery-{n}','discovery',f'ses-noise-{n}',changed=0))
-        task['attempts']=attempts; task['status']='active'
+        task['attempts']=[self._write_failed_resume_attempt('T-ENC','fixer-1','fixer','ses-enc',changed=1,provider_error=error)]
+        task['status']='active'
         candidate=dsd_task.poisoned_session_candidate(task)
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate['reason'],'deterministic-provider-session-poison')
-        self.assertEqual(candidate['deterministic_provider_failures'],3)
-        self.assertEqual(candidate['provider_failures']['resume-encrypted-content-caller-mismatch'],3)
+        self.assertEqual(candidate['deterministic_provider_failures'],1)
+        self.assertEqual(candidate['provider_failures']['resume-encrypted-content-caller-mismatch'],1)
+
+    def test_direct_launch_rejects_stale_opencode_adapter_before_worker_setup(self):
+        self.register_impl('T-DRIFT')
+        args=SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-DRIFT')
+        with mock.patch.object(install_harness_adapter,'opencode_project_adapter_drift',return_value={'reason':'project-opencode-adapter-stale'}):
+            with self.assertRaisesRegex(ValueError,'HARNESS_DRIFT'):
+                dsd_attempt._command_launch(args)
 
     def test_attempt_budget_blocks_once_and_human_can_park_then_resume_new_window(self):
         self.register_impl('T-BUDGET')

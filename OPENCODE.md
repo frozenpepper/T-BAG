@@ -4,7 +4,7 @@ Load when the premium parent runs in OpenCode. Worker transport is separate (`wo
 
 ## Startup / upgrade check
 
-Refresh the project-local adapter once when an OpenCode parent starts or resumes T-BAG:
+Refresh the project-local adapter when an OpenCode parent starts or resumes T-BAG. Active ticks and direct launches also compare the copied transport/core against this installed skill generation and stop on drift:
 
 ```bash
 python3 <skill>/scripts/install_harness_adapter.py --harness opencode --project-root <project>
@@ -83,7 +83,7 @@ After a restart, open OpenCode's built-in **Plugins** dialog. On 1.x this is the
 
 Observer registrations are mirrored into run-local `.transport/opencode.json` only as disposable transport diagnostics. Durable task/run files remain semantic authority. Missing observer state is a reason to re-arm the exact live attempt, not evidence that the task failed.
 
-Repeated same-session failures are transport facts, not Analyst work. After three cumulative zero-movement failures of the currently failing session/role—or three narrowly recognized deterministic nonretryable provider/session failures such as encrypted reasoning content issued to another caller—the session is abandoned and the same role is cold-retried on the retained workspace. Unrelated attempts may interleave without resetting this count. The per-task automatic-attempt budget still bounds total burn and escalates to one Human decision when exhausted.
+Repeated same-session failures are transport facts, not Analyst work. Three cumulative zero-movement failures remain the generic futility bound; a narrowly recognized deterministic nonretryable provider/session failure such as encrypted reasoning content issued to another caller is one-strike `session-poisoned`. The conversation is abandoned and the same role cold-retries on the retained workspace. Unrelated attempts do not reset the generic count. The per-task automatic-attempt budget still bounds total burn.
 
 ## Forbidden substitutes
 

@@ -36,7 +36,7 @@ SUPPORTED_WORKER_DRIVERS = {"opencode", "opencode2", "codex", "claude"}
 DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
 DEFAULT_MAX_ATTEMPTS_PER_TASK = 10
 DEFAULT_SESSION_FAILURE_LIMIT = 3
-DETERMINISTIC_SESSION_FAILURE_LIMIT = 3
+DETERMINISTIC_SESSION_FAILURE_LIMIT = 1
 RUN_STATUSES = {"active", "completed", "human-blocked", "paused-by-user", "abandoned"}
 STATUSES = {
     "planned", "ready", "active", "awaiting-review", "needs-fix", "needs-analysis",
@@ -44,7 +44,7 @@ STATUSES = {
 }
 ATTEMPT_STATUSES = {
     "started", "gated", "report-recovery", "report-resume", "mutating-report-resume",
-    "mutating-report-recovery", "integrity-failed", "stale-unresolved", "capability-routed",
+    "mutating-report-recovery", "session-poisoned", "integrity-failed", "stale-unresolved", "capability-routed",
 }
 KINDS = {"analysis", "implementation", "verification"}
 TIERS = {"analyst", "grunt"}
@@ -1952,7 +1952,7 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     # so an older resumable session may not pull the task backward.
     if status=="recovery-required": return {**base,"action":"launch-recovery"}
 
-    if attempt_status in {"report-recovery","report-resume","mutating-report-resume","mutating-report-recovery"}:
+    if attempt_status in {"report-recovery","report-resume","mutating-report-resume","mutating-report-recovery","session-poisoned"}:
         session=latest.get("session_id") or latest.get("resume_session")
         abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
         if session and str(session) not in abandoned:
@@ -2341,7 +2341,7 @@ def _provider_failure_taxonomy(event: Path) -> dict[str, Any] | None:
 
 def _attempt_failure_fact(attempt: dict[str, Any]) -> dict[str, Any] | None:
     status=str(attempt.get("status") or "")
-    if status not in {"report-resume","report-recovery","mutating-report-resume","mutating-report-recovery"}:
+    if status not in {"report-resume","report-recovery","mutating-report-resume","mutating-report-recovery","session-poisoned"}:
         return None
     terminal=_attempt_terminal(attempt)
     if terminal is None: return None
@@ -2477,6 +2477,7 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
             task=load_json(path)
             if task_has_live_attempt(task): continue
             changed=False
+            attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
             candidate=poisoned_session_candidate(task)
             if candidate is not None:
                 abandoned=task.setdefault("abandoned_sessions",[])
@@ -2485,6 +2486,11 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
                     abandoned.append(sid)
                     history=task.setdefault("session_poison_history",[])
                     history.append({**candidate,"recorded_at":now()})
+                    if attempts:
+                        latest_attempt=attempts[-1]
+                        if str(latest_attempt.get("session_id") or latest_attempt.get("resume_session") or "")==sid:
+                            latest_attempt["status"]="session-poisoned"
+                            latest_attempt["session_poison_reason"]=candidate.get("reason")
                     task["status"]=_cold_retry_status(task,str(candidate.get("role") or ""))
                     poisoned.append({
                         "phase_id":phase,"task_id":tid,**candidate,
@@ -2492,8 +2498,6 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
                         "cold_retry_role":candidate.get("role"),
                     })
                     changed=True
-
-            attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
             checkpoint=max(0,int(task.get("attempt_budget_checkpoint") or 0))
             used=max(0,len(attempts)-checkpoint)
             if used>=max_attempts and task.get("status") not in terminal_statuses|{"blocked"}:

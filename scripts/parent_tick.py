@@ -21,6 +21,7 @@ from typing import Any
 
 import dsd_attempt
 import dsd_task
+import install_harness_adapter
 
 FORMAT = "tbag-parent-loop-v1"
 PULSE_FORMAT = "tbag-parent-pulse-v1"
@@ -324,6 +325,7 @@ def update_due(
     if any(x.get("attention") == "silent-long-running" for x in monitors): urgent.append("worker-stall")
     if classification == "recovery-required": urgent.append("control-recovery-required")
     if classification == "delivery-broken": urgent.append("delivery-broken")
+    if classification == "harness-drift": urgent.append("harness-drift")
     same_acknowledged_condition = signature == last_signature and sorted(urgent) == last_reasons
     if urgent and (last_at is None or not same_acknowledged_condition):
         due, reasons = True, urgent
@@ -584,13 +586,18 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     advance_result: dict[str, Any] | None = None
     info = dsd_task.load_run(run)
     poison_result: dict[str, Any] | None = None
+    adapter_drift: dict[str, Any] | None = None
     if str(info.get("status") or "active") == "active":
-        advance_result = dsd_task.command_advance(args_for(
-            run_root=run,
-            phase_id=getattr(args, "phase_id", None),
-            max_steps=int(getattr(args, "max_steps", 12) or 12),
-        ))
+        # Safety reduction precedes scheduling: a deterministic provider/session poison
+        # must be abandoned before another resume action can even be proposed.
         poison_result = dsd_task.command_poison_scan(args_for(run_root=run,phase_id=getattr(args,"phase_id",None)))
+        adapter_drift = install_harness_adapter.opencode_project_adapter_drift(run)
+        if adapter_drift is None:
+            advance_result = dsd_task.command_advance(args_for(
+                run_root=run,
+                phase_id=getattr(args, "phase_id", None),
+                max_steps=int(getattr(args, "max_steps", 12) or 12),
+            ))
 
     state = reconcile(run, getattr(args, "phase_id", None), sweep=True)
     monitors: list[dict[str, Any]] = []
@@ -685,6 +692,9 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     elif delivery_blockers:
         classification = "delivery-broken"
         turn = "intervene"
+    elif adapter_drift is not None:
+        classification = "harness-drift"
+        turn = "intervene"
     elif completion_candidate(state):
         classification = "completion-candidate"
         turn = "finish-or-replan"
@@ -721,12 +731,12 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     # Human blockers are an interaction boundary, not a status footnote. Independent
     # work may still be launched first, but the parent turn must end in the harness's
     # native question UI rather than an ordinary chat message or silent yield.
-    if questions and not delivery_blockers and run_status not in {"completed","abandoned","paused-by-user"}:
+    if questions and not delivery_blockers and adapter_drift is None and run_status not in {"completed","abandoned","paused-by-user"}:
         classification = "owner-question-required"
         turn = "ask-owner"
 
     run_status_transition = None
-    if durable_questions and not delivery_blockers and run_status == "active" and not pending and not live_now:
+    if durable_questions and not delivery_blockers and adapter_drift is None and run_status == "active" and not pending and not live_now:
         try:
             run_status_transition = dsd_task.command_set_run_status(args_for(
                 run_root=run,
@@ -851,6 +861,13 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             "code":"delivery-broken",
             "message":"T-BAG lifecycle claims integration that Git cannot prove on the primary branch. No new worker may launch until delivery is repaired.",
             "next":"Repair/reconcile primary-branch delivery first. Do not treat task status, review PASS, or checkpoint branches as delivered product.",
+        }
+    if classification == "harness-drift":
+        out["harness_drift"]=adapter_drift
+        out["control_error"]={
+            "code":"harness-drift",
+            "message":"This active OpenCode run is using project-local T-BAG adapter files that no longer match the installed skill generation. New worker scheduling is stopped.",
+            "next":str((adapter_drift or {}).get("repair") or "rerun the T-BAG harness installer before continuing"),
         }
     if classification == "active-idle":
         out["control_error"] = {

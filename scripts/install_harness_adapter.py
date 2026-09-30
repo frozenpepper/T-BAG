@@ -89,6 +89,66 @@ def opencode_activation_token(project_root: Path, transport: dict[str, Any], cor
     return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 
 
+def opencode_project_adapter_drift(run_root: Path) -> dict[str, Any] | None:
+    """Compare the project-local OpenCode transport copy with this installed skill."""
+    run=run_root.resolve()
+    registry=run/".transport"/"opencode.json"
+    if not registry.is_file():
+        return None
+    try:
+        info=load_json(run/"run.json")
+    except (OSError,json.JSONDecodeError):
+        return {"reason":"run-state-missing-or-invalid","run_root":str(run)}
+    project=Path(str(info.get("project_root") or "")).resolve()
+    request_path=project/".opencode"/"tbag-activation.json"
+    try:
+        request=load_json(request_path)
+    except (OSError,json.JSONDecodeError):
+        return {"reason":"activation-request-missing-or-invalid","activation_request":str(request_path)}
+    generation=str(request.get("transport_generation") or "")
+    if generation not in {"v1","v2"}:
+        return {
+            "reason":"activation-generation-unknown",
+            "activation_request":str(request_path),
+            "transport_generation":generation or None,
+        }
+    skill_root=Path(__file__).resolve().parents[1]
+    pairs=[
+        (
+            project/".opencode"/"plugins"/"tbag.js",
+            skill_root/"adapters"/"opencode"/("tbag-v2.js" if generation=="v2" else "tbag.js"),
+            "transport",
+        ),
+        (
+            project/".opencode"/"tbag-opencode-transport-core.js",
+            skill_root/"adapters"/"tbag-opencode-transport-core.js",
+            "transport-core",
+        ),
+    ]
+    mismatches=[]
+    for installed,source,label in pairs:
+        try: installed_hash=hashlib.sha256(installed.read_bytes()).hexdigest()
+        except OSError: installed_hash=None
+        try: source_hash=hashlib.sha256(source.read_bytes()).hexdigest()
+        except OSError: source_hash=None
+        if source_hash is None or installed_hash!=source_hash:
+            mismatches.append({
+                "component":label,
+                "installed":str(installed),
+                "source":str(source),
+                "installed_hash":installed_hash,
+                "source_hash":source_hash,
+            })
+    if not mismatches:
+        return None
+    return {
+        "reason":"project-opencode-adapter-stale",
+        "transport_generation":generation,
+        "mismatches":mismatches,
+        "repair":"rerun install_harness_adapter.py for this project, restart/reload OpenCode if requested, then tick again",
+    }
+
+
 def blocking_harness_question(*, question_id: str, header: str, question: str, options: list[dict[str,str]], after_answer: str) -> dict[str, Any]:
     return {
         "id":question_id,
@@ -262,7 +322,14 @@ def install_plugin_file(project_root: Path, harness: str, destination: Path, sou
     source_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
     path = project_root / destination
     changed = not path.exists() or path.read_text(encoding="utf-8") != source
-    backup_path = backup(path) if changed and path.exists() else None
+    backup_path = None
+    if changed and path.exists():
+        # Never leave backup modules beside auto-loaded plugin files. They are durable
+        # evidence, not plugins, so keep them under TBag/harness where hosts will not load them.
+        backup_dir=project_root/"TBag"/"harness"/"backups"/harness
+        backup_dir.mkdir(parents=True,exist_ok=True)
+        backup_path=backup_dir/f"{path.name}.{utc_stamp()}.bak"
+        shutil.copy2(path,backup_path)
     if changed:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source, encoding="utf-8")
@@ -278,7 +345,28 @@ def install_plugin_file(project_root: Path, harness: str, destination: Path, sou
     }
 
 
+def prune_opencode_plugin_debris(project_root: Path) -> list[str]:
+    """Remove only known obsolete T-BAG artifacts from OpenCode's auto-loaded plugin dir."""
+    root=project_root/".opencode"/"plugins"
+    if not root.is_dir():
+        return []
+    removed=[]
+    for path in sorted(root.glob("*.dsd-backup-*")):
+        try:
+            path.unlink(); removed.append(str(path))
+        except OSError:
+            pass
+    legacy_tui=root/"tbag-status-tui.tsx"
+    if legacy_tui.exists():
+        try:
+            legacy_tui.unlink(); removed.append(str(legacy_tui))
+        except OSError:
+            pass
+    return removed
+
+
 def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = False) -> dict[str, Any]:
+    plugin_debris_removed=prune_opencode_plugin_debris(project_root)
     version, major = detect_opencode_version()
     transport_source = "tbag-v2.js" if major == 2 else "tbag.js"
     transport_generation = "v2" if major == 2 else "v1"
@@ -410,6 +498,7 @@ def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = F
         "blocking_question": bootstrap_question,
         "legacy_plugin_removed": legacy_removed,
         "stale_v1_companion_removed": stale_v1_removed,
+        "plugin_debris_removed":plugin_debris_removed,
         "manual_step": (
             "Live activation is proven by the project-local adapter token."
             if activation_verified else

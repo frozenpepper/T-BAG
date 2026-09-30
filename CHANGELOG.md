@@ -2,6 +2,14 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC68 — deterministic session termination and adapter-drift stop
+
+- Recognized deterministic provider/session poison is now one-strike: the exact encrypted-reasoning caller-mismatch and other narrowly classified nonretryable invalid-request failures immediately abandon that session instead of spending repeated resumes.
+- Added durable `session-poisoned` attempt state. Poison scanning runs before deterministic scheduling, so a dead conversation cannot be re-proposed for resume on the next tick; the retained workspace cold-retries the same role.
+- Active OpenCode runs compare their project-local copied transport/core against the current installed T-BAG skill. Drift is a global scheduling/direct-launch stop until the project adapter is reinstalled/reloaded.
+- Project plugin backups now live under `TBag/harness/backups/` rather than OpenCode's auto-loaded plugin directory; installer hygiene removes historical `.dsd-backup-*` modules and the obsolete unversioned TUI companion.
+- Kept the watcher diagnosis scoped: nested recursive watching was ruled out by field evidence, so RC68 does not move runtime roots or invent watcher-ignore policy as a workaround.
+
 ## v2.2.0 RC67 — delivery truth and parent-boundary reset
 
 - Redefined mutable `integrated` as committed delivery: the exact reviewed delta is committed on the run's recorded primary branch, gets a durable `delivery.json` receipt, and must remain an ancestor of current HEAD. A task label or dirty primary working tree is no longer sufficient.
