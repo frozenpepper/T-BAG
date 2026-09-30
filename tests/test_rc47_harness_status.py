@@ -103,7 +103,7 @@ class RendererTests(unittest.TestCase):
         }
         with mock.patch.object(tbag_render.tbag_status, "build_snapshot", return_value=sample_snapshot()) as build:
             lines = tbag_render.render_claude_payload(payload, width=180, color=False)
-        build.assert_called_once_with(Path("/tmp/project"), parent_session_id="claude-parent-1")
+        build.assert_called_once_with(Path("/tmp/project").resolve(), parent_session_id="claude-parent-1")
         self.assertIn("Opus 5 ctx 37%", lines[0])
 
     def test_claude_payload_degrades_cleanly_without_a_run(self):

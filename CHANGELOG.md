@@ -2,6 +2,12 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC70.1 — portable acceptance fixtures
+
+- Made the Claude status renderer assertion compare canonical paths so macOS `/tmp` → `/private/tmp` aliasing cannot produce a false failure.
+- Made the integration materialization sabotage fixture compare canonical checkout paths and assert that sabotage actually fired. The prior macOS failure was a test-harness miss, not an integration contract regression.
+- Local focused acceptance should invoke modules from `tests/` (or equivalent unittest discovery) rather than `tests.*` from the repository root, avoiding collisions with unrelated site-packages named `tests`.
+
 ## v2.2.0 RC70 — dormant status surfaces and cheap snapshots
 
 - Corrected the status architecture: installing T-BAG no longer means running T-BAG. OpenCode 1.x and 2.x status companions do no recurring status work while the dashboard is closed—no Python snapshot subprocess, generic-event refresh loop, or idle animation timer. Opening `/tbag` performs an immediate asynchronous refresh and refreshes only while that route/panel remains open.

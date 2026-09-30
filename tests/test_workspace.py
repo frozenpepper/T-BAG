@@ -834,7 +834,7 @@ class WorkspaceTests(unittest.TestCase):
         original=dsd_workspace.run_cmd; sabotaged={"done":False}
         def run_with_loss(cmd,cwd,*,input_bytes=None,check=True):
             cp=original(cmd,cwd,input_bytes=input_bytes,check=check)
-            if cwd==self.project and len(cmd)==3 and cmd[:2]==["git","apply"] and not sabotaged["done"]:
+            if Path(cwd).resolve()==self.project.resolve() and len(cmd)==3 and cmd[:2]==["git","apply"] and not sabotaged["done"]:
                 sabotaged["done"]=True
                 (self.project/"new-file.txt").unlink(missing_ok=True)
             return cp
@@ -843,6 +843,7 @@ class WorkspaceTests(unittest.TestCase):
             out=dsd_workspace.command_integrate(a)
         finally:
             dsd_workspace.run_cmd=original
+        self.assertTrue(sabotaged["done"],"test harness failed to intercept primary git apply")
         self.assertTrue(out["integration_conflict"],out); self.assertEqual(out["status"],"needs-analysis")
         self.assertEqual(json.loads(Path(out["evidence"]).read_text())["kind"],"integration-materialization-mismatch")
         self.assertEqual(dsd_task.load_task(self.run,"P","MATERIALIZE")["status"],"needs-analysis")
