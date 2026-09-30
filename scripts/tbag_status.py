@@ -136,7 +136,9 @@ def _task_done(run: Path, phase: str, task: dict[str, Any]) -> bool:
         return bool(dsd_task.dependency_satisfied(run, phase, str(task.get("task_id") or "")))
     except Exception:
         status = str(task.get("status") or "")
-        return status == "integrated" or (status == "accepted" and not task.get("requires_integration"))
+        if status=="integrated":
+            return dsd_task.integration_delivered(run,phase,task)
+        return status == "accepted" and not task.get("requires_integration")
 
 
 def _preparation_worker(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any] | None:

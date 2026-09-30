@@ -68,6 +68,23 @@ class TaskControlTests(unittest.TestCase):
         return report
 
 
+    def mark_delivered(self, task_id, phase="P1"):
+        path=dsd_task.task_file(self.run,phase,task_id); task=dsd_task.load_json(path)
+        branch=git(self.project,"symbolic-ref","--short","HEAD"); commit=git(self.project,"rev-parse","HEAD")
+        evidence=dsd_task.task_root(self.run,phase,task_id)/"delivery.json"
+        evidence.write_text(json.dumps({
+            "format":"tbag-delivery-v1","phase_id":phase,"task_id":task_id,
+            "branch":branch,"head_before":commit,"commit":commit,
+            "reviewed_ref":"test-state-fixture","changed":False,"recorded_at":dsd_task.now(),
+        })+"\n")
+        task.update({
+            "status":"integrated","integrated_at":dsd_task.now(),"updated_at":dsd_task.now(),
+            "integration_branch":branch,"integration_commit":commit,"delivery_evidence":str(evidence.resolve()),
+        })
+        dsd_task.write_json(path,task)
+        return task
+
+
     def test_carry_from_requires_semantic_supersession(self):
         self.write_plan([{"task_id":"OLD-CARRY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         with self.assertRaisesRegex(ValueError,"must also appear in supersedes"):
@@ -427,8 +444,42 @@ class TaskControlTests(unittest.TestCase):
         p=dsd_task.task_file(self.run,"P1","T1"); t=dsd_task.load_json(p); t["status"]="accepted"; dsd_task.write_json(p,t)
         t2=dsd_task.load_task(self.run,"P1","T2"); ok,missing=dsd_task.readiness(self.run,"P1",t2)
         self.assertFalse(ok); self.assertEqual(missing,["T1"])
-        t["status"]="integrated"; dsd_task.write_json(p,t)
+        self.mark_delivered("T1")
         self.assertTrue(dsd_task.readiness(self.run,"P1",t2)[0])
+
+    def test_legacy_integrated_without_delivery_receipt_blocks_entire_scheduler(self):
+        self.write_plan([
+            {"task_id":"LEGACY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"READY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+        ])
+        path=dsd_task.task_file(self.run,"P1","LEGACY"); task=dsd_task.load_json(path); task["status"]="integrated"; dsd_task.write_json(path,task)
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.no_sweep=True; a.details=False
+        state=dsd_task.command_reconcile_run(a)
+        self.assertFalse(state["delivery"]["verified"]); self.assertGreaterEqual(state["delivery"]["blocker_count"],1)
+        self.assertEqual(state.get("first_useful_actions"),None)
+        self.assertTrue(any(x.get("task_id")=="LEGACY" and x.get("reason")=="legacy-integrated-without-commit-proof" for x in state["delivery_blockers"]))
+        self.assertTrue(any(x.get("task_id")=="LEGACY" for x in state["unresolved_state"]))
+
+    def test_run_cannot_be_marked_completed_with_fake_integrated_delivery(self):
+        self.write_plan([{"task_id":"FAKE-DONE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        path=dsd_task.task_file(self.run,"P1","FAKE-DONE"); task=dsd_task.load_json(path); task["status"]="integrated"; dsd_task.write_json(path,task)
+        class A: pass
+        a=A(); a.run_root=self.run; a.status="completed"; a.reason=None
+        with self.assertRaisesRegex(ValueError,"RUN_NOT_DELIVERED"):
+            dsd_task.command_set_run_status(a)
+        self.assertEqual(dsd_task.load_run(self.run)["status"],"active")
+
+    def test_direct_worker_launch_is_refused_while_delivery_is_broken(self):
+        self.write_plan([
+            {"task_id":"LEGACY-LAND","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"OTHER-READY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+        ])
+        path=dsd_task.task_file(self.run,"P1","LEGACY-LAND"); task=dsd_task.load_json(path); task["status"]="integrated"; dsd_task.write_json(path,task)
+        a=type("A",(),{})(); a.run_root=self.run; a.phase_id="P1"; a.task_id="OTHER-READY"
+        with self.assertRaisesRegex(ValueError,"DELIVERY_BROKEN"):
+            dsd_attempt._command_launch(a)
+
 
     def test_analysis_dependency_only_needs_acceptance(self):
         self.write_plan([
@@ -1028,7 +1079,7 @@ class TaskControlTests(unittest.TestCase):
     def test_dependency_follows_superseded_successor_chain(self):
         self.write_plan([{"task_id":"OLD","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         self.write_plan([{"task_id":"NEW","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[],"supersedes":["OLD"]}])
-        new=dsd_task.load_task(self.run,"P1","NEW"); new["status"]="integrated"; dsd_task.write_json(dsd_task.task_file(self.run,"P1","NEW"),new)
+        self.mark_delivered("NEW")
         self.write_plan([{"task_id":"DEP","kind":"analysis","role":"discovery","tier":"analyst","dependencies":["OLD"],"requires_integration":False}])
         dep=dsd_task.load_task(self.run,"P1","DEP"); ready,missing=dsd_task.readiness(self.run,"P1",dep)
         self.assertTrue(ready); self.assertEqual(missing,[])
@@ -1084,7 +1135,7 @@ class TaskControlTests(unittest.TestCase):
 
     def test_phase_gate_is_fresh_bound_and_writes_legible_top_level_plan_report(self):
         self.write_plan([{"task_id":"T-GATE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
-        t=dsd_task.load_task(self.run,"P1","T-GATE"); t["status"]="integrated"; t["integrated_at"]=dsd_task.now(); t["updated_at"]=t["integrated_at"]; dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-GATE"),t)
+        self.mark_delivered("T-GATE")
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; prep=dsd_task.command_prepare_phase_gate(a); gate_id=prep["registered"][0]
         event=dsd_task.task_root(self.run,"P1",gate_id)/"attempts"/"phase-auditor-1"; event.mkdir(parents=True)
@@ -1101,7 +1152,7 @@ class TaskControlTests(unittest.TestCase):
 
     def test_phase_gate_history_is_append_only_and_easy_to_browse(self):
         self.write_plan([{"task_id":"T-GATE-HIST","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
-        t=dsd_task.load_task(self.run,"P1","T-GATE-HIST"); t["status"]="integrated"; t["updated_at"]=dsd_task.now(); dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-GATE-HIST"),t)
+        self.mark_delivered("T-GATE-HIST")
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; first=dsd_task.command_prepare_phase_gate(a); first_id=first["registered"][0]
         e1=dsd_task.task_root(self.run,"P1",first_id)/"attempts"/"phase-auditor-1"; e1.mkdir(parents=True); r1=e1/"report.md"; r1.write_text("BLOCKED\nA cross-task persistence seam is still unproven.\n")
@@ -1119,7 +1170,7 @@ class TaskControlTests(unittest.TestCase):
 
     def test_advance_prepares_phase_gate_then_stops_at_fresh_auditor_launch(self):
         self.write_plan([{"task_id":"T-GATE-ADV","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
-        t=dsd_task.load_task(self.run,"P1","T-GATE-ADV"); t["status"]="integrated"; t["updated_at"]=dsd_task.now(); dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-GATE-ADV"),t)
+        self.mark_delivered("T-GATE-ADV")
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; a.max_steps=4
         out=dsd_task.command_advance(a)
@@ -1150,7 +1201,7 @@ class TaskControlTests(unittest.TestCase):
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id=source; a.report=report; a.outcome="pass"
         out=dsd_task.command_review(a); self.assertEqual(len(out["followup_findings"]),1)
-        a.report=report; dsd_task.command_accept(a); dsd_task.command_integrated(a)
+        a.report=report; dsd_task.command_accept(a); self.mark_delivered(source)
         return out["followup_findings"][0],report
 
     def test_review_followup_is_durable_and_blocks_new_phase_launches(self):

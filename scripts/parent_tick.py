@@ -160,6 +160,7 @@ def completion_candidate(state: dict[str, Any]) -> bool:
         state.get("live_attempts"),
         state.get("human_blocks"),
         state.get("unresolved_state"),
+        state.get("delivery_blockers"),
         int(state.get("backlog_count") or 0),
         int(state.get("waiting_dependency_count") or 0),
     ))
@@ -275,6 +276,11 @@ def owner_signature(state: dict[str, Any], monitors: list[dict[str, Any]], class
         "classification": classification,
         "backlog_count": state.get("backlog_count"),
         "waiting_dependency_count": state.get("waiting_dependency_count"),
+        "delivery": (
+            str((state.get("delivery") or {}).get("branch") or ""),
+            str((state.get("delivery") or {}).get("head") or ""),
+            int((state.get("delivery") or {}).get("blocker_count") or 0),
+        ),
         "live": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("role"))) for x in state.get("live_attempts") or []),
         "human": sorted((str(x.get("phase_id")), str(x.get("task_id")), str(x.get("action"))) for x in state.get("human_blocks") or []),
         "attention": sorted(
@@ -317,6 +323,7 @@ def update_due(
     if any(x.get("retirement_requested") for x in monitors): urgent.append("worker-retired")
     if any(x.get("attention") == "silent-long-running" for x in monitors): urgent.append("worker-stall")
     if classification == "recovery-required": urgent.append("control-recovery-required")
+    if classification == "delivery-broken": urgent.append("delivery-broken")
     same_acknowledged_condition = signature == last_signature and sorted(urgent) == last_reasons
     if urgent and (last_at is None or not same_acknowledged_condition):
         due, reasons = True, urgent
@@ -391,15 +398,19 @@ def runtime_config_questions(run: Path, blocked_actions: list[dict[str, Any]]) -
 
 def owner_notice(owner: dict[str, Any]) -> dict[str, Any] | None:
     if not owner.get("due"): return None
-    return {
+    status=owner.get("status") if isinstance(owner.get("status"),dict) else None
+    notice={
         "kind":"owner-notice",
         "blocking":False,
         "banner":"━━ T-BAG UPDATE ━━",
         "render":"decorated-chat",
         "ack_token":owner.get("token"),
         "reasons":owner.get("reasons") or [],
-        "status":owner.get("status"),
+        "status":status,
     }
+    if status and isinstance(status.get("delivery"),dict):
+        notice["delivery"]=status["delivery"]
+    return notice
 
 
 def _compact_action(item: dict[str, Any]) -> dict[str, Any]:
@@ -667,9 +678,13 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     live_now = list(state.get("live_attempts") or [])
     durable_questions=owner_questions(state)
     questions=durable_questions+runtime_config_questions(run,blocked_actions)
+    delivery_blockers=list(state.get("delivery_blockers") or [])
     if run_status != "active":
         classification = f"run-{run_status}"
         turn = "terminal" if run_status in {"completed", "abandoned"} else "owner"
+    elif delivery_blockers:
+        classification = "delivery-broken"
+        turn = "intervene"
     elif completion_candidate(state):
         classification = "completion-candidate"
         turn = "finish-or-replan"
@@ -706,12 +721,12 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     # Human blockers are an interaction boundary, not a status footnote. Independent
     # work may still be launched first, but the parent turn must end in the harness's
     # native question UI rather than an ordinary chat message or silent yield.
-    if questions and run_status not in {"completed","abandoned","paused-by-user"}:
+    if questions and not delivery_blockers and run_status not in {"completed","abandoned","paused-by-user"}:
         classification = "owner-question-required"
         turn = "ask-owner"
 
     run_status_transition = None
-    if durable_questions and run_status == "active" and not pending and not live_now:
+    if durable_questions and not delivery_blockers and run_status == "active" and not pending and not live_now:
         try:
             run_status_transition = dsd_task.command_set_run_status(args_for(
                 run_root=run,
@@ -764,6 +779,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "run_status": run_status,
         "classification": classification,
         "turn": turn,
+        "delivery":state.get("delivery"),
         "worker_budget": state.get("worker_budget"),
         "state_changed": state_changed,
         "state_signature": tick_signature,
@@ -828,6 +844,13 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         out["parked"]={
             "count":int(state.get("parked_count") or 0),
             "next":"Parked tasks are quiescent and will not be relaunched or re-asked. Resume/cancel them explicitly, or continue independent work when available.",
+        }
+    if classification == "delivery-broken":
+        out["delivery_blockers"]=delivery_blockers[:8]
+        out["control_error"]={
+            "code":"delivery-broken",
+            "message":"T-BAG lifecycle claims integration that Git cannot prove on the primary branch. No new worker may launch until delivery is repaired.",
+            "next":"Repair/reconcile primary-branch delivery first. Do not treat task status, review PASS, or checkpoint branches as delivered product.",
         }
     if classification == "active-idle":
         out["control_error"] = {

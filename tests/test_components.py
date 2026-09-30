@@ -951,6 +951,28 @@ class ComponentsTests(unittest.TestCase):
         log.write_text('{"type":"step_start","sessionID":"ses_live","part":{"sessionID":"ses_live"}}\n{"type":"text","sessionID":"ses_live"}\n')
         self.assertEqual(run_worker.opencode_json_session_id(log),('ses_live',None))
 
+    def test_worker_environment_binds_existing_project_local_playwright_store(self):
+        local=self.project/'node_modules'/'playwright-core'/'.local-browsers'; (local/'chromium-1').mkdir(parents=True)
+        event=self.root/'pw-event'; event.mkdir()
+        env,caches=run_worker.worker_environment({},{
+            'event_dir':event,'run_root':self.run,'project_root':self.project,
+        })
+        self.assertEqual(Path(env['PLAYWRIGHT_BROWSERS_PATH']),local.resolve())
+        self.assertEqual(env['PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD'],'1')
+        self.assertTrue(Path(caches['root']).is_dir())
+
+    def test_worker_environment_preserves_explicit_playwright_configuration(self):
+        local=self.project/'node_modules'/'playwright-core'/'.local-browsers'; (local/'chromium-1').mkdir(parents=True)
+        event=self.root/'pw-explicit'; event.mkdir()
+        env,_=run_worker.worker_environment({
+            'PLAYWRIGHT_BROWSERS_PATH':'/owner/chosen/browsers',
+            'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD':'0',
+        },{
+            'event_dir':event,'run_root':self.run,'project_root':self.project,
+        })
+        self.assertEqual(env['PLAYWRIGHT_BROWSERS_PATH'],'/owner/chosen/browsers')
+        self.assertEqual(env['PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD'],'0')
+
     def test_opencode_db_lock_retry_is_narrow_and_nonsemantic(self):
         event=self.root/'lock-classifier'; event.mkdir(); report=event/'report.md'; report.write_text(run_worker.placeholder_text(event))
         log=event/'worker.log'; log.write_text('SQLITE_BUSY: database is locked\n')

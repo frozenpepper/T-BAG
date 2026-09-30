@@ -40,6 +40,111 @@ def git_text(cwd: Path, *args: str, check: bool = True) -> str:
     return run_cmd(["git", *args], cwd, check=check).stdout.decode("utf-8", errors="surrogateescape").strip()
 
 
+def primary_branch(primary: Path) -> str:
+    branch=git_text(primary,"symbolic-ref","--quiet","--short","HEAD",check=False)
+    if not branch:
+        raise ValueError("DELIVERY_BRANCH_REQUIRED: T-BAG requires the primary checkout to be on a named Git branch")
+    return branch
+
+
+def legacy_delivery_repair_hint(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any]:
+    patch=dsd_task.task_root(run,phase,str(task.get("task_id") or ""))/"accepted.patch"
+    paths=task.get("integration_paths") if isinstance(task.get("integration_paths"),list) else None
+    review=task.get("last_review") if isinstance(task.get("last_review"),dict) else {}
+    repairable=bool(
+        patch.is_file()
+        and paths is not None
+        and str(review.get("checkpoint_ref") or "")
+        and str(task.get("status") or "")=="integrated"
+        and task.get("requires_integration")
+    )
+    return {
+        "repairable":repairable,
+        **({"repair_action":"repair-delivery"} if repairable else {}),
+    }
+
+
+def task_delivery_status(run: Path, phase: str, task: dict[str, Any]) -> dict[str, Any]:
+    """Prove that a claimed integration is committed on the run's primary branch."""
+    tid=str(task.get("task_id") or "")
+    if not task.get("requires_integration"):
+        return {"task_id":tid,"required":False,"verified":True}
+    if str(task.get("status") or "")!="integrated":
+        return {"task_id":tid,"required":True,"verified":False,"reason":"task-not-integrated"}
+    info=dsd_task.load_run(run); primary=Path(str(info["project_root"])).resolve()
+    try:
+        current_branch=primary_branch(primary)
+        current_head=git_text(primary,"rev-parse","HEAD")
+    except ValueError as exc:
+        return {"task_id":tid,"required":True,"verified":False,"reason":"primary-branch-unavailable","error":str(exc)}
+    expected_run_branch=str(info.get("primary_branch") or "")
+    integration_branch=str(task.get("integration_branch") or "")
+    commit=str(task.get("integration_commit") or "")
+    base={
+        "task_id":tid,"phase_id":phase,"required":True,
+        "current_branch":current_branch,"current_head":current_head,
+        "integration_branch":integration_branch or None,"integration_commit":commit or None,
+    }
+    if expected_run_branch and current_branch!=expected_run_branch:
+        return {**base,"verified":False,"reason":"primary-branch-changed","expected_branch":expected_run_branch}
+    if not commit or not integration_branch:
+        return {**base,"verified":False,"reason":"legacy-integrated-without-commit-proof",**legacy_delivery_repair_hint(run,phase,task)}
+    evidence_path=Path(str(task.get("delivery_evidence") or ""))
+    if not evidence_path.is_file():
+        return {**base,"verified":False,"reason":"delivery-receipt-missing",**legacy_delivery_repair_hint(run,phase,task)}
+    try: receipt=dsd_task.load_json(evidence_path)
+    except (OSError,ValueError,json.JSONDecodeError):
+        return {**base,"verified":False,"reason":"delivery-receipt-invalid"}
+    if (
+        receipt.get("format")!="tbag-delivery-v1"
+        or str(receipt.get("task_id") or "")!=tid
+        or str(receipt.get("phase_id") or "")!=phase
+        or str(receipt.get("branch") or "")!=integration_branch
+        or str(receipt.get("commit") or "")!=commit
+    ):
+        return {**base,"verified":False,"reason":"delivery-receipt-mismatch"}
+    if integration_branch!=current_branch:
+        return {**base,"verified":False,"reason":"integration-branch-not-current"}
+    if run_cmd(["git","cat-file","-e",f"{commit}^{{commit}}"],primary,check=False).returncode!=0:
+        return {**base,"verified":False,"reason":"integration-commit-missing"}
+    if run_cmd(["git","merge-base","--is-ancestor",commit,"HEAD"],primary,check=False).returncode!=0:
+        return {**base,"verified":False,"reason":"integration-commit-not-on-primary-head"}
+    return {**base,"verified":True}
+
+
+def delivery_audit(run: Path, phase_id: str | None = None) -> dict[str, Any]:
+    """Read-only delivery truth. Lifecycle labels never substitute for Git ancestry."""
+    run=run.resolve(); info=dsd_task.load_run(run); primary=Path(str(info["project_root"])).resolve()
+    selected=dsd_task.slug(phase_id) if phase_id else None
+    claimed=[]
+    for task in dsd_task.iter_run_tasks(run):
+        phase=str(task.get("phase_id") or "")
+        if selected and phase!=selected: continue
+        if task.get("requires_integration") and str(task.get("status") or "")=="integrated":
+            claimed.append((phase,task))
+    blockers=[]; verified=0; expected=str(info.get("primary_branch") or "")
+    try:
+        branch=primary_branch(primary); head=git_text(primary,"rev-parse","HEAD")
+    except (OSError,ValueError):
+        if expected or claimed:
+            blockers.append({"reason":"primary-branch-unavailable","expected_branch":expected or None})
+        return {
+            "verified":not blockers,"branch":None,"head":None,"expected_branch":expected or None,
+            "verified_integrations":0,"blockers":blockers,
+        }
+    if expected and branch!=expected:
+        blockers.append({"reason":"primary-branch-changed","expected_branch":expected,"current_branch":branch})
+    for phase,task in claimed:
+        status=task_delivery_status(run,phase,task)
+        if status.get("verified"): verified+=1
+        else: blockers.append(status)
+    return {
+        "verified":not blockers,
+        "branch":branch,"head":head,"expected_branch":expected or None,
+        "verified_integrations":verified,"blockers":blockers,
+    }
+
+
 def internal_git(run: Path, *args: str) -> list[str]:
     """Git command prefix for T-BAG-internal snapshot operations.
 
@@ -249,16 +354,9 @@ def _primary_view_marker(primary: Path) -> tuple[str, str]:
 
 
 def _view_matches_primary(item: dict[str, Any], run: Path, primary: Path) -> bool:
-    current=integrated_primary_untracked_inputs(run,primary)
-    current_paths={str(x.get("path") or "") for x in current if str(x.get("path") or "")}
-    recorded=item.get("integrated_primary_inputs") if isinstance(item.get("integrated_primary_inputs"),list) else []
-    recorded_paths={str(x.get("path") or "") for x in recorded if isinstance(x,dict) and str(x.get("path") or "")}
-    if current_paths!=recorded_paths: return False
-    view=Path(str(item.get("path") or ""))
-    if not all(_same_primary_file(primary,view,rel) for rel in current_paths): return False
     baseline=str(item.get("baseline_ref") or "")
     if baseline and run_cmd(["git","rev-parse","--verify",baseline],primary,check=False).returncode==0:
-        return _primary_matches_snapshot(primary,baseline,excluded_paths=sorted(current_paths))
+        return _primary_matches_snapshot(primary,baseline)
     head,status=_primary_view_marker(primary)
     return item.get("primary_head")==head and item.get("primary_status")==status
 
@@ -318,16 +416,13 @@ def acquire_analysis_view(run: Path, fixture_bindings: list[dict[str, Any]] | No
             if not path.is_dir(): raise ValueError(f"git worktree add reported success but did not materialize analysis view: {path}")
             patch=run_cmd(["git","diff","--binary","HEAD","--",".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**"],primary).stdout
             if patch: run_cmd(["git","apply","--whitespace=nowarn","-"],path,input_bytes=patch)
-            integrated_inputs=copy_integrated_primary_inputs(primary,path,integrated_primary_untracked_inputs(run,primary))
             run_cmd(["git","add","-A"],path)
-            integrated_paths=[str(x.get("path") or "") for x in integrated_inputs if str(x.get("path") or "")]
-            if integrated_paths: run_cmd(["git","add","-f","--",*integrated_paths],path)
             run_cmd(internal_git(run,"-c","user.name=TBag","-c","user.email=analyst-grunt@local","commit","--allow-empty","-m",f"T-BAG shared analysis view {generation}"),path)
             baseline=git_text(path,"rev-parse","HEAD")
             _bind_read_only_fixtures(path,requested)
             _make_tree_read_only(path)
             primary_head,primary_status=_primary_view_marker(primary)
-            item={"format":ANALYSIS_VIEW_FORMAT,"generation":generation,"path":str(path.resolve()),"baseline_ref":baseline,"primary_head":primary_head,"primary_status":primary_status,"integrated_primary_inputs":integrated_inputs,"fixture_binding_key":requested_key,"fixture_bindings":requested,"created_at":now(),"stale":False}
+            item={"format":ANALYSIS_VIEW_FORMAT,"generation":generation,"path":str(path.resolve()),"baseline_ref":baseline,"primary_head":primary_head,"primary_status":primary_status,"fixture_binding_key":requested_key,"fixture_bindings":requested,"created_at":now(),"stale":False}
             index["views"].append(item); index["current"]=str(path.resolve()); index["next_generation"]=generation+1; _write_analysis_view_index(run,index)
             return dict(item)
         except Exception:
@@ -381,59 +476,8 @@ def prepare_launch_workspace(run: Path, phase: str, task_id: str, role: str) -> 
         current=dsd_task.load_json(task_path); current["workspace"]=str(existing); current["updated_at"]=now(); dsd_task.write_json(task_path,current)
     return data
 
-def integrated_primary_untracked_inputs(run: Path, primary: Path) -> list[dict[str, str]]:
-    """Return current non-tracked project files established by any integrated T-BAG task.
-
-    The primary working tree is T-BAG's integration line even when the owner has not
-    committed it. Tracked primary changes are replayed from ``git diff HEAD``; this
-    function supplies the complementary reviewed additions that Git still considers
-    untracked/ignored. Dependency edges govern readiness, not whether already-integrated
-    project state is physically visible in a later task view.
-    """
-    producers: dict[str, list[tuple[str, str, str]]] = {}
-    phases=run/"phases"
-    for state in sorted(phases.glob("*/tasks/*/task.json")) if phases.is_dir() else []:
-        try: task=dsd_task.load_json(state)
-        except Exception: continue
-        if task.get("status")!="integrated": continue
-        phase_id=str(task.get("phase_id") or state.parents[2].name)
-        task_id=str(task.get("task_id") or state.parent.name)
-        integrated_at=str(task.get("integrated_at") or "")
-        for raw in task.get("integration_untracked_paths",[]) if isinstance(task.get("integration_untracked_paths"),list) else []:
-            rel=str(raw).replace("\\","/").strip("/")
-            if not rel: continue
-            producers.setdefault(rel,[]).append((integrated_at,phase_id,task_id))
-    out=[]
-    for rel, history in sorted(producers.items()):
-        source=primary/rel
-        try: source.resolve().relative_to(primary.resolve())
-        except ValueError: continue
-        if not source.exists() and not source.is_symlink(): continue
-        if _path_is_tracked(primary,rel): continue
-        _,phase_id,task_id=sorted(history)[-1]
-        out.append({"path":rel,"producer_phase":phase_id,"producer_task":task_id})
-    return out
-
-
 def _path_is_tracked(root: Path, rel: str) -> bool:
     return run_cmd(["git","ls-files","--error-unmatch","--",rel],root,check=False).returncode==0
-
-
-def copy_integrated_primary_inputs(primary: Path, worktree: Path, inputs: list[dict[str, str]]) -> list[dict[str, str]]:
-    copied=[]
-    for item in inputs:
-        rel=str(item.get("path") or ""); src=primary/rel; dst=worktree/rel
-        if not rel or (not src.exists() and not src.is_symlink()): continue
-        if dst.exists() or dst.is_symlink():
-            # A committed/tracked baseline already has this path; normal Git snapshot
-            # authority wins and no non-tracked overlay is needed.
-            continue
-        dst.parent.mkdir(parents=True,exist_ok=True)
-        if src.is_symlink(): dst.symlink_to(src.readlink())
-        elif src.is_dir(): shutil.copytree(src,dst,symlinks=True)
-        else: shutil.copy2(src,dst)
-        copied.append(dict(item))
-    return copied
 
 
 def _review_delta_paths(worktree: Path, base: str, reviewed_ref: str, *, fixture_prefixes: list[str] | None = None) -> tuple[list[str], list[str]]:
@@ -461,7 +505,11 @@ def _known_untracked_producers(run: Path, phase: str, paths: list[str]) -> dict[
         try: task=dsd_task.load_json(state)
         except Exception: continue
         if task.get("status")!="integrated": continue
-        produced=set(str(x) for x in task.get("integration_untracked_paths",[]) if str(x))
+        produced={
+            str(x) for key in ("integration_paths","integration_untracked_paths")
+            for x in (task.get(key,[]) if isinstance(task.get(key),list) else [])
+            if str(x)
+        }
         label=f"{task.get('phase_id') or state.parents[2].name}/{task.get('task_id') or state.parent.name}"
         for path in wanted & produced: out[path].append(label)
     return {path:ids for path,ids in out.items() if ids}
@@ -804,7 +852,6 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         if patch:
             run_cmd(["git","apply","--whitespace=nowarn","-"],worktree,input_bytes=patch)
         task_text=Path(str(task.get("brief") or "")).read_text(encoding="utf-8",errors="replace")
-        integrated_primary=copy_integrated_primary_inputs(primary,worktree,integrated_primary_untracked_inputs(run,primary))
         fixture_snapshot=dsd_task.task_root(run,phase,tid)/"fixture-snapshot"
         fixture_mirrors,automatic_fixtures=workspace_fixture_mirrors(primary,task_text); fixture_bindings=[]; snapshot_used=False
         for rel in fixture_mirrors:
@@ -814,11 +861,6 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 _copy_one_required_fixture(primary,fixture_snapshot,rel); _copy_one_required_fixture(fixture_snapshot,worktree,rel); snapshot_used=True
         _stage_durable_project_state(worktree,fixture_prefixes=fixture_mirrors)
-        # T-BAG-integrated non-tracked additions are reviewed project state, not ambient
-        # ignored input. Force them into the task-local baseline so .gitignore cannot
-        # make integrated primary state disappear from later checkpoints/reviews.
-        integrated_paths=[str(x.get("path") or "") for x in integrated_primary if str(x.get("path") or "")]
-        if integrated_paths: run_cmd(["git","add","-f","--",*integrated_paths],worktree)
         run_cmd(internal_git(run,"-c","user.name=TBag","-c","user.email=analyst-grunt@local","commit","--allow-empty","-m",f"Analyst-Grunt baseline {phase}/{tid}"),worktree)
         run_cmd(["git","branch",task_branch],worktree)
         run_cmd(internal_git(run,"switch",task_branch),worktree)
@@ -852,7 +894,6 @@ def _command_create_unlocked(args: argparse.Namespace) -> dict[str, Any]:
         data={
             "format":FORMAT,"mode":"isolated-worktree","phase_id":phase,"task_id":tid,"primary_root":str(primary),"worktree":str(worktree),
             "baseline_branch":base_branch,"task_branch":task_branch,"db":str(db),"fixture_mirrors":fixture_mirrors,"auto_dependency_fixtures":automatic_fixtures,"fixture_bindings":fixture_bindings,
-            "integrated_primary_inputs":integrated_primary,
             "fixture_snapshot_root":str(fixture_snapshot.resolve()) if snapshot_used else None,"primary_head":primary_head,"primary_status":primary_status,"created_at":now(),
         }
         if carry_from:
@@ -891,11 +932,11 @@ def _stage_durable_project_state(root: Path, *, fixture_prefixes: list[str] | No
         run_cmd(["git","reset","-q","HEAD","--",rel],root,check=False)
 
 
-def _primary_matches_snapshot(primary: Path, snapshot_ref: str, *, excluded_paths: list[str] | None = None) -> bool:
+def _primary_matches_snapshot(primary: Path, snapshot_ref: str) -> bool:
     """Compare frozen tracked project bytes with the current primary working tree."""
     if not snapshot_ref:
         return False
-    cp=run_cmd(["git","diff","--quiet",snapshot_ref,"--",*_project_pathspec(extra_excludes=excluded_paths or [])],primary,check=False)
+    cp=run_cmd(["git","diff","--quiet",snapshot_ref,"--",*_project_pathspec()],primary,check=False)
     return cp.returncode==0
 
 
@@ -910,31 +951,14 @@ def _workspace_tree_matches_baseline(ws: dict[str, Any]) -> bool:
     return run_cmd(["git","diff","--quiet",f"{baseline}..{task_branch}","--",*pathspec],wt,check=False).returncode==0
 
 
-def _same_primary_file(primary: Path, worktree: Path, rel: str) -> bool:
-    src=primary/rel; dst=worktree/rel
-    if src.is_symlink() or dst.is_symlink():
-        return src.is_symlink() and dst.is_symlink() and src.readlink()==dst.readlink()
-    if not src.is_file() or not dst.is_file(): return False
-    try: return src.read_bytes()==dst.read_bytes()
-    except OSError: return False
-
-
 def _workspace_primary_changed(run: Path, phase: str, task: dict[str, Any], ws: dict[str, Any]) -> tuple[bool,str]:
     primary=Path(str(ws.get("primary_root") or "")).resolve(); wt=Path(str(ws.get("worktree") or "")).resolve()
     if not primary.is_dir() or not wt.is_dir(): return False,"workspace-missing"
-    desired=integrated_primary_untracked_inputs(run,primary)
-    desired_paths={str(x.get("path") or "") for x in desired if str(x.get("path") or "")}
-    copied=ws.get("integrated_primary_inputs") if isinstance(ws.get("integrated_primary_inputs"),list) else ws.get("dependency_untracked_inputs") if isinstance(ws.get("dependency_untracked_inputs"),list) else []
-    copied_paths={str(x.get("path") or "") for x in copied if isinstance(x,dict) and str(x.get("path") or "")}
-    if desired_paths!=copied_paths: return True,"integrated-primary-untracked-set-changed"
-    for rel in sorted(desired_paths):
-        if not _same_primary_file(primary,wt,rel): return True,"integrated-primary-untracked-content-changed"
-
-    # Compare the baseline snapshot commit with the *current working tree bytes*.
-    # HEAD/status markers cannot notice a second edit to a path that was already dirty.
+    # Compare the baseline snapshot commit with current primary bytes. Delivered
+    # T-BAG output is ordinary committed Git state now; no overlay channel exists.
     baseline=str(ws.get("baseline_branch") or "")
     if baseline and run_cmd(["git","rev-parse","--verify",baseline],primary,check=False).returncode==0:
-        if not _primary_matches_snapshot(primary,baseline,excluded_paths=sorted(desired_paths)):
+        if not _primary_matches_snapshot(primary,baseline):
             return True,"primary-tracked-state-changed"
         return False,"current"
 
@@ -1012,6 +1036,120 @@ def command_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
     return {"task_id":tid,"checkpoint_ref":ref,"checkpoint_oid":git_text(wt,"rev-parse",ref),"worktree":str(wt)}
 
 
+def _primary_integration_paths_clean(primary: Path, paths: list[str]) -> tuple[bool, str]:
+    tracked=[path for path in paths if _path_is_tracked(primary,path)]
+    if not tracked: return True,""
+    text=git_text(primary,"status","--porcelain=v1","--untracked-files=no","--",*tracked,check=False)
+    return (not bool(text),text)
+
+
+def _rollback_uncommitted_delivery(primary: Path, paths: list[str], added_paths: list[str], preexisting_untracked: set[str]) -> None:
+    if paths:
+        run_cmd(["git","reset","--quiet","HEAD","--",*paths],primary,check=False)
+        tracked=[path for path in paths if _path_is_tracked(primary,path)]
+        if tracked:
+            run_cmd(["git","restore","--worktree","--source=HEAD","--",*tracked],primary,check=False)
+    created=[path for path in added_paths if path not in preexisting_untracked and not _path_is_tracked(primary,path)]
+    if created:
+        run_cmd(["git","clean","-fdx","--",*created],primary,check=False)
+
+
+def _land_reviewed_patch(
+    run: Path,
+    phase: str,
+    tid: str,
+    primary: Path,
+    *,
+    patch_path: Path,
+    patch: bytes,
+    integration_paths: list[str],
+    added_paths: list[str],
+    reviewed_ref: str,
+    allow_exact_materialized_tracked: bool = False,
+) -> dict[str, Any]:
+    """Materialize and commit exactly one reviewed task delta on the primary branch."""
+    info=dsd_task.load_run(run); branch=primary_branch(primary); expected=str(info.get("primary_branch") or "")
+    if expected and branch!=expected:
+        raise ValueError(f"DELIVERY_BRANCH_CHANGED: run owns primary branch {expected!r}, current checkout is {branch!r}")
+    head_before=git_text(primary,"rev-parse","HEAD")
+    clean,dirty=_primary_integration_paths_clean(primary,integration_paths)
+    exact_materialized_tracked=False
+    if allow_exact_materialized_tracked and patch and integration_paths:
+        current_delta=run_cmd(["git","diff","--binary","HEAD","--",*integration_paths],primary,check=False).stdout
+        exact_materialized_tracked=current_delta==patch
+    if not clean and not exact_materialized_tracked:
+        raise ValueError(
+            "DELIVERY_TARGET_DIRTY: reviewed integration paths already contain owner/staged changes on the primary checkout; "
+            f"refusing to commit across that authority boundary: {dirty[:1000]}"
+        )
+
+    preexisting_untracked={
+        path for path in added_paths
+        if ((primary/path).exists() or (primary/path).is_symlink()) and not _path_is_tracked(primary,path)
+    }
+    already_materialized=False; head_already_contains=False
+    if patch:
+        apply_check=run_cmd(["git","apply","--check",str(patch_path)],primary,check=False)
+        if apply_check.returncode!=0:
+            reverse=run_cmd(["git","apply","--reverse","--check",str(patch_path)],primary,check=False)
+            already_materialized=reverse.returncode==0
+            if not already_materialized:
+                raise ValueError(apply_check.stderr.decode(errors="replace")[:1200] or "reviewed patch does not apply to primary")
+        cached_reverse=run_cmd(["git","apply","--reverse","--check","--cached",str(patch_path)],primary,check=False)
+        head_already_contains=cached_reverse.returncode==0
+        if not already_materialized and not head_already_contains:
+            run_cmd(["git","apply",str(patch_path)],primary)
+        if not head_already_contains:
+            materialized=run_cmd(["git","apply","--reverse","--check",str(patch_path)],primary,check=False)
+            if materialized.returncode!=0:
+                _rollback_uncommitted_delivery(primary,integration_paths,added_paths,preexisting_untracked)
+                raise ValueError("INTEGRATION_MATERIALIZATION_MISMATCH: reviewed patch is not fully present in the primary working tree after apply")
+
+    if head_already_contains or not patch:
+        commit=head_before
+        evidence={
+            "format":"tbag-delivery-v1","phase_id":phase,"task_id":tid,"branch":branch,
+            "head_before":head_before,"commit":commit,"reviewed_ref":reviewed_ref,
+            "changed":False,"recorded_at":now(),
+        }
+        path=dsd_task.task_root(run,phase,tid)/"delivery.json"; dsd_task.write_json(path,evidence)
+        evidence["evidence"]=str(path.resolve())
+        return evidence
+
+    try:
+        if integration_paths:
+            run_cmd(["git","add","-A","-f","--",*integration_paths],primary)
+            message=f"T-BAG {info.get('run_id')} {phase}/{tid}: integrate reviewed task"
+            cp=run_cmd([
+                "git","-c","user.name=T-BAG","-c","user.email=t-bag@local",
+                "commit","--no-verify","--only","-m",message,"--",*integration_paths
+            ],primary,check=False)
+            if cp.returncode!=0:
+                raise ValueError(cp.stderr.decode(errors="replace")[:1200] or cp.stdout.decode(errors="replace")[:1200] or "git commit failed")
+        commit=git_text(primary,"rev-parse","HEAD")
+        if integration_paths and commit==head_before:
+            raise ValueError("delivery commit did not advance primary HEAD")
+        if primary_branch(primary)!=branch:
+            raise ValueError("primary branch changed during integration")
+        if run_cmd(["git","merge-base","--is-ancestor",commit,"HEAD"],primary,check=False).returncode!=0:
+            raise ValueError("delivery commit is not an ancestor of current primary HEAD")
+        if patch and run_cmd(["git","apply","--reverse","--check","--cached",str(patch_path)],primary,check=False).returncode!=0:
+            raise ValueError("committed primary tree does not contain the reviewed patch")
+    except Exception:
+        if git_text(primary,"rev-parse","HEAD",check=False)==head_before:
+            _rollback_uncommitted_delivery(primary,integration_paths,added_paths,preexisting_untracked)
+        raise
+
+    evidence={
+        "format":"tbag-delivery-v1","phase_id":phase,"task_id":tid,"branch":branch,
+        "head_before":head_before,"commit":commit,"reviewed_ref":reviewed_ref,
+        "changed":commit!=head_before,"recorded_at":now(),
+    }
+    path=dsd_task.task_root(run,phase,tid)/"delivery.json"; dsd_task.write_json(path,evidence)
+    evidence["evidence"]=str(path.resolve())
+    return evidence
+
+
 def _integration_review_authority(task: dict[str, Any]) -> tuple[str | None, str | None]:
     """Return the exact Reviewer checkpoint authorized for integration.
 
@@ -1087,80 +1225,55 @@ def _command_integrate_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     integration_paths,added_paths=_review_delta_paths(wt,diff_base,reviewed_ref,fixture_prefixes=fixture_prefixes)
     patch=run_cmd(["git","diff","--binary",f"{diff_base}..{reviewed_ref}","--",*durable_pathspec],wt).stdout
     patch_path=dsd_task.task_root(run,phase,tid)/"accepted.patch"; patch_path.write_bytes(patch)
-    already_applied=False
-    if patch:
-        cp=run_cmd(["git","apply","--check",str(patch_path)],primary,check=False)
-        if cp.returncode!=0:
-            # If the exact reviewed delta is already present in primary (including an
-            # identical ambient/untracked addition), integration is already materially
-            # satisfied. This is a Git proof, not a semantic guess or automatic merge.
-            reverse=run_cmd(["git","apply","--reverse","--check",str(patch_path)],primary,check=False)
-            already_applied=reverse.returncode==0
-        if cp.returncode!=0 and not already_applied:
-            # Preserve the exact conflict without mutating the reviewed task delta.
-            # A purely primary-tree precondition may be fixed and this same reviewed
-            # ref retried; semantic/merge conflicts still require Analyst diagnosis.
-            evidence_path=dsd_task.task_root(run,phase,tid)/"integration-conflict.json"
-            untracked_collisions=[
-                path for path in added_paths
-                if ((primary/path).exists() or (primary/path).is_symlink()) and not _path_is_tracked(primary,path)
-            ]
-            producers=_known_untracked_producers(run,phase,untracked_collisions)
-            conflict_kind="divergent-untracked-authority" if untracked_collisions else "git-apply-conflict"
-            conflict={
-                "format":"dsd-integration-conflict-v1",
-                "task_id":tid,"phase_id":phase,"recorded_at":now(),
-                "kind":conflict_kind,
-                "primary_head":git_text(primary,"rev-parse","HEAD"),
-                "reviewed_ref":reviewed_ref,"diff_base":diff_base,"patch":str(patch_path),
-                "changed_paths":integration_paths,"untracked_collisions":untracked_collisions,
-                "known_tbag_producers":producers,
-                "git_apply_error":cp.stderr.decode(errors="replace")[:4000],
-            }
-            dsd_task.write_json(evidence_path,conflict)
-            task_path=dsd_task.task_file(run,phase,tid)
-            with dsd_task.file_lock(task_path.with_suffix(".lock")):
-                current=dsd_task.load_json(task_path)
-                current["status"]="needs-analysis"
-                current["last_integration_conflict"]={**conflict,"evidence":str(evidence_path.resolve())}
-                current["updated_at"]=now(); dsd_task.write_json(task_path,current)
-            return {
-                "task_id":tid,"integrated":False,"changed":False,"integration_conflict":True,
-                "status":"needs-analysis","next_action":"diagnose-or-fix-primary-precondition-then-retry-integrate",
-                "acceptance_preserved":True,"reviewed_ref":reviewed_ref,
-                "evidence":str(evidence_path.resolve()),"patch":str(patch_path),
-                "diff_base":diff_base,"rebased_baseline_fallback":rebased,
-            }
-        if not already_applied:
-            run_cmd(["git","apply",str(patch_path)],primary)
-        # Git apply is normally atomic, but integration is an authority boundary: do
-        # not assert ``integrated`` until Git can prove the complete reviewed patch is
-        # materially present in primary, including newly added ignored files.
-        materialized=run_cmd(["git","apply","--reverse","--check",str(patch_path)],primary,check=False)
-        if materialized.returncode!=0:
-            evidence_path=dsd_task.task_root(run,phase,tid)/"integration-conflict.json"
-            conflict={
-                "format":"dsd-integration-conflict-v1",
-                "task_id":tid,"phase_id":phase,"recorded_at":now(),
-                "kind":"integration-materialization-mismatch",
-                "primary_head":git_text(primary,"rev-parse","HEAD"),
-                "reviewed_ref":reviewed_ref,"diff_base":diff_base,"patch":str(patch_path),
-                "changed_paths":integration_paths,
-                "git_reverse_check_error":materialized.stderr.decode(errors="replace")[:4000],
-            }
-            dsd_task.write_json(evidence_path,conflict)
-            task_path=dsd_task.task_file(run,phase,tid)
-            with dsd_task.file_lock(task_path.with_suffix(".lock")):
-                current=dsd_task.load_json(task_path)
-                current["status"]="needs-analysis"
-                current["last_integration_conflict"]={**conflict,"evidence":str(evidence_path.resolve())}
-                current["updated_at"]=now(); dsd_task.write_json(task_path,current)
-            return {
-                "task_id":tid,"integrated":False,"changed":True,"integration_conflict":True,
-                "status":"needs-analysis","next_action":"inspect-incomplete-primary-materialization",
-                "acceptance_preserved":True,"reviewed_ref":reviewed_ref,
-                "evidence":str(evidence_path.resolve()),"patch":str(patch_path),
-            }
+    try:
+        delivery=_land_reviewed_patch(
+            run,phase,tid,primary,
+            patch_path=patch_path,patch=patch,integration_paths=integration_paths,
+            added_paths=added_paths,reviewed_ref=reviewed_ref,
+        )
+    except ValueError as exc:
+        evidence_path=dsd_task.task_root(run,phase,tid)/"integration-conflict.json"
+        message=str(exc)
+        collisions=[
+            path for path in added_paths
+            if ((primary/path).exists() or (primary/path).is_symlink())
+        ]
+        producers=_known_untracked_producers(run,phase,collisions)
+        if message.startswith("DELIVERY_TARGET_DIRTY"):
+            kind="delivery-target-dirty"
+        elif message.startswith("DELIVERY_BRANCH_CHANGED"):
+            kind="delivery-branch-changed"
+        elif message.startswith("INTEGRATION_MATERIALIZATION_MISMATCH"):
+            kind="integration-materialization-mismatch"
+        elif collisions:
+            kind="divergent-untracked-authority"
+        else:
+            kind="git-delivery-conflict"
+        conflict={
+            "format":"dsd-integration-conflict-v1",
+            "task_id":tid,"phase_id":phase,"recorded_at":now(),
+            "kind":kind,"primary_head":git_text(primary,"rev-parse","HEAD",check=False),
+            "reviewed_ref":reviewed_ref,"diff_base":diff_base,"patch":str(patch_path),
+            "changed_paths":integration_paths,"error":message[:4000],
+        }
+        if collisions:
+            conflict["untracked_collisions"]=collisions
+            conflict["known_tbag_producers"]=producers
+        dsd_task.write_json(evidence_path,conflict)
+        task_path=dsd_task.task_file(run,phase,tid)
+        with dsd_task.file_lock(task_path.with_suffix(".lock")):
+            current=dsd_task.load_json(task_path)
+            current["status"]="needs-analysis"
+            current["last_integration_conflict"]={**conflict,"evidence":str(evidence_path.resolve())}
+            current["updated_at"]=now(); dsd_task.write_json(task_path,current)
+        return {
+            "task_id":tid,"integrated":False,"changed":False,"integration_conflict":True,
+            "status":"needs-analysis","next_action":"diagnose-or-fix-primary-precondition-then-retry-integrate",
+            "acceptance_preserved":True,"reviewed_ref":reviewed_ref,
+            "evidence":str(evidence_path.resolve()),"patch":str(patch_path),
+            "diff_base":diff_base,"rebased_baseline_fallback":rebased,
+            "error":message[:1200],
+        }
     # A failed apply must not consume an unchanged Reviewer PASS. If this is a
     # direct retry after the primary-tree precondition was repaired, restore the
     # accepted lifecycle state only after the exact reviewed patch applies.
@@ -1174,21 +1287,19 @@ def _command_integrate_unlocked(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError("integration retry authority changed while applying the patch; reconcile before continuing")
             current["status"]="accepted"; current["updated_at"]=now(); dsd_task.write_json(task_path,current)
             acceptance_basis=current_basis
-    # Mark integrated only after primary apply succeeds. Record which reviewed paths
-    # remain non-tracked in primary so every later T-BAG view can reconstruct the full
-    # integrated primary state without importing unrelated ambient untracked files.
-    integrated_untracked=[
-        path for path in integration_paths
-        if ((primary/path).exists() or (primary/path).is_symlink()) and not _path_is_tracked(primary,path)
-    ]
+    # "Integrated" now means delivered: the reviewed delta is committed on the
+    # run's primary branch and the commit is an ancestor of its current HEAD.
     class A: pass
-    a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid; a.integration_paths=integration_paths; a.integration_untracked_paths=integrated_untracked
+    a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid
+    a.integration_paths=integration_paths; a.integration_untracked_paths=[]
+    a.integration_commit=delivery["commit"]; a.integration_branch=delivery["branch"]
+    a.primary_head_before=delivery["head_before"]; a.delivery_evidence=delivery["evidence"]
     result=dsd_task.command_integrated(a)
-    # Successful integration output is intentionally tiny; detailed provenance remains
-    # in task/workspace state and accepted.patch. Emit exceptional mechanics only when
-    # they actually occurred.
-    result["changed"]=bool(patch) and not already_applied
-    if already_applied: result["already_applied"]=True
+    result["changed"]=bool(delivery.get("changed"))
+    result["integration_commit"]=delivery["commit"]
+    result["integration_branch"]=delivery["branch"]
+    result["delivery_evidence"]=delivery["evidence"]
+    if patch and not delivery.get("changed"): result["already_landed"]=True
     if rebased: result["rebased_baseline_fallback"]=True
     if retrying_conflict: result["retried_prior_integration_conflict"]=True
     if acceptance_basis=="explicit-human-authority": result["acceptance_basis"]=acceptance_basis
@@ -1249,6 +1360,58 @@ def command_integrate(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
+def command_repair_delivery(args: argparse.Namespace) -> dict[str, Any]:
+    """Repair only legacy claimed integration from its frozen accepted.patch."""
+    run=args.run_root.resolve(); phase=dsd_task.slug(args.phase_id); tid=dsd_task.slug(args.task_id)
+    with dsd_task.file_lock(run/".workspace.lock"):
+        task=dsd_task.load_task(run,phase,tid)
+        status=task_delivery_status(run,phase,task)
+        if status.get("verified"):
+            return {"task_id":tid,"repaired":False,"already_verified":True,"integration_commit":task.get("integration_commit")}
+        if status.get("reason") not in {"legacy-integrated-without-commit-proof","delivery-receipt-missing"} or not status.get("repairable"):
+            raise ValueError(
+                f"DELIVERY_REPAIR_NOT_MECHANICAL: {phase}/{tid} cannot be repaired from frozen integration evidence "
+                f"(reason={status.get('reason')}); diagnose/replan instead of inventing delivery"
+            )
+        patch_path=dsd_task.task_root(run,phase,tid)/"accepted.patch"
+        patch=patch_path.read_bytes()
+        integration_paths=[str(x) for x in task.get("integration_paths",[]) if str(x)]
+        if patch and not integration_paths:
+            raise ValueError("DELIVERY_REPAIR_NOT_MECHANICAL: accepted.patch is non-empty but recorded integration_paths are missing")
+        info=dsd_task.load_run(run); primary=Path(str(info["project_root"])).resolve()
+        reviewed_ref=str((task.get("last_review") or {}).get("checkpoint_ref") or "")
+        added_paths=[path for path in integration_paths if not _path_is_tracked(primary,path)]
+        delivery=_land_reviewed_patch(
+            run,phase,tid,primary,
+            patch_path=patch_path,patch=patch,integration_paths=integration_paths,
+            added_paths=added_paths,reviewed_ref=reviewed_ref,
+            allow_exact_materialized_tracked=True,
+        )
+        task_path=dsd_task.task_file(run,phase,tid)
+        with dsd_task.file_lock(task_path.with_suffix(".lock")):
+            current=dsd_task.load_json(task_path)
+            if str(current.get("status") or "")!="integrated":
+                raise ValueError("DELIVERY_REPAIR_RACE: task status changed while repairing delivery")
+            current["integration_commit"]=delivery["commit"]
+            current["integration_branch"]=delivery["branch"]
+            current["primary_head_before_integration"]=delivery["head_before"]
+            current["delivery_evidence"]=delivery["evidence"]
+            current["integration_untracked_paths"]=[]
+            current["delivery_repaired_at"]=now()
+            current["updated_at"]=now()
+            dsd_task.write_json(task_path,current)
+        verified=task_delivery_status(run,phase,dsd_task.load_task(run,phase,tid))
+        if not verified.get("verified"):
+            raise ValueError(f"DELIVERY_REPAIR_FAILED: committed repair did not verify: {verified.get('reason')}")
+        _invalidate_analysis_view_unlocked(run)
+    gc_analysis_views(run)
+    return {
+        "task_id":tid,"repaired":True,"status":"integrated",
+        "integration_commit":delivery["commit"],"integration_branch":delivery["branch"],
+        "delivery_evidence":delivery["evidence"],
+    }
+
+
 def live_attempt_exists(task: dict[str,Any]) -> bool:
     # Cleanup is destructive: an attempt without a terminal event is unresolved even
     # when its monitor died. Preserve its worktree/evidence for Recovery.
@@ -1289,6 +1452,8 @@ def _command_cleanup_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     ws=load_workspace(run,phase,tid)
     if live_attempt_exists(task): raise ValueError("task still has a live/unresolved worker attempt; refusing cleanup")
     mode=str(ws.get("mode") or "isolated-worktree"); status=str(task.get("status") or "")
+    if status=="integrated" and not task_delivery_status(run,phase,task).get("verified"):
+        raise ValueError("claimed integration has no valid primary-branch delivery proof; refusing cleanup of the only retained task workspace")
     if mode=="analysis-view" and ws.get("released") and task.get("workspace_cleaned_at"):
         return {"task_id":tid,"cleaned":False,"already_cleaned":True,"reason":task.get("workspace_cleanup_reason")}
     force=bool(getattr(args,"force",False)); explicit_reason=str(getattr(args,"reason",None) or "").strip()
@@ -1451,7 +1616,7 @@ def reap_safe_runtime(run: Path, *, phase_id: str | None = None, drop_current_an
             if live_attempt_exists(task):
                 skipped.append({"phase_id":phase,"task_id":tid,"reason":"live-attempt"}); continue
             status=str(task.get("status") or "")
-            complete=status in {"integrated","superseded"} or dsd_task.valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration"))
+            complete=(status=="integrated" and task_delivery_status(run,phase,task).get("verified")) or status=="superseded" or dsd_task.valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration"))
             if not complete:
                 skipped.append({"phase_id":phase,"task_id":tid,"reason":f"status:{status}"}); continue
             class A: pass
@@ -1488,6 +1653,8 @@ def _purge_run_blockers(run: Path) -> list[dict[str, str]]:
         ws_path=workspace_path(run,phase,tid)
         if not ws_path.is_file(): continue
         status=str(task.get("status") or "")
+        if status=="integrated" and not task_delivery_status(run,phase,task).get("verified"):
+            blockers.append({"phase_id":phase,"task_id":tid,"reason":"integrated-without-primary-branch-delivery-proof"}); continue
         if status=="cancelled" and not task.get("human_cancellation"):
             blockers.append({"phase_id":phase,"task_id":tid,"reason":"cancelled-without-human-authority"}); continue
         if status=="superseded":
@@ -1618,6 +1785,10 @@ def command_archive_run(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); info=dsd_task.load_run(run); status=str(info.get("status") or "active")
     if status not in {"completed","abandoned"}:
         raise ValueError(f"archive-run requires completed/abandoned status, got {status!r}")
+    if status=="completed":
+        audit=delivery_audit(run)
+        if audit.get("blockers"):
+            raise ValueError(f"archive-run refuses completed state with unproven delivery: {(audit.get('blockers') or [])[:8]}")
     live=[]
     for task in dsd_task.iter_run_tasks(run):
         if dsd_task.task_has_live_attempt(task): live.append(str(task.get("task_id") or ""))
@@ -1655,7 +1826,7 @@ def command_archive_run(args: argparse.Namespace) -> dict[str, Any]:
 
 def parser() -> argparse.ArgumentParser:
     ap=argparse.ArgumentParser(description=__doc__); sub=ap.add_subparsers(dest="command",required=True)
-    for name in ("create","checkpoint","integrate","cleanup"):
+    for name in ("create","checkpoint","integrate","repair-delivery","cleanup"):
         p=sub.add_parser(name); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
         if name=="checkpoint": p.add_argument("--label",required=True)
         if name=="integrate": p.add_argument("--review-pass-report",type=Path,help="explicitly record this gated Reviewer report as PASS, accept, then integrate in one control call")
@@ -1666,6 +1837,7 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("purge-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--dry-run",action="store_true")
     p=sub.add_parser("archive-run"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--dry-run",action="store_true")
     p=sub.add_parser("disk-usage"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--include-shared-home-cache",action="store_true")
+    p=sub.add_parser("audit-delivery"); p.add_argument("--run-root",type=Path,required=True)
     p=sub.add_parser("gc-analysis-views"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--drop-current-if-unused",action="store_true")
     p=sub.add_parser("invalidate-analysis-view"); p.add_argument("--run-root",type=Path,required=True)
     return ap
@@ -1677,10 +1849,12 @@ def main()->int:
         if args.command=="create": out=command_create(args)
         elif args.command=="checkpoint": out=command_checkpoint(args)
         elif args.command=="integrate": out=command_integrate(args)
+        elif args.command=="repair-delivery": out=command_repair_delivery(args)
         elif args.command=="cleanup-phase": out=command_cleanup_phase(args)
         elif args.command=="purge-run": out=command_purge_run(args)
         elif args.command=="archive-run": out=command_archive_run(args)
         elif args.command=="disk-usage": out=disk_usage_snapshot(args.run_root.resolve(),include_shared_home_cache=bool(args.include_shared_home_cache))
+        elif args.command=="audit-delivery": out=delivery_audit(args.run_root.resolve())
         elif args.command=="gc-analysis-views": out={"removed":gc_analysis_views(args.run_root.resolve(),drop_current_if_unused=args.drop_current_if_unused)}
         elif args.command=="invalidate-analysis-view": invalidate_analysis_view(args.run_root.resolve()); out={"invalidated":True}
         else: out=command_cleanup(args)

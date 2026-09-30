@@ -42,7 +42,7 @@ Accepted specialist findings inform downstream work without widening authority. 
 
 Allocation follows mutation needs:
 
-- **Mutating task:** isolated worktree of the integrated primary line: `HEAD` + tracked primary changes + still-non-tracked paths with T-BAG integration provenance. Ambient untracked files stay excluded. Reviewer/Fixer and same-task diagnosis use that worktree.
+- **Mutating task:** isolated worktree of the primary Git line plus pre-existing tracked primary changes. Ambient untracked files stay excluded. Reviewer/Fixer and same-task diagnosis use that worktree.
 - **Standalone read-only/result role:** shared frozen **analysis view** of the same integrated line; task/attempt/report state remains separate.
 - **Read-only role on a mutating task:** existing task worktree, because its unintegrated diff is the evidence.
 
@@ -72,11 +72,11 @@ Three cumulative same-session no-movement/nonretryable failures abandon it and c
 
 ## Integration
 
-Project-changing tasks normally land with `integrate --review-pass-report <gated-review-report>`: parent supplies semantic PASS once; T-BAG records PASS → acceptance → integration mechanically. The Reviewer checkpoint is the reviewed state; later worktree movement is refused.
+Project-changing tasks land with `integrate --review-pass-report <gated-review-report>`. The Reviewer checkpoint is frozen; later task movement is refused. T-BAG applies exactly that delta to the run's recorded primary branch, commits only its paths, records `delivery.json`, and verifies the integration commit is an ancestor of current primary HEAD before setting `integrated`.
 
-Normally the patch is baseline → reviewed checkpoint. If a legitimate rebase displaced an **empty** baseline, integration may use `merge-base(current primary, reviewed checkpoint)`; pre-existing primary dirty state forbids that fallback. Apply is checked before primary mutation, then reverse-checked before `integrated` is asserted so the complete reviewed patch must materially exist. Exact already-present content closes mechanically; divergent untracked candidates are preserved with known producers; genuine authority/merge conflicts route to Analyst.
+Unrelated owner dirty/staged paths are preserved. Owner changes on a landing path, branch drift, apply conflicts, or incomplete materialization fail closed without consuming the reviewed checkpoint. Materialization is reverse-checked before `integrated`; reviewed additions are force-added to the delivery commit even when `.gitignore` hides them. Later workspaces inherit ordinary Git state; there is no parallel “integrated untracked” channel.
 
-Successful integration marks the task `integrated` and invalidates the current analysis view. Reviewed non-tracked additions become integrated primary state even when `.gitignore` hides them; every later view receives them. Dependencies govern readiness, not visibility of already-integrated files. Independent accepted patches may integrate in dependency-valid order when they apply cleanly.
+Legacy `integrated` state without commit/receipt ancestry proof is **not delivered**. If its frozen `accepted.patch` and integration paths still prove an exact safe landing, deterministic advance repairs it with `repair-delivery`; otherwise reconciliation is `delivery-broken`, launches stop, and retained workspaces stay protected. `audit-delivery` shows the blocker.
 
 Fresh Reviewer PASS is normal task acceptance. Do **not** add generic post-integration review. Extra Verification/Audit needs a named predicate, cross-task interaction, or evidence gap. Skipped required gates stay gaps.
 

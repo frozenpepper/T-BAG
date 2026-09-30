@@ -312,6 +312,16 @@ def load_task(run: Path, phase: str, task: str) -> dict[str, Any]:
     return data
 
 
+def integration_delivered(run: Path, phase: str, task: dict[str, Any]) -> bool:
+    if not task.get("requires_integration"):
+        return True
+    try:
+        import dsd_workspace
+        return bool(dsd_workspace.task_delivery_status(run,phase,task).get("verified"))
+    except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError):
+        return False
+
+
 def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | None = None) -> bool:
     """Return whether one dependency obligation has been discharged.
 
@@ -337,7 +347,7 @@ def dependency_satisfied(run: Path, phase: str, task_id: str, _seen: set[str] | 
         successors = [slug(str(item)) for item in successors if str(item).strip()]
         return bool(successors) and all(dependency_satisfied(run, phase, successor, seen) for successor in successors)
     if dep.get("requires_integration"):
-        return dep.get("status") == "integrated"
+        return dep.get("status") == "integrated" and integration_delivered(run,phase,dep)
     if dep.get("status") not in {"accepted", "integrated"}:
         return False
     # Verification and phase gates are predicates, not merely evidence-producing
@@ -684,6 +694,18 @@ def _default_runtime_root(project: Path, run_id: str) -> Path:
     return (project.resolve() / CONTROL_DIR / "runtime" / slug(run_id)).resolve()
 
 
+def project_git_position(project: Path) -> tuple[str|None,str|None]:
+    """Best-effort Git identity; mutable workspace/integration paths enforce Git later."""
+    root_cp=subprocess.run(["git","rev-parse","--show-toplevel"],cwd=project,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    if root_cp.returncode!=0 or not root_cp.stdout.strip() or Path(root_cp.stdout.strip()).resolve()!=project:
+        return None,None
+    branch_cp=subprocess.run(["git","symbolic-ref","--quiet","--short","HEAD"],cwd=project,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    head_cp=subprocess.run(["git","rev-parse","HEAD"],cwd=project,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    branch=branch_cp.stdout.strip() if branch_cp.returncode==0 and branch_cp.stdout.strip() else None
+    head=head_cp.stdout.strip() if head_cp.returncode==0 and head_cp.stdout.strip() else None
+    return branch,head
+
+
 def command_init(args: argparse.Namespace) -> dict[str, Any]:
     project = args.project_root.resolve(); run = args.run_root.resolve()
     if not project.is_dir(): raise ValueError(f"project root missing: {project}")
@@ -696,6 +718,13 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         if Path(str(data.get("project_root") or "")).resolve()!=project or data.get("run_id")!=slug(args.run_id):
             raise ValueError("existing run identity does not match supplied project/run-id")
         runtime=Path(str(data["runtime_root"])).resolve()
+        if not data.get("primary_branch"):
+            current_branch,current_head=project_git_position(project)
+            if current_branch:
+                data["primary_branch"]=current_branch
+                if current_head and not data.get("primary_head_at_start"): data["primary_head_at_start"]=current_head
+                data["primary_branch_backfilled_at"]=now()
+                write_json(path,data)
         # Legacy runs predate runtime ownership markers. Auto-backfill only when the
         # durable runtime path is exactly T-BAG's canonical per-project/per-run path;
         # never convert an arbitrary historical custom directory into purge authority.
@@ -718,6 +747,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
     launch_interval=float(getattr(args,"launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS))
     if not math.isfinite(launch_interval) or launch_interval < 0:
         raise ValueError("--launch-start-interval-seconds must be a finite number >= 0")
+    primary_branch,primary_head=project_git_position(project)
     worker_runtimes = {
         "grunt": _runtime_spec(getattr(args,"grunt_driver",None),getattr(args,"grunt_model",None)),
         "analyst": _runtime_spec(getattr(args,"analyst_driver",None),getattr(args,"analyst_model",None)),
@@ -731,6 +761,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
     data = {
         "format": RUN_FORMAT, "run_id": slug(args.run_id), "project_root": str(project),
         "runtime_root": str(runtime), "created_at": now(), "status": "active",
+        "primary_branch":primary_branch,"primary_head_at_start":primary_head,
         "max_workers": args.max_workers,
         "max_attempts_per_task": max_attempts,
         "launch_start_interval_seconds": launch_interval,
@@ -749,6 +780,8 @@ def command_runtime_status(args: argparse.Namespace) -> dict[str, Any]:
     result={
         "run_id":info["run_id"],
         "status":info.get("status","active"),
+        "primary_branch":info.get("primary_branch"),
+        "primary_head_at_start":info.get("primary_head_at_start"),
         "escalation_enabled":escalation_enabled(info),
         "max_attempts_per_task":int(info.get("max_attempts_per_task") or DEFAULT_MAX_ATTEMPTS_PER_TASK),
         "launch_start_interval_seconds":float(info.get("launch_start_interval_seconds",DEFAULT_LAUNCH_START_INTERVAL_SECONDS)),
@@ -860,7 +893,27 @@ def command_set_run_status(args: argparse.Namespace) -> dict[str, Any]:
         if args.status!="active":
             live=[t.get("task_id") for t in iter_run_tasks(run) if task_has_live_attempt(t)]
             if live: raise ValueError(f"cannot set run status {args.status!r} while worker attempts are live: {live[:5]}")
+        if args.status=="completed":
+            class CompletionProbe: pass
+            probe=CompletionProbe(); probe.run_root=run; probe.phase_id=None; probe.no_sweep=True; probe.details=False
+            state=command_reconcile_run(probe)
+            blockers=[]
+            if state.get("delivery_blockers"): blockers.append("delivery")
+            if state.get("live_attempts"): blockers.append("live-attempts")
+            if state.get("first_useful_actions"): blockers.append("authorized-actions")
+            if state.get("unresolved_state"): blockers.append("unresolved-state")
+            if int(state.get("backlog_count") or 0): blockers.append("backlog")
+            if int(state.get("waiting_dependency_count") or 0): blockers.append("waiting-dependencies")
+            if blockers:
+                raise ValueError(
+                    f"RUN_NOT_DELIVERED: cannot mark completed while {', '.join(blockers)} remain. "
+                    "Use reconcile-run/audit-delivery; completion is a delivered-state claim, not a bookkeeping override."
+                )
         if args.status=="human-blocked":
+            import dsd_workspace
+            delivery=dsd_workspace.delivery_audit(run)
+            if delivery.get("blockers"):
+                raise ValueError("DELIVERY_BEFORE_HUMAN_BLOCK: repair primary-branch delivery before converting the run into an owner-attention wait")
             tasks=list(iter_run_tasks(run))
             blocked=any(
                 t.get("status")=="blocked" and isinstance(t.get("last_escalation"),dict) and t["last_escalation"].get("target")=="human"
@@ -1456,7 +1509,7 @@ def _phase_task_success(run: Path, phase: str, task: dict[str, Any]) -> bool:
         return valid_human_cancellation(task)
     if status=="parked":
         return False
-    if task.get("requires_integration"): return status=="integrated"
+    if task.get("requires_integration"): return status=="integrated" and integration_delivered(run,phase,task)
     if status not in {"accepted","integrated"}: return False
     if task.get("kind")=="verification": return accepted_outcome(task)=="pass"
     return True
@@ -1725,7 +1778,7 @@ def _workspace_cleanup_candidate(run: Path, phase: str, task: dict[str, Any]) ->
     status=str(task.get("status") or "")
     if status=="superseded" and superseded_workspace_retention(run,phase,task).get("retain"):
         return False
-    return status in {"integrated","superseded"} or valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration"))
+    return (status=="integrated" and integration_delivered(run,phase,task)) or status=="superseded" or valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration"))
 
 
 def _followup_triage_task_for(task: dict[str, Any], findings: list[dict[str, Any]]) -> str | None:
@@ -1977,6 +2030,13 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     implementation, reinterpret worker reports, or invent technical priorities.
     """
     run=args.run_root.resolve(); info=load_run(run)
+    try:
+        import dsd_workspace
+        delivery=dsd_workspace.delivery_audit(run)
+    except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+        delivery={"verified":False,"branch":None,"head":None,"verified_integrations":0,
+                  "blockers":[{"reason":"delivery-audit-failed","error":str(exc)[:900]}]}
+    delivery_blockers=list(delivery.get("blockers") or [])
     housekeeping={}
     if not getattr(args,"no_sweep",False):
         class S: pass
@@ -1986,8 +2046,8 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
         # universal start/resume boundary, so it opportunistically reaps only resources
         # whose durability can already be proved mechanically.
         try:
-            import dsd_workspace
-            housekeeping=dsd_workspace.reap_safe_runtime(run,phase_id=getattr(args,"phase_id",None))
+            if not delivery_blockers:
+                housekeeping=dsd_workspace.reap_safe_runtime(run,phase_id=getattr(args,"phase_id",None))
             scratch_gc=reap_attempt_scratch(run,phase_id=getattr(args,"phase_id",None))
             if scratch_gc.get("count"): housekeeping["attempt_scratch"]=scratch_gc
         except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
@@ -2008,7 +2068,8 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
                 actions.append(action)
                 if action.get("action")=="await-human-decision": human.append(action)
             if _workspace_cleanup_candidate(run,phase,task): cleanup.append({"phase_id":phase,"task_id":tid})
-            tasks.append({"phase_id":phase,"task_id":tid,"status":task.get("status"),"role":task.get("role"),"tier":task.get("tier"),"live":bool(current_live),"quiescent_conduit":_quiescent_reusable_review_conduit(task),"brief":task.get("brief"),"label":task_brief_label(task),"requires_integration":bool(task.get("requires_integration")),"valid_human_cancellation":valid_human_cancellation(task)})
+            delivered=integration_delivered(run,phase,task) if task.get("requires_integration") and task.get("status")=="integrated" else None
+            tasks.append({"phase_id":phase,"task_id":tid,"status":task.get("status"),"role":task.get("role"),"tier":task.get("tier"),"live":bool(current_live),"quiescent_conduit":_quiescent_reusable_review_conduit(task),"brief":task.get("brief"),"label":task_brief_label(task),"requires_integration":bool(task.get("requires_integration")),"delivery_verified":delivered,"valid_human_cancellation":valid_human_cancellation(task)})
     for phase in phases:
         gate=phase_gate_state(run,phase)
         if gate.get("required") and gate.get("ready"):
@@ -2018,9 +2079,30 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     launch_actions={"launch-ready-task","launch-recovery","launch-analyst-discovery","launch-fixer","launch-fresh-reviewer","launch-or-reuse-fresh-plan-reviewer","resume-recorded-session","retry-same-role-retained-workspace"}
     nonlaunch=[a for a in actions if a.get("action") not in ignored|launch_actions]
     launches=[a for a in actions if a.get("action") in launch_actions]
-    first_useful=nonlaunch+launches[:slots]
+    delivery_repairs=[
+        {
+            "action":"repair-legacy-delivery",
+            "phase_id":str(item.get("phase_id") or ""),
+            "task_id":str(item.get("task_id") or ""),
+            "reason":str(item.get("reason") or ""),
+        }
+        for item in delivery_blockers
+        if item.get("repairable") and item.get("phase_id") and item.get("task_id")
+    ]
+    first_useful=delivery_repairs if delivery_blockers else nonlaunch+launches[:slots]
     classified={(a.get("phase_id"),a.get("task_id")) for a in actions}
-    unresolved_state=[t for t in tasks if not t.get("live") and not t.get("quiescent_conduit") and str(t.get("status") or "") not in {"accepted","integrated","superseded","parked"} and not (str(t.get("status") or "")=="cancelled" and t.get("valid_human_cancellation")) and (t.get("phase_id"),t.get("task_id")) not in classified]
+    unresolved_state=[
+        t for t in tasks
+        if not t.get("live") and not t.get("quiescent_conduit")
+        and (
+            (str(t.get("status") or "")=="integrated" and t.get("requires_integration") and not t.get("delivery_verified"))
+            or (
+                str(t.get("status") or "") not in {"accepted","integrated","superseded","parked"}
+                and not (str(t.get("status") or "")=="cancelled" and t.get("valid_human_cancellation"))
+                and (t.get("phase_id"),t.get("task_id")) not in classified
+            )
+        )
+    ]
     status_counts: dict[str,int] = {}
     for row in tasks:
         key=str(row.get("status") or "unknown"); status_counts[key]=status_counts.get(key,0)+1
@@ -2028,7 +2110,7 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     action_by_task={(str(a.get("phase_id")),str(a.get("task_id"))):a for a in actions}
     for row in tasks:
         status=str(row.get("status") or "")
-        closed=status in {"integrated","superseded"} or (status=="cancelled" and bool(row.get("valid_human_cancellation"))) or (status=="accepted" and not row.get("requires_integration")) or bool(row.get("quiescent_conduit"))
+        closed=(status=="integrated" and bool(row.get("delivery_verified"))) or status=="superseded" or (status=="cancelled" and bool(row.get("valid_human_cancellation"))) or (status=="accepted" and not row.get("requires_integration")) or bool(row.get("quiescent_conduit"))
         if closed: continue
         item=dict(row); action=action_by_task.get((str(row.get("phase_id")),str(row.get("task_id"))))
         if action: item["next_action"]=action.get("action"); item["blocked_by"]=action.get("blocked_by")
@@ -2042,10 +2124,17 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
     # stable configuration belong behind --details.
     result={
         "run_id":info.get("run_id"),"run_status":info.get("status"),
+        "delivery":{
+            "verified":bool(delivery.get("verified")),"branch":delivery.get("branch"),"head":delivery.get("head"),
+            "verified_integrations":int(delivery.get("verified_integrations") or 0),
+            "blocker_count":len(delivery_blockers),
+        },
         "worker_budget":{"max":limit,"live":len(live),"free":slots},
         "backlog_count":len(backlog),"waiting_dependency_count":waiting_count,
         "parked_count":sum(1 for item in backlog if str(item.get("status") or "")=="parked"),
     }
+    if delivery_blockers:
+        result["delivery_blockers"]=delivery_blockers[:8]
     if first_useful: result["first_useful_actions"]=first_useful
     if len(live)==0 and any(a.get("action") in launch_actions for a in first_useful):
         result["scheduler_warning"]="READY work exists while no workers are live; launch useful work before routine housekeeping or ending the turn"
@@ -2062,15 +2151,21 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
             "swept_stale":swept,"live_attempts":live,"actions":actions,"first_useful_actions":first_useful,
             "human_blocks":human,"unresolved_state":unresolved_state,"task_count":len(tasks),"status_counts":status_counts,
             "cleanup_candidates":cleanup,"runtime_housekeeping":housekeeping,"backlog":backlog,
+            "delivery_audit":delivery,
         })
     return result
 
 def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     """Return compact Human orientation; verbose inventories are explicit diagnostics."""
     run=args.run_root.resolve(); info=load_run(run); phases_root=run/"phases"; details=bool(getattr(args,"details",False))
+    try:
+        import dsd_workspace
+        delivery=dsd_workspace.delivery_audit(run)
+    except Exception as exc:
+        delivery={"verified":False,"branch":None,"head":None,"verified_integrations":0,"blockers":[{"reason":"delivery-audit-failed","error":str(exc)[:800]}]}
     phases=[slug(args.phase_id)] if getattr(args,"phase_id",None) else sorted(p.name for p in phases_root.iterdir() if p.is_dir()) if phases_root.is_dir() else []
     state_labels={
-        "planned":"queued","ready":"ready to start","active":"worker result pending","awaiting-review":"independent review pending",
+        "planned":"queued","ready":"ready to start","active":"active without live worker","awaiting-review":"independent review pending",
         "needs-fix":"review findings being fixed","needs-analysis":"Analyst diagnosis/replanning needed","blocked":"owner decision required",
         "parked":"parked by owner","cancelled":"cancelled by owner",
         "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
@@ -2108,14 +2203,22 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
                     "no_movement_resume_failures":no_move,
                     **({"provider_failures":provider} if provider else {}),
                 })
-            if status in {"integrated","superseded"} or valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration")):
+            delivery_verified=integration_delivered(run,phase,task) if status=="integrated" and task.get("requires_integration") else None
+            if (status=="integrated" and delivery_verified) or status=="superseded" or valid_human_cancellation(task) or (status=="accepted" and not task.get("requires_integration")):
                 if status!="superseded":
-                    outcome="cancelled by Human" if status=="cancelled" else "integrated after fresh Review" if status=="integrated" else (accepted_outcome(task) or "accepted specialist result")
+                    if status=="cancelled":
+                        outcome="cancelled by Human"
+                    elif status=="integrated":
+                        short=str(task.get("integration_commit") or "")[:12]
+                        outcome=f"landed {short} on {task.get('integration_branch')}" if short else "landed on primary branch"
+                    else:
+                        outcome=accepted_outcome(task) or "accepted specialist result"
                     completed.append({"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
                     if details: completed_sources[(phase,tid)]=task
                 continue
-            item={"phase":phase,"task_id":task.get("task_id"),"state":state_labels.get(status,status)}
+            item={"phase":phase,"task_id":task.get("task_id"),"state":"delivery unverified" if status=="integrated" and task.get("requires_integration") else state_labels.get(status,status)}
             if live_now:
+                item["state"]="worker running"
                 item["purpose"]=task_brief_objective(task,max_chars=purpose_chars); running.append(item)
             else:
                 backlog.append(item); backlog_sources[(phase,tid)]=task
@@ -2138,6 +2241,11 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         backlog_preview.append(item)
     result={
         "run_status":info.get("status","active"),
+        "delivery":{
+            "verified":bool(delivery.get("verified")),"branch":delivery.get("branch"),"head":delivery.get("head"),
+            "verified_integrations":int(delivery.get("verified_integrations") or 0),
+            "blocker_count":len(delivery.get("blockers") or []),
+        },
         "running":running,
         "recent_outcomes":recent,
         "backlog_count":len(backlog),
@@ -2145,6 +2253,8 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         "backlog_preview":backlog_preview,
     }
     if len(backlog)>backlog_limit: result["backlog_preview_truncated"]=True
+    if delivery.get("blockers"):
+        result["delivery_blockers"]=(delivery.get("blockers") or [])[:8]
     if gates: result["phase_gates"]=gates
     if open_followups:
         limit=8 if details else 4
@@ -2439,12 +2549,12 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
     launches workers. It only removes parent turns that would otherwise be a switch
     statement over durable state and exact worker routing tokens.
     """
-    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]; blocked_actions=[]; blocked_keys=set()
+    run=args.run_root.resolve(); max_steps=int(args.max_steps or 12); applied=[]; blocked_actions=[]; blocked_keys=set(); applied_keys=set()
     reducible_actions={
         "gate-finished-attempt","route-capability-escalation","record-review-outcome",
         "record-plan-review-outcome","record-context-review-outcome","record-verification-result",
         "record-phase-gate","record-analyst-disposition","accept-specialist-result",
-        "accept-reviewed-task","integrate-accepted-task","prepare-followup-triage","prepare-phase-gate",
+        "accept-reviewed-task","integrate-accepted-task","repair-legacy-delivery","prepare-followup-triage","prepare-phase-gate",
     }
     def action_key(item: dict[str, Any]) -> str:
         return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
@@ -2456,9 +2566,16 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             result={"applied":applied,"stopped":"quiescent","state":state}
             if blocked_actions: result["blocked_actions"]=blocked_actions
             return result
-        available=[item for item in actions if action_key(item) not in blocked_keys]
+        available=[item for item in actions if action_key(item) not in blocked_keys|applied_keys]
         if not available:
-            return {"applied":applied,"stopped":"control-error","blocked_actions":blocked_actions,"state":state}
+            repeats=[item for item in actions if action_key(item) in applied_keys]
+            result={"applied":applied,"stopped":"control-error","blocked_actions":blocked_actions,"state":state}
+            if repeats:
+                result["repeat_bound"]={
+                    "actions":[{"action":x.get("action"),"phase_id":x.get("phase_id"),"task_id":x.get("task_id")} for x in repeats[:8]],
+                    "reason":"a successful deterministic action re-proposed itself without changing durable state",
+                }
+            return result
         # Reduce every independent mechanical transition before yielding at a launch
         # or semantic boundary. Ordering in reconciliation must not create head-of-line blocking.
         action=next((item for item in available if str(item.get("action") or "") in reducible_actions),available[0])
@@ -2530,6 +2647,9 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             elif name=="integrate-accepted-task":
                 scripts=Path(__file__).resolve().parent
                 result=_control_subprocess_json([sys.executable,str(scripts/"dsd_workspace.py"),"integrate","--run-root",str(run),"--phase-id",phase,"--task-id",tid])
+            elif name=="repair-legacy-delivery":
+                scripts=Path(__file__).resolve().parent
+                result=_control_subprocess_json([sys.executable,str(scripts/"dsd_workspace.py"),"repair-delivery","--run-root",str(run),"--phase-id",phase,"--task-id",tid])
             elif name=="prepare-followup-triage":
                 class A: pass
                 a=A(); a.run_root=run; a.phase_id=phase; a.task_id=tid
@@ -2547,6 +2667,7 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
             blocked_actions.append({"key":key,"action":name,"phase_id":phase or None,"task_id":tid or None,"error":str(exc)})
             continue
         applied.append({"action":name,"phase_id":phase or None,"task_id":tid or None,"result":result})
+        applied_keys.add(action_key(action))
     class R: pass
     r=R(); r.run_root=run; r.phase_id=getattr(args,"phase_id",None); r.no_sweep=True; r.details=False
     state=command_reconcile_run(r)
@@ -3334,16 +3455,27 @@ def command_accept(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_integrated(args: argparse.Namespace) -> dict[str, Any]:
+    """Internal landing receipt. Mutable tasks cannot become integrated from lifecycle state alone."""
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path)
         if task.get("status")!="accepted": raise ValueError("task must be accepted before integration")
+        commit=str(getattr(args,"integration_commit",None) or "")
+        branch=str(getattr(args,"integration_branch",None) or "")
+        evidence=str(getattr(args,"delivery_evidence",None) or "")
+        if task.get("requires_integration") and (not commit or not branch or not evidence):
+            raise ValueError("project-changing task requires Git delivery proof from dsd_workspace.py integrate")
         integration_paths=getattr(args,"integration_paths",None)
         integration_untracked=getattr(args,"integration_untracked_paths",None)
         if integration_paths is not None: task["integration_paths"]=list(dict.fromkeys(str(x) for x in integration_paths if str(x)))
         if integration_untracked is not None: task["integration_untracked_paths"]=list(dict.fromkeys(str(x) for x in integration_untracked if str(x)))
+        if commit:
+            task["integration_commit"]=commit
+            task["integration_branch"]=branch
+            task["primary_head_before_integration"]=str(getattr(args,"primary_head_before",None) or "")
+            task["delivery_evidence"]=evidence
         task["status"]="integrated"; task["integrated_at"]=now(); task["updated_at"]=now(); write_json(path,task)
-    return {"task_id":tid,"status":"integrated"}
+    return {"task_id":tid,"status":"integrated","integration_commit":commit or None,"integration_branch":branch or None}
 
 
 def command_supersede(args: argparse.Namespace) -> dict[str, Any]:
@@ -3378,7 +3510,7 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("poison-scan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
-    for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "integrated", "supersede"):
+    for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "supersede"):
         description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
         if name=="show": p.add_argument("--summary",action="store_true",help="compact latest-state view (default)"); p.add_argument("--details",action="store_true")
@@ -3427,7 +3559,6 @@ def main() -> int:
         elif args.command=="escalate": result=command_escalate(args)
         elif args.command=="resolve-escalation": result=command_resolve_escalation(args)
         elif args.command=="accept": result=command_accept(args)
-        elif args.command=="integrated": result=command_integrated(args)
         else: result=command_supersede(args)
         print(json.dumps(result,sort_keys=True,separators=(",",":"))); return 0
     except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:

@@ -57,6 +57,20 @@ class Rc45ProtocolTests(unittest.TestCase):
         self.assertEqual(out["applied"][0]["task_id"],"GOOD")
 
 
+    def test_successful_reducer_action_cannot_reconsume_same_key_in_one_pass(self):
+        args=SimpleNamespace(run_root=Path('/run'),phase_id=None,max_steps=12)
+        action={"action":"prepare-followup-triage","phase_id":"P","task_id":"T","finding_count":1}
+        states=[{"first_useful_actions":[action]},{"first_useful_actions":[action]}]
+        with mock.patch.object(dsd_task,"command_reconcile_run",side_effect=states), \
+             mock.patch.object(dsd_task,"command_prepare_followup_triage",return_value={"existing":True}) as prepare:
+            out=dsd_task.command_advance(args)
+        prepare.assert_called_once()
+        self.assertEqual(out["stopped"],"control-error")
+        self.assertEqual(out["repeat_bound"]["actions"][0]["action"],"prepare-followup-triage")
+        self.assertEqual(len(out["applied"]),1)
+
+
+
 class Rc45ParentTickTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.run=Path(self.tmp.name)/"run"; self.run.mkdir()
@@ -69,6 +83,26 @@ class Rc45ParentTickTests(unittest.TestCase):
     def base_state(self,**extra):
         state={"run_id":"R","run_status":"active","worker_budget":{"max":2,"live":0,"free":2},"backlog_count":0,"waiting_dependency_count":0}
         state.update(extra); return state
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    def test_unproven_delivery_is_global_stop_not_progress(self,_load,_advance,_owner):
+        blocker={"phase_id":"P","task_id":"LEGACY","reason":"legacy-integrated-without-commit-proof"}
+        state=self.base_state(
+            backlog_count=1,
+            delivery={"verified":False,"branch":"master","head":"abc","verified_integrations":0,"blocker_count":1},
+            delivery_blockers=[blocker],
+            unresolved_state=[{"phase_id":"P","task_id":"LEGACY","status":"integrated"}],
+        )
+        with mock.patch.object(parent_tick,"reconcile",return_value=state):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"delivery-broken")
+        self.assertEqual(out["turn"],"intervene")
+        self.assertEqual(out["control_error"]["code"],"delivery-broken")
+        self.assertEqual(out["delivery"]["head"],"abc")
+        self.assertNotIn("actions_before_question",out)
+        self.assertIn("delivery-broken",out["owner_notice"]["reasons"])
 
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})

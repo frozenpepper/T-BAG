@@ -507,6 +507,13 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     run_status=str(info.get("status") or "active")
     if run_status!="active":
         raise ValueError(f"run is {run_status!r}; set run status active before launching more workers")
+    delivery=dsd_workspace.delivery_audit(run)
+    if delivery.get("blockers"):
+        first=(delivery.get("blockers") or [{}])[0]
+        raise ValueError(
+            f"DELIVERY_BROKEN: primary delivery is unproven ({first.get('phase_id')}/{first.get('task_id')}: {first.get('reason')}); "
+            "run audit-delivery and repair primary-branch delivery before spending another worker attempt"
+        )
     live=live_same_task(task)
     if live: raise ValueError(f"task already has a live attempt: {live[-1].get('event_dir')}")
     status=str(task.get("status") or "")

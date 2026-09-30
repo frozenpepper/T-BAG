@@ -68,9 +68,83 @@ class WorkspaceTests(unittest.TestCase):
         (event/"terminal.json").write_text(json.dumps({"status":"process-exited","exit_code":0}))
         task=dsd_task.load_task(self.run,"P","T-FAST-LAND"); task.setdefault("attempts",[]).append({"task_id":"T-FAST-LAND","role":"reviewer","tier":"grunt","status":"gated","event_dir":str(event),"checkpoint_ref":checkpoint}); task["status"]="awaiting-review"; dsd_task.write_json(dsd_task.task_file(self.run,"P","T-FAST-LAND"),task)
         a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="T-FAST-LAND"; a.review_pass_report=report
+        before=git(self.project,"rev-parse","HEAD")
         out=dsd_workspace.command_integrate(a)
         self.assertTrue(out["changed"]); self.assertEqual((self.project/"a.txt").read_text(),"landed\n")
+        self.assertNotEqual(out["integration_commit"],before); self.assertEqual(git(self.project,"rev-parse","HEAD"),out["integration_commit"])
         final=dsd_task.load_task(self.run,"P","T-FAST-LAND"); self.assertEqual(final["status"],"integrated"); self.assertEqual(final["last_review"]["outcome"],"pass")
+        self.assertTrue(dsd_workspace.task_delivery_status(self.run,"P",final)["verified"])
+
+    def _make_legacy_dirty_integration(self, tid):
+        self.register(tid); ws=self.ws(tid); wt=Path(ws["worktree"]); (wt/"a.txt").write_text(f"{tid}-landed\n"); self.accept(tid)
+        task=dsd_task.load_task(self.run,"P",tid); reviewed=task["last_review"]["checkpoint_ref"]
+        paths,added=dsd_workspace._review_delta_paths(wt,ws["baseline_branch"],reviewed,fixture_prefixes=[])
+        patch=dsd_workspace.run_cmd(["git","diff","--binary",f"{ws['baseline_branch']}..{reviewed}","--",*paths],wt).stdout
+        patch_path=dsd_task.task_root(self.run,"P",tid)/"accepted.patch"; patch_path.write_bytes(patch)
+        dsd_workspace.run_cmd(["git","apply",str(patch_path)],self.project)
+        task=dsd_task.load_task(self.run,"P",tid); task["status"]="integrated"; task["integrated_at"]=dsd_task.now(); task["integration_paths"]=paths
+        task.pop("integration_commit",None); task.pop("integration_branch",None); task.pop("delivery_evidence",None)
+        dsd_task.write_json(dsd_task.task_file(self.run,"P",tid),task)
+        return ws,patch_path,paths,added
+
+    def test_repair_delivery_commits_exact_legacy_materialized_patch(self):
+        self._make_legacy_dirty_integration("LEGACY-REPAIR")
+        before=git(self.project,"rev-parse","HEAD")
+        task=dsd_task.load_task(self.run,"P","LEGACY-REPAIR")
+        broken=dsd_workspace.task_delivery_status(self.run,"P",task)
+        self.assertFalse(broken["verified"]); self.assertTrue(broken["repairable"]); self.assertEqual(broken["repair_action"],"repair-delivery")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="LEGACY-REPAIR"
+        out=dsd_workspace.command_repair_delivery(a)
+        self.assertTrue(out["repaired"]); self.assertNotEqual(out["integration_commit"],before)
+        self.assertEqual(git(self.project,"rev-parse","HEAD"),out["integration_commit"])
+        self.assertEqual((self.project/"a.txt").read_text(),"LEGACY-REPAIR-landed\n")
+        repaired=dsd_task.load_task(self.run,"P","LEGACY-REPAIR")
+        self.assertTrue(dsd_workspace.task_delivery_status(self.run,"P",repaired)["verified"])
+
+    def test_reconcile_and_advance_self_heal_mechanical_legacy_delivery(self):
+        self._make_legacy_dirty_integration("LEGACY-AUTO")
+        class A: pass
+        probe=A(); probe.run_root=self.run; probe.phase_id="P"; probe.no_sweep=True; probe.details=False
+        state=dsd_task.command_reconcile_run(probe)
+        self.assertEqual(state["first_useful_actions"][0]["action"],"repair-legacy-delivery")
+        advance=A(); advance.run_root=self.run; advance.phase_id="P"; advance.max_steps=12
+        out=dsd_task.command_advance(advance)
+        self.assertTrue(any(x.get("action")=="repair-legacy-delivery" for x in out["applied"]),out)
+        repaired=dsd_task.load_task(self.run,"P","LEGACY-AUTO")
+        self.assertTrue(dsd_workspace.task_delivery_status(self.run,"P",repaired)["verified"])
+
+    def test_repair_delivery_refuses_extra_owner_change_on_legacy_landing_path(self):
+        self._make_legacy_dirty_integration("LEGACY-OWNER")
+        (self.project/"a.txt").write_text("LEGACY-OWNER-landed\nowner-extra\n")
+        before=git(self.project,"rev-parse","HEAD")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="LEGACY-OWNER"
+        with self.assertRaisesRegex(ValueError,"DELIVERY_TARGET_DIRTY"):
+            dsd_workspace.command_repair_delivery(a)
+        self.assertEqual(git(self.project,"rev-parse","HEAD"),before)
+        self.assertEqual((self.project/"a.txt").read_text(),"LEGACY-OWNER-landed\nowner-extra\n")
+
+    def test_integrate_commit_preserves_unrelated_staged_owner_change(self):
+        (self.project/"b.txt").write_text("owner-staged\n"); git(self.project,"add","b.txt")
+        self.register("T-STAGED-SAFE"); ws=self.ws("T-STAGED-SAFE"); wt=Path(ws["worktree"]); (wt/"a.txt").write_text("task-only\n"); self.accept("T-STAGED-SAFE")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="T-STAGED-SAFE"
+        out=dsd_workspace.command_integrate(a)
+        self.assertEqual(git(self.project,"show","HEAD:a.txt"),"task-only")
+        self.assertEqual(git(self.project,"show","HEAD:b.txt"),"beta")
+        self.assertEqual(git(self.project,"diff","--cached","--name-only"),"b.txt")
+        self.assertEqual(out["integration_commit"],git(self.project,"rev-parse","HEAD"))
+
+    def test_integrate_refuses_owner_change_on_same_landing_path(self):
+        self.register("T-SAME-PATH"); ws=self.ws("T-SAME-PATH"); wt=Path(ws["worktree"]); (wt/"a.txt").write_text("task-version\n"); self.accept("T-SAME-PATH")
+        before=git(self.project,"rev-parse","HEAD"); (self.project/"a.txt").write_text("owner-version\n")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="T-SAME-PATH"
+        out=dsd_workspace.command_integrate(a)
+        self.assertTrue(out["integration_conflict"]); self.assertEqual(out["status"],"needs-analysis")
+        evidence=json.loads(Path(out["evidence"]).read_text()); self.assertEqual(evidence["kind"],"delivery-target-dirty")
+        self.assertEqual(git(self.project,"rev-parse","HEAD"),before); self.assertEqual((self.project/"a.txt").read_text(),"owner-version\n")
 
     def test_integrate_shortcut_preserves_reviewer_followup_obligation(self):
         self.register("T-FOLLOWUP-LAND"); ws=self.ws("T-FOLLOWUP-LAND"); wt=Path(ws["worktree"]); (wt/"a.txt").write_text("landed-with-followup\n")
@@ -650,6 +724,7 @@ class WorkspaceTests(unittest.TestCase):
         a=A();a.run_root=self.run;a.phase_id="P";a.task_id="T1";out=dsd_workspace.command_integrate(a)
         self.assertEqual(out["status"],"integrated"); self.assertTrue(out["changed"]); self.assertNotIn("verification_note",out); self.assertNotIn("integrated_state_verification_policy",out)
         self.assertEqual((self.project/"a.txt").read_text(),"task-change\n"); self.assertEqual((self.project/"b.txt").read_text(),"owner-dirty\n")
+        self.assertEqual(git(self.project,"show","HEAD:b.txt"),"beta"); self.assertIn(" b.txt",git(self.project,"status","--porcelain=v1"))
 
     def test_integration_accepts_byte_identical_ambient_untracked_path_as_already_applied(self):
         owner=self.project/"owner-identical.txt"; owner.write_text("same-bytes\n")
@@ -660,9 +735,11 @@ class WorkspaceTests(unittest.TestCase):
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="T-UNTRACKED-IDENTICAL"
         out=dsd_workspace.command_integrate(a)
-        self.assertTrue(out["already_applied"]); self.assertFalse(out["changed"])
+        self.assertTrue(out["changed"])
         self.assertEqual(owner.read_text(),"same-bytes\n")
-        self.assertEqual(dsd_task.load_task(self.run,"P","T-UNTRACKED-IDENTICAL")["status"],"integrated")
+        self.assertEqual(git(self.project,"ls-files","--","owner-identical.txt"),"owner-identical.txt")
+        task=dsd_task.load_task(self.run,"P","T-UNTRACKED-IDENTICAL"); self.assertEqual(task["status"],"integrated")
+        self.assertTrue(dsd_workspace.task_delivery_status(self.run,"P",task)["verified"])
 
     def test_integration_refuses_to_overwrite_preexisting_ambient_untracked_path(self):
         owner=self.project/"owner-local.txt"; owner.write_text("owner-local\n")
@@ -718,13 +795,14 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue((self.project/"ignored/NarrativeEvidenceViewBuilder.ts").is_file())
         self.assertIn(b"NarrativeEvidenceViewBuilder.ts",(dsd_task.task_root(self.run,"P","IGNORED-PRODUCER")/"accepted.patch").read_bytes())
         producer=dsd_task.load_task(self.run,"P","IGNORED-PRODUCER")
-        self.assertIn("ignored/NarrativeEvidenceViewBuilder.ts",producer.get("integration_untracked_paths",[]))
+        self.assertEqual(producer.get("integration_untracked_paths"),[])
+        self.assertEqual(git(self.project,"ls-files","--","ignored/NarrativeEvidenceViewBuilder.ts"),"ignored/NarrativeEvidenceViewBuilder.ts")
         c=A(); c.run_root=self.run; c.phase_id="P"; c.task_id="IGNORED-PRODUCER"; c.force=False; dsd_workspace.command_cleanup(c)
 
         self.register("IGNORED-CONSUMER"); state=dsd_task.load_task(self.run,"P","IGNORED-CONSUMER"); state["dependencies"]=["IGNORED-PRODUCER"]; dsd_task.write_json(dsd_task.task_file(self.run,"P","IGNORED-CONSUMER"),state)
         ws2=self.ws("IGNORED-CONSUMER"); wt2=Path(ws2["worktree"])
         self.assertEqual((wt2/"ignored/NarrativeEvidenceViewBuilder.ts").read_text(),"export const builder = 1;\n")
-        self.assertEqual(ws2.get("integrated_primary_inputs"),[{"path":"ignored/NarrativeEvidenceViewBuilder.ts","producer_phase":"P","producer_task":"IGNORED-PRODUCER"}])
+        self.assertFalse(ws2.get("integrated_primary_inputs"))
         self.assertEqual(git(wt2,"ls-files","--","ignored/NarrativeEvidenceViewBuilder.ts"),"ignored/NarrativeEvidenceViewBuilder.ts")
 
     def test_integrate_does_not_claim_success_if_reviewed_patch_is_not_fully_materialized(self):
@@ -752,12 +830,13 @@ class WorkspaceTests(unittest.TestCase):
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P"; a.task_id="PRODUCER"
         first=dsd_workspace.command_integrate(a); self.assertTrue(first["changed"]); self.assertTrue((self.project/"authority.json").is_file())
-        producer=dsd_task.load_task(self.run,"P","PRODUCER"); self.assertIn("authority.json",producer.get("integration_untracked_paths",[]))
+        producer=dsd_task.load_task(self.run,"P","PRODUCER"); self.assertEqual(producer.get("integration_untracked_paths"),[])
+        self.assertEqual(git(self.project,"ls-files","--","authority.json"),"authority.json")
         # An unrelated ambient untracked file must remain excluded.
         (self.project/"owner-note.txt").write_text("owner only\n")
         self.register("CONSUMER")
         ws2=self.ws("CONSUMER"); wt2=Path(ws2["worktree"]); self.assertEqual((wt2/"authority.json").read_text(),"v1\n"); self.assertFalse((wt2/"owner-note.txt").exists())
-        self.assertEqual(ws2.get("integrated_primary_inputs"),[{"path":"authority.json","producer_phase":"P","producer_task":"PRODUCER"}])
+        self.assertFalse(ws2.get("integrated_primary_inputs"))
         # The dependency output is now part of the consumer baseline, so editing it
         # integrates as a normal modification instead of colliding with an unseen file.
         (wt2/"authority.json").write_text("v2\n"); self.accept("CONSUMER"); a.task_id="CONSUMER"
@@ -964,7 +1043,12 @@ class WorkspaceTests(unittest.TestCase):
     def test_purge_run_refuses_unintegrated_workspace_and_owner_marker_mismatch(self):
         self.register("PURGE-BLOCK"); self.ws("PURGE-BLOCK")
         class A: pass
-        s=A(); s.run_root=self.run; s.status="completed"; s.reason=None; dsd_task.command_set_run_status(s)
+        s=A(); s.run_root=self.run; s.status="completed"; s.reason=None
+        with self.assertRaisesRegex(ValueError,"RUN_NOT_DELIVERED"):
+            dsd_task.command_set_run_status(s)
+        # Simulate a corrupt/legacy run that was externally labelled completed;
+        # purge must independently preserve the undisposed workspace.
+        info=dsd_task.load_run(self.run); info["status"]="completed"; dsd_task.write_json(dsd_task.run_file(self.run),info)
         p=A(); p.run_root=self.run; p.dry_run=True
         preview=dsd_workspace.command_purge_run(p)
         self.assertFalse(preview["safe_to_purge"]); self.assertTrue(any(x["task_id"]=="PURGE-BLOCK" for x in preview["blockers"]))

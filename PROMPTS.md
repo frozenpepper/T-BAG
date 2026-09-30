@@ -128,7 +128,8 @@ Compact is the default; `--summary` makes intent explicit:
 python3 <skill>/scripts/dsd_task.py owner-status --summary --run-root ... [--phase-id P]
 python3 <skill>/scripts/dsd_task.py show --summary --run-root ... --phase-id P --task-id T01
 python3 <skill>/scripts/dsd_task.py reconcile-run --run-root ... [--phase-id P]
+python3 <skill>/scripts/dsd_workspace.py audit-delivery --run-root ...
 python3 <skill>/scripts/report_surface.py --report .../report.md --lines 8 --chars 1600
 ```
 
-Use `--details` only for a concrete diagnostic gap; do not shadow-review worker semantics.
+`delivery-broken` → run `audit-delivery`; deterministic advance already tried any safe frozen-patch repair. Do not launch workers; do not shadow-review semantics.

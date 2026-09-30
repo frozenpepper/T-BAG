@@ -88,8 +88,26 @@ def worker_cache_paths(run_root: Path) -> dict[str, Path]:
     return {"root":root,"npm":npm,"node_compile":node}
 
 
+def project_local_playwright_browsers(project_root: Path) -> Path | None:
+    """Return an existing project-owned Playwright browser store without guessing one."""
+    root=project_root.resolve()
+    candidates=(
+        root/"node_modules"/"playwright-core"/".local-browsers",
+        root/".cache"/"ms-playwright",
+        root/"node_modules"/".cache"/"ms-playwright",
+        root/".playwright-browsers",
+    )
+    for path in candidates:
+        try:
+            if path.is_dir() and any(path.iterdir()):
+                return path.resolve()
+        except OSError:
+            continue
+    return None
+
+
 def worker_environment(base: dict[str,str], p: dict[str,Path]) -> tuple[dict[str,str], dict[str,Path]]:
-    """Apply project-local temporary/cache ownership to one worker process."""
+    """Apply project-local temporary/cache ownership and proven local tool capability."""
     env=dict(base)
     scratch=p["event_dir"]/"scratch"; scratch.mkdir(parents=True,exist_ok=True)
     caches=worker_cache_paths(p["run_root"])
@@ -99,6 +117,14 @@ def worker_environment(base: dict[str,str], p: dict[str,Path]) -> tuple[dict[str
         "npm_config_prefer_offline":"true",
         "NODE_COMPILE_CACHE":str(caches["node_compile"]),
     })
+    # Preserve explicit owner/host configuration. Otherwise bind only a browser store
+    # that already exists inside the assigned project view; never invent/download one.
+    project_view=p.get("project_root")
+    if "PLAYWRIGHT_BROWSERS_PATH" not in env and isinstance(project_view,Path):
+        browsers=project_local_playwright_browsers(project_view)
+        if browsers is not None:
+            env["PLAYWRIGHT_BROWSERS_PATH"]=str(browsers)
+            env.setdefault("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD","1")
     return env,caches
 
 

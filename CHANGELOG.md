@@ -2,6 +2,16 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC67 — delivery truth and parent-boundary reset
+
+- Redefined mutable `integrated` as committed delivery: the exact reviewed delta is committed on the run's recorded primary branch, gets a durable `delivery.json` receipt, and must remain an ancestor of current HEAD. A task label or dirty primary working tree is no longer sufficient.
+- Added a run-level delivery audit to reconcile/tick/owner status. Legacy `integrated` state with intact frozen `accepted.patch` self-heals into a primary-branch commit when mechanically safe; otherwise unproved delivery becomes `delivery-broken`, scheduling stops, and retained work is preserved.
+- Deleted the parallel “integrated untracked inputs” overlay. Reviewed ignored additions are force-added to the normal delivery commit, so later workspaces inherit one Git truth instead of a second provenance channel.
+- Landing preserves unrelated owner dirty/staged paths and fails closed on same-path owner edits, branch drift, apply/materialization conflicts, or missing receipts. Manual `dsd_task.py integrated` was removed.
+- Bounded deterministic reducer actions to one successful application per pass so a self-reproposing control action cannot consume the reducer budget and hide the next real transition.
+- Worker launch now reuses an existing project-local Playwright browser store when one is mechanically discoverable, while preserving explicit owner environment configuration; the parent no longer needs to patch shared launcher code to expose that local capability.
+- Tightened parent authority: route/freeze evidence instead of doing worker diagnosis; do not turn lifecycle-authorized scheduling into repeated Human veto questions; never self-modify installed T-BAG/global harness machinery without explicit Human tooling authority; owner notices lead with delivered Git truth rather than task counts.
+
 ## v2.2.0 RC66 — bounded autonomy and poisoned-session escape
 
 - Added a hard per-task automatic-attempt budget (default 10, configurable at run initialization). Exhaustion becomes one durable Human decision boundary rather than an unbounded retry loop; explicit Human resume/analysis opens a fresh budget window.
