@@ -116,6 +116,17 @@ await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: {
 transportState = JSON.parse(fs.readFileSync(path.join(runRoot, ".transport", "opencode.json"), "utf8"))
 assert.ok(transportState.parent_sessions.some((x) => x.session_id === "ses-wait"), "resume-owner must re-enroll V2 heartbeat")
 
+const endedRun = path.join(tmp, "ended-run")
+fs.mkdirSync(endedRun, { recursive: true })
+fs.writeFileSync(path.join(endedRun, "run.json"), JSON.stringify({ status: "active" }))
+const endedTickCommand = `python3 TBag/tools/parent_tick.py tick --run-root "${endedRun}"`
+await before({ tool: "bash", sessionID: "ses-ended", input: { command: endedTickCommand } })
+const endedRegistryPath = path.join(endedRun, ".transport", "opencode.json")
+assert.ok(fs.existsSync(endedRegistryPath))
+fs.writeFileSync(path.join(endedRun, "run.json"), JSON.stringify({ status: "abandoned" }))
+await after({ tool: "bash", sessionID: "ses-ended", status: "completed", input: { command: endedTickCommand }, result: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "abandoned", classification: "run-ended", heartbeat_state: "ended" }) })
+assert.equal(fs.existsSync(endedRegistryPath), false, "ended V2 run must delete stale disposable transport registry")
+
 // New launch activity clears stale idle-recovery even if a later tick packet is
 // filtered away from the adapter.
 await after({ tool: "bash", sessionID: "ses-wait", status: "completed", input: { command: tickCommand }, result: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "active", classification: "active-idle", heartbeat_state: "idle-recovery" }) })

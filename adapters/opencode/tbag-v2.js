@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs"
 import {
   COMPLETION_PULSE_MS,
   HEALTH_HEARTBEAT_MS,
@@ -76,6 +76,13 @@ function persistTransport(runRoot) {
       .filter((item) => item.run_root === runRoot)
       .map((item) => ({ session_id: item.sessionID, task_id: item.task_id, phase_id: item.phase_id, pid: item.pid, started_at_ms: item.startedAt }))
     const path = transportPath(runRoot)
+    let runStatus = null
+    try { runStatus = JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8"))?.status || null } catch (_) {}
+    if (["completed", "abandoned"].includes(runStatus) && parents.length === 0 && observers.length === 0 && prep.length === 0) {
+      transportErrors.delete(runRoot)
+      try { unlinkSync(path) } catch (_) {}
+      return
+    }
     const tmp = `${path}.tmp-${process.pid}`
     mkdirSync(`${runRoot}/.transport`, { recursive: true })
     writeFileSync(tmp, JSON.stringify({
@@ -146,15 +153,18 @@ function enrollHeartbeatFromCommand(sessionID, command) {
   return true
 }
 
-function pulseRun(root, runRoot) {
-  const result = Bun.spawnSync([
+async function pulseRun(root, runRoot) {
+  const proc = Bun.spawn([
     "python3", `${root}/TBag/tools/parent_tick.py`, "pulse", "--run-root", runRoot,
   ], { stdout: "pipe", stderr: "pipe" })
-  if (result.exitCode !== 0) {
-    return { heartbeat_state: "idle-recovery", wake_parent: false, error: decode(result.stderr) || decode(result.stdout) || `exit=${result.exitCode}` }
+  const stdoutPromise = proc.stdout ? new Response(proc.stdout).text() : Promise.resolve("")
+  const stderrPromise = proc.stderr ? new Response(proc.stderr).text() : Promise.resolve("")
+  const [exitCode, stdout, stderr] = await Promise.all([proc.exited, stdoutPromise, stderrPromise])
+  if (exitCode !== 0) {
+    return { heartbeat_state: "idle-recovery", wake_parent: false, error: stderr.trim() || stdout.trim() || `exit=${exitCode}` }
   }
   try {
-    return JSON.parse(decode(result.stdout))
+    return JSON.parse(stdout.trim())
   } catch (_) {
     return { heartbeat_state: "idle-recovery", wake_parent: false, error: "pulse returned invalid JSON" }
   }

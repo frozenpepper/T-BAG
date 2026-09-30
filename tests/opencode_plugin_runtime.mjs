@@ -138,6 +138,25 @@ await plugin["tool.execute.after"](
 waitRegistry = JSON.parse(fs.readFileSync(path.join(enrolledRun, ".transport", "opencode.json"), "utf8"))
 assert.ok(waitRegistry.parent_sessions.some((x) => x.session_id === "ses-auto" && x.run_root === enrolledRun), "resume-owner must re-enroll heartbeat supervision")
 
+// Ended runs own no disposable transport state once heartbeat/observer/preparation
+// registrations are empty. This prevents dead adapter PIDs surviving for days.
+const endedRun = path.join(tmp, "ended-run")
+fs.mkdirSync(endedRun, { recursive: true })
+fs.writeFileSync(path.join(endedRun, "run.json"), JSON.stringify({ status: "active" }))
+const endedTickCommand = `python3 TBag/tools/parent_tick.py tick --run-root "${endedRun}"`
+await plugin["tool.execute.before"](
+  { tool: "bash", sessionID: "ses-ended", callID: "ended-before" },
+  { args: { command: endedTickCommand } },
+)
+const endedRegistryPath = path.join(endedRun, ".transport", "opencode.json")
+assert.ok(fs.existsSync(endedRegistryPath))
+fs.writeFileSync(path.join(endedRun, "run.json"), JSON.stringify({ status: "abandoned" }))
+await plugin["tool.execute.after"](
+  { tool: "bash", sessionID: "ses-ended", callID: "ended-after", args: { command: endedTickCommand } },
+  { title: "bash", output: JSON.stringify({ format: "tbag-parent-loop-v1", run_status: "abandoned", classification: "run-ended", heartbeat_state: "ended" }), metadata: {} },
+)
+assert.equal(fs.existsSync(endedRegistryPath), false, "ended idle run must delete stale disposable transport registry")
+
 // A prior idle tick must not poison later work. A recognized launch is direct
 // activity evidence and must immediately reopen the fast completion lane.
 const idleTickCommand = `python3 TBag/tools/parent_tick.py tick --run-root "${enrolledRun}"`

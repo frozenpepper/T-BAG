@@ -2,6 +2,13 @@
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
 
+## v2.2.0 RC69 — nonblocking heartbeat and transport hygiene
+
+- Replaced the OpenCode heartbeat's synchronous `Bun.spawnSync` Python pulse with an asynchronous subprocess. Completion probes are coalesced per session/run while one is in flight, preserving the same 60-second semantics without blocking the host event loop or stacking overlapping pulse processes.
+- If a run ends while a pulse is in flight, transport is unenrolled immediately when that pulse returns. V1/V2 adapters delete `.transport/opencode.json` once an ended run has no heartbeat, observer or launch-preparation state left.
+- OpenCode adapter installation now prunes stale disposable transport mirrors from old `completed`/`abandoned` runs and reports that cleanup as a real installer change. Active-run registries are preserved.
+- Kept cleanup conservative: RC69 does not delete generic lockfiles or kill unproven host processes, because those actions require stronger ownership/liveness proof than a stale filename or PID snapshot.
+
 ## v2.2.0 RC68 — deterministic session termination and adapter-drift stop
 
 - Recognized deterministic provider/session poison is now one-strike: the exact encrypted-reasoning caller-mismatch and other narrowly classified nonretryable invalid-request failures immediately abandon that session instead of spending repeated resumes.

@@ -1,5 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs"
 import {
   COMPLETION_PULSE_MS,
   HEALTH_HEARTBEAT_MS,
@@ -63,9 +63,17 @@ function persistTransport(runRoot) {
         session_id: item.sessionID, phase_id: item.args?.phase_id, task_id: item.args?.task_id, event_dir: item.args?.event_dir,
         observer_pid: item.proc?.pid, generation: item.generation, armed_at_ms: item.armedAt, done: item.done === true, orphaned: item.orphaned === true,
       }))
-    const path = transportPath(runRoot); const tmp = `${path}.tmp-${process.pid}`
-    mkdirSync(`${runRoot}/.transport`, { recursive: true })
     const prep = [...preparations.values()].filter((item) => item.run_root === runRoot).map((item) => ({ session_id:item.sessionID, task_id:item.task_id, phase_id:item.phase_id, pid:item.pid, started_at_ms:item.startedAt }))
+    const path = transportPath(runRoot)
+    let runStatus = null
+    try { runStatus = JSON.parse(readFileSync(`${runRoot}/run.json`, "utf8"))?.status || null } catch (_) {}
+    if (["completed", "abandoned"].includes(runStatus) && parents.length === 0 && observers.length === 0 && prep.length === 0) {
+      transportErrors.delete(runRoot)
+      try { unlinkSync(path) } catch (_) {}
+      return
+    }
+    const tmp = `${path}.tmp-${process.pid}`
+    mkdirSync(`${runRoot}/.transport`, { recursive: true })
     writeFileSync(tmp, JSON.stringify({ format: "tbag-opencode-transport-v1", adapter_pid: process.pid, updated_at: new Date().toISOString(), parent_sessions: parents, observers, preparations: prep, last_arm_error: transportErrors.get(runRoot) || null }, null, 2) + "\n")
     renameSync(tmp, path)
   } catch (_) { /* presentation/diagnostic state may never break orchestration */ }
@@ -126,15 +134,18 @@ function enrollHeartbeatFromCommand(sessionID, command) {
   registerRunHeartbeat(sessionID, { run_root: runRoot, activity_hint: launch ? "launch" : undefined })
   return true
 }
-function pulseRun(root, runRoot) {
-  const result = Bun.spawnSync([
+async function pulseRun(root, runRoot) {
+  const proc = Bun.spawn([
     "python3", `${root}/TBag/tools/parent_tick.py`, "pulse", "--run-root", runRoot,
   ], { stdout: "pipe", stderr: "pipe" })
-  if (result.exitCode !== 0) {
-    return { heartbeat_state: "idle-recovery", wake_parent: false, error: decode(result.stderr) || decode(result.stdout) || `exit=${result.exitCode}` }
+  const stdoutPromise = proc.stdout ? new Response(proc.stdout).text() : Promise.resolve("")
+  const stderrPromise = proc.stderr ? new Response(proc.stderr).text() : Promise.resolve("")
+  const [exitCode, stdout, stderr] = await Promise.all([proc.exited, stdoutPromise, stderrPromise])
+  if (exitCode !== 0) {
+    return { heartbeat_state: "idle-recovery", wake_parent: false, error: stderr.trim() || stdout.trim() || `exit=${exitCode}` }
   }
   try {
-    return JSON.parse(decode(result.stdout))
+    return JSON.parse(stdout.trim())
   } catch (_) {
     return { heartbeat_state: "idle-recovery", wake_parent: false, error: "pulse returned invalid JSON" }
   }

@@ -345,6 +345,31 @@ def install_plugin_file(project_root: Path, harness: str, destination: Path, sou
     }
 
 
+def prune_ended_opencode_transport(project_root: Path) -> list[str]:
+    """Remove stale disposable OpenCode transport mirrors from ended runs only."""
+    runs=project_root/"TBag"/"runs"
+    if not runs.is_dir():
+        return []
+    removed=[]
+    for run in sorted(path for path in runs.iterdir() if path.is_dir()):
+        try: status=str(load_json(run/"run.json").get("status") or "")
+        except (OSError,json.JSONDecodeError):
+            continue
+        if status not in {"completed","abandoned"}:
+            continue
+        registry=run/".transport"/"opencode.json"
+        if not registry.is_file():
+            continue
+        try:
+            registry.unlink()
+            removed.append(str(registry))
+            try: registry.parent.rmdir()
+            except OSError: pass
+        except OSError:
+            pass
+    return removed
+
+
 def prune_opencode_plugin_debris(project_root: Path) -> list[str]:
     """Remove only known obsolete T-BAG artifacts from OpenCode's auto-loaded plugin dir."""
     root=project_root/".opencode"/"plugins"
@@ -367,6 +392,7 @@ def prune_opencode_plugin_debris(project_root: Path) -> list[str]:
 
 def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = False) -> dict[str, Any]:
     plugin_debris_removed=prune_opencode_plugin_debris(project_root)
+    ended_transport_removed=prune_ended_opencode_transport(project_root)
     version, major = detect_opencode_version()
     transport_source = "tbag-v2.js" if major == 2 else "tbag.js"
     transport_generation = "v2" if major == 2 else "v1"
@@ -426,8 +452,12 @@ def install_opencode(project_root: Path, skill_root: Path, *, headless: bool = F
         or tui_config_changed
         or stale_v1_removed
         or legacy_removed
+        or plugin_debris_removed
+        or ended_transport_removed
     )
     result["changed"] = changed
+    result["plugin_debris_removed"] = plugin_debris_removed
+    result["ended_transport_removed"] = ended_transport_removed
 
     activation_token=opencode_activation_token(project_root,result,transport_core,ui_results,transport_generation,major)
     activation_request=opencode_activation_request_path(project_root)

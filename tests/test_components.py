@@ -491,6 +491,21 @@ class ComponentsTests(unittest.TestCase):
         self.assertIn('Replace OUTCOME with one of',gate)
         self.assertIn('do not relaunch solely to repair formatting',gate.lower())
 
+    def test_opencode_install_prunes_ended_transport_but_preserves_active_run_registry(self):
+        project=self.root/'adapter-opencode-transport-prune'; project.mkdir(); git(project,'init','-q')
+        ended=project/'TBag'/'runs'/'ENDED'; active=project/'TBag'/'runs'/'ACTIVE'
+        for root,status in ((ended,'abandoned'),(active,'active')):
+            transport=root/'.transport'; transport.mkdir(parents=True)
+            (root/'run.json').write_text(json.dumps({'status':status}))
+            (transport/'opencode.json').write_text(json.dumps({'format':'tbag-opencode-transport-v1','adapter_pid':999999}))
+        cmd=[sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','opencode','--headless','--project-root',str(project),'--skill-root',str(ROOT)]
+        cp=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(cp.returncode,0,cp.stderr); data=json.loads(cp.stdout)
+        self.assertIn(str((ended/'.transport'/'opencode.json').resolve()),[str(Path(x).resolve()) for x in data['ended_transport_removed']])
+        self.assertFalse((ended/'.transport'/'opencode.json').exists())
+        self.assertTrue((active/'.transport'/'opencode.json').exists())
+        self.assertTrue(data['changed'])
+
     def test_headless_opencode_install_uses_manual_mode_without_restart_question(self):
         project=self.root/'adapter-opencode-headless'; project.mkdir(); git(project,'init','-q')
         cmd=[sys.executable,str(SCRIPTS/'install_harness_adapter.py'),'--harness','opencode','--headless','--project-root',str(project),'--skill-root',str(ROOT)]
@@ -843,6 +858,15 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(second.returncode,0,second.stderr); live=json.loads(second.stdout)
         self.assertTrue(live['bootstrap_ready']); self.assertFalse(live['restart_required']); self.assertIsNone(live['blocking_question'])
 
+    def test_opencode_async_heartbeat_core_coalesces_overlapping_pulses(self):
+        node=shutil.which('node')
+        if not node: self.skipTest('node unavailable')
+        script=ROOT/'tests'/'opencode_async_heartbeat_runtime.mjs'
+        core=ROOT/'adapters'/'tbag-opencode-transport-core.js'
+        cp=subprocess.run([node,str(script),str(core)],text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.assertEqual(cp.returncode,0,cp.stderr)
+        self.assertIn('OPENCODE_ASYNC_HEARTBEAT_PASS',cp.stdout)
+
     def test_opencode_plugin_runtime_launch_follow_compatibility_and_wake(self):
         node=shutil.which('node')
         if not node: self.skipTest('node unavailable')
@@ -873,6 +897,9 @@ class ComponentsTests(unittest.TestCase):
         self.assertIn('Bun.spawn(attemptCli(root, args, "follow")',text)
         self.assertIn('client.session.prompt',text); self.assertNotIn('delivery: "queue"',text)
         self.assertIn('pendingWakeSessions',text); self.assertIn('wakeInflightSessions',text); self.assertIn('deletedSessions',text)
+        pulse=text[text.index('async function pulseRun'):text.index('function spawnObserver')]
+        self.assertIn('Bun.spawn([',pulse)
+        self.assertNotIn('Bun.spawnSync',pulse)
         self.assertIn('event?.properties?.info?.id',text)
         self.assertIn('event.type === "session.status"',text); self.assertIn('event.type === "session.idle"',text)
         self.assertIn('if (delivered && pendingWakeSessions.has(sessionID)',core)

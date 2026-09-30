@@ -278,6 +278,48 @@ export function startHeartbeatTimers({
   queueWake,
   onPulse,
 }) {
+  const pulseInflight = new Set()
+  const heartbeatKey = (item) => `${item.sessionID}\u0000${item.run_root}`
+
+  async function probeCompletion(item, stamp) {
+    const key = heartbeatKey(item)
+    if (pulseInflight.has(key)) return
+    pulseInflight.add(key)
+    item.lastCompletionProbeAt = stamp
+    try {
+      let pulse
+      try {
+        pulse = await Promise.resolve(pulseRun(item.run_root))
+      } catch (error) {
+        pulse = { heartbeat_state: "idle-recovery", wake_parent: false, error: String(error?.stack || error) }
+      }
+      // The registration may have been removed or the run may have ended while
+      // the asynchronous pulse was in flight.
+      if (!runHeartbeats.has(key)) return
+      if (durableHeartbeatState(item.run_root) !== "running" || ["ended", "waiting", "paused"].includes(pulse?.heartbeat_state)) {
+        removeRunHeartbeat(item.sessionID, item.run_root)
+        return
+      }
+      item.heartbeatState = pulse?.heartbeat_state || "idle-recovery"
+      if (pulse?.error) {
+        transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse failed: ${pulse.error}` })
+      } else {
+        transportErrors.delete(item.run_root)
+        if (typeof onPulse === "function") {
+          try {
+            onPulse(item, pulse)
+          } catch (error) {
+            transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse recovery failed: ${String(error?.stack || error)}` })
+          }
+        }
+        if (pulse?.wake_parent === true) queueWake(host, item.sessionID, "completion")
+      }
+      persistTransport(item.run_root)
+    } finally {
+      pulseInflight.delete(key)
+    }
+  }
+
   const completionTimer = setInterval(() => {
     const stamp = Date.now()
     for (const item of [...runHeartbeats.values()]) {
@@ -296,23 +338,8 @@ export function startHeartbeatTimers({
         && item.lastCompletionProbeAt > 0
         && stamp - item.lastCompletionProbeAt < COMPLETION_PULSE_MS * 2
       ) continue
-      const pulse = pulseRun(item.run_root)
-      item.lastCompletionProbeAt = stamp
-      item.heartbeatState = pulse.heartbeat_state || "idle-recovery"
-      if (pulse.error) {
-        transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse failed: ${pulse.error}` })
-      } else {
-        transportErrors.delete(item.run_root)
-        if (typeof onPulse === "function") {
-          try {
-            onPulse(item, pulse)
-          } catch (error) {
-            transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse recovery failed: ${String(error?.stack || error)}` })
-          }
-        }
-        if (pulse.wake_parent === true) queueWake(host, item.sessionID, "completion")
-      }
-      persistTransport(item.run_root)
+      if (pulseInflight.has(heartbeatKey(item))) continue
+      void probeCompletion(item, stamp)
     }
   }, COMPLETION_PULSE_MS)
   completionTimer.unref?.()
