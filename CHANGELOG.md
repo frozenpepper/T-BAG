@@ -7,6 +7,8 @@
 - Tick packets now carry deterministic `owner_communication: question|notice|none`. `none` explicitly suppresses routine user-facing status, reducing repeated parent narration on unchanged autonomous wakes.
 - `owner_communication` is now part of malformed-packet validation, so a truncated tick cannot silently lose the explicit speak/silence instruction.
 - Simplified authority classification: one genuine Human-escalation accessor plus `task_block_kind()` now replace overlapping Human-block predicates.
+- Unclassified/legacy blocked state now counts as orchestrator-actionable work for Human-wait gating, so a separate owner question cannot suspend the run while stale internal state still needs repair.
+
 
 
 

@@ -198,6 +198,22 @@ class TaskControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"genuine Human authority block"):
             dsd_task.human_decision_question(task)
 
+    def test_unclassified_block_counts_as_orchestrator_work_before_human_wait(self):
+        self.write_plan([
+            {"task_id":"T-HUMAN","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"T-UNKNOWN","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+        ])
+        human_path=dsd_task.task_file(self.run,"P1","T-HUMAN"); human=dsd_task.load_json(human_path)
+        human["status"]="blocked"; human["last_escalation"]={"target":"human","source":"worker","reason":"owner-choice"}; dsd_task.write_json(human_path,human)
+        unknown_path=dsd_task.task_file(self.run,"P1","T-UNKNOWN"); unknown=dsd_task.load_json(unknown_path)
+        unknown["status"]="blocked"; unknown.pop("last_escalation",None); unknown.pop("last_control_block",None); dsd_task.write_json(unknown_path,unknown)
+        self.assertTrue(dsd_task.task_can_advance_without_human(self.run,unknown))
+        class A: pass
+        a=A(); a.run_root=self.run; a.status="human-blocked"; a.reason="waiting for owner"
+        with mock.patch("dsd_workspace.delivery_audit",return_value={"blockers":[]}):
+            with self.assertRaisesRegex(ValueError,"ADVANCE_BEFORE_HUMAN_BLOCK"):
+                dsd_task.command_set_run_status(a)
+
     def test_legacy_control_block_cannot_put_run_into_human_blocked_status(self):
         self.write_plan([{"task_id":"T-LEGACY-CTRL","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         path=dsd_task.task_file(self.run,"P1","T-LEGACY-CTRL"); task=dsd_task.load_json(path)

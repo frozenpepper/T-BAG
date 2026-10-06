@@ -897,10 +897,11 @@ def task_can_advance_without_human(run: Path, task: dict[str, Any]) -> bool:
     if status in {"integrated","superseded","parked"} or valid_human_cancellation(task): return False
     if status=="accepted": return bool(task.get("requires_integration"))
     if status=="blocked":
-        # Internal control guards are actionable by the orchestrator and therefore
-        # must prevent the whole run from being suspended behind an unrelated Human
-        # question. Genuine Human authority blocks remain non-advancing here.
-        return _current_control_block(task) is not None
+        # Anything except a genuine Human authority block remains orchestrator work.
+        # That includes legacy/unclassified blocked state, which reconcile routes to
+        # review-unclassified-block rather than allowing the run to sleep behind an
+        # unrelated owner question.
+        return task_block_kind(task)!="human"
     if _quiescent_reusable_review_conduit(task): return False
     if status in {"planned","ready"}:
         try:
@@ -1965,7 +1966,7 @@ def _human_escalation_excerpt(task: dict[str, Any], *, max_chars: int = 700) -> 
 
 def human_decision_question(task: dict[str, Any]) -> dict[str, Any]:
     """Describe one genuine durable Human blocker for a native harness question UI."""
-    if not task_block_kind(task)=="human":
+    if task_block_kind(task)!="human":
         raise ValueError("human_decision_question requires a genuine Human authority block; T-BAG control guards belong to review-control-block")
     phase=str(task.get("phase_id") or "")
     tid=str(task.get("task_id") or "")
@@ -2370,7 +2371,6 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         result["open_review_followups"]={"count":len(open_followups),"preview":open_followups[:limit],**({"truncated":True} if len(open_followups)>limit else {})}
     human=[]
     for task in iter_run_tasks(run):
-        esc=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
         if task_block_kind(task)=="human":
             item={"phase":task.get("phase_id"),"task_id":task.get("task_id")}
             if details: item["purpose"]=task_brief_objective(task,max_chars=420)
@@ -3430,7 +3430,7 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         task=load_json(path); decision=args.decision.resolve()
         escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
         status=str(task.get("status") or "")
-        if status not in {"blocked","parked"} or not _human_authority_escalation(task) is not None:
+        if status not in {"blocked","parked"} or _human_authority_escalation(task) is None:
             raise ValueError(f"resolve-escalation requires a genuine Human-targeted blocked/parked escalation; current status is {status!r}")
         if not decision.is_file(): raise ValueError(f"decision file missing: {decision}")
         if decision.is_symlink(): raise ValueError("Human decision input must be a regular file, not a symlink")
