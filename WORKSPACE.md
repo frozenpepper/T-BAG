@@ -58,7 +58,7 @@ Before each attempt, mutable state is checkpointed; read-only work uses the froz
 
 Every backend must preserve budget reservation, baseline/scope evidence, attempt/report/terminal records, resumable identity where supported, and inspection. Capture session identity in live attempt evidence as soon as the host exposes it; killed workers need not wait for `terminal.json` to remain resumable. Raw CLI wrappers are unsupported. Exit `0` is not semantic success.
 
-`dsd_attempt.py gate` checks only objective evidence: terminal presence, substantive report vs launcher placeholder, read-only movement, and explicit `Allowed source changes`. It never parses report prose into semantic PASS/FAIL.
+`dsd_attempt.py gate` checks only objective evidence: **terminal presence**, substantive report vs launcher placeholder, read-only movement, and explicit `Allowed source changes`. A report written while the process is still live is never transport completion and is never a reason to terminate that process. Semantic routing tokens are interpreted only after terminal evidence where the role requires them.
 
 ## Review and escalation
 
@@ -88,6 +88,12 @@ Fresh Reviewer PASS is normal task acceptance. Do **not** add generic post-integ
 - objective integrity/scope failure → Recovery.
 
 The retained workspace is the durable implementation state. A missing process/report does not by itself justify an Analyst.
+
+## Orchestrator escape hatch
+
+The lifecycle is a **default execution framework**, not authority over the parent. When a T-BAG control rule, stale state, adapter defect, or lifecycle guard is itself preventing legitimate work, the orchestrator may bypass/repair that internal mechanism and continue directly. Do not ask the Human merely for permission to override T-BAG's own process. Preserve explicit Human constraints, destructive-operation safeguards, source/delivery truth, and review evidence; after a material bypass, reconcile the durable run state when practical instead of pretending the normal path occurred.
+
+Prefer this in order: use the ordinary lifecycle when it works → make the smallest direct repair/bypass when it does not → involve the Human only for genuine owner authority or unresolved intent.
 
 ## Cleanup
 

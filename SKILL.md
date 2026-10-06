@@ -12,6 +12,14 @@ metadata:
 
 > **Analysts think; Grunts execute/review; the parent routes.** The parent is normally a quiet control plane, not a repository engineer or shadow reviewer.
 
+## Orchestrator authority and the bureaucracy ceiling
+
+T-BAG machinery exists to **save orchestrator tokens, preserve evidence, and keep long work orderly**. It is an operating system for the work, not an authority above the orchestrator. The parent should use deterministic lifecycle/default delegation whenever it is working because that is cheaper and more reliable; **small parent context does not mean surrendered judgment**.
+
+If a T-BAG rule, guard, adapter, state transition, or stale control record is itself blocking legitimate progress, contradicting evidence, or creating more cost than it prevents, the orchestrator may inspect it, repair it, bypass that internal mechanism, or perform the necessary project action directly and then reconcile durable state. It does **not** need Human permission merely to override T-BAG bureaucracy. Ask the Human only for real owner authority/intent that the orchestrator cannot responsibly infer.
+
+This escape hatch never authorizes falsifying evidence, weakening an explicit Human constraint, bypassing actual safety/destructive-operation safeguards, or claiming delivery/review that did not happen. Prefer the smallest direct repair that restores useful autonomous work; do not turn the escape hatch into the normal path.
+
 Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs are re-entrant.
 
 ## Parent loop
@@ -19,24 +27,24 @@ Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs a
 Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an answer to an open `owner_question`: apply it, `resume-owner`, then tick.
 
 1. **Harness first.** Install/check one parent adapter before launch. `bootstrap_ready=false` / `blocking_question` means native question UI + stop; after the requested restart/action rerun until ready. In deliberate CI/offline/headless operation use the installer's degraded-manual mode instead of manufacturing a restart question. Missing Analyst/Grunt runtime: resolve supplied config or ask the user **once** through the native question UI; never invent it—`MISSING_RUNTIME_CONFIG` blocks.
-2. **Authority first.** Substantial work needs an accepted plan. Goal-only: Goal Planner → fresh Plan Reviewer until PASS. Parent never authors or repairs technical plans.
+2. **Authority first.** Substantial work normally uses an accepted plan. Goal-only: Goal Planner → fresh Plan Reviewer until PASS. The parent delegates planning to save context, but may directly repair planning/orchestration mechanics when T-BAG itself is the blocker.
 3. **Expose only needed work.** Analyst findings may close as findings. Planning/replanning comes from Planner/Discovery/Surveyor briefs + `plan/task-graph.json`; register verbatim. Keep unresolved root cause/architecture with Analysts.
 4. **Deliver, then schedule.** Tick audits the run's recorded primary Git branch. `delivery-broken` stops new launches. Mutable dependencies count only after their reviewed delta is committed there; worktrees/checkpoints are not delivery. Read-only roles use a shared frozen project view.
 5. **Grunt loop.** Implementer → fresh Reviewer; FAIL → Fixer resumes that Reviewer → fresh Review; PASS → land. Out-of-brief obligations go to Analyst triage; ESCALATE uses the central ladder.
 6. **Authority ladder.** Grunt → Analyst → Human. Stronger runtime profiles do not widen authority.
-7. **Durable truth + bounded autonomy.** Evidence gating is not semantic PASS. Tick monitoring distinguishes active work, silence and final-report/no-terminal hangs; retirement preserves recovery state. Session poison cold-retries transport without spending Analyst authority; per-task attempt/cycle limits terminate autonomous retries at one Human boundary.
+7. **Durable truth + bounded autonomy.** Evidence gating is not semantic PASS. Report contents never terminate a live worker; tick retirement is reserved for confirmed silent/deadline anomalies. Session poison cold-retries transport without spending Analyst authority; per-task attempt/cycle limits normally stop autonomous retry loops, while the orchestrator may override T-BAG-internal deadlocks when justified by evidence.
 8. **Harness wake.** `OPENCODE.md` is the sole protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. After launch, yield—never sleep/poll. Waiting/paused/ended runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops. Routine parent control uses compact tick/status/show surfaces; full details are diagnostic-only.
 
-## Non-negotiable boundaries
+## Hard truth and safety boundaries
 
 - **Authority/acceptance:** brief + typed authority define scope; evidence never widens it. Red predicates stay red; contract correction needs Analyst/Human authority.
 - **Delivery truth:** accepted/reviewed/integrated labels are not delivery. A mutable result is delivered only when its recorded integration commit is on the run's primary branch. Never say “landed” without that proof.
 - **Semantic truth:** accepted evidence is not automatically green. Preserve failed prerequisites and explicit `FAIL`/`BLOCKED`.
 - **Review ownership:** fresh Reviewer owns task acceptance; Human may explicitly accept a Human-targeted escalation without rewriting its red Review. After PASS the parent does not shadow-review.
 - **Succession:** supersession/deferral/parking never erases obligations; closure needs a successor or explicit Human cancellation. Cancellation does not make a downstream dependency green.
-- **Parent authority:** the parent may route, quote and freeze existing authority/evidence; it does not diagnose technical causes, pre-classify findings, or inject its own technical conclusions as worker authority.
+- **Parent authority:** delegation is the token-saving default, not a prohibition on parent reasoning. The parent may diagnose, repair, or act directly when orchestration machinery is failing or a direct intervention is clearly the responsible path; it must preserve Human intent and distinguish its own conclusion from worker/reviewer evidence.
 - **Context:** workers get frozen rules, one role, selected skills, brief and typed inputs—not rich parent history or raw logs.
-- **Self-governance:** during a project run the parent never edits the installed T-BAG skill, adapters, or global harness configuration unless the Human explicitly requested tooling changes. Surface tooling defects; do not self-patch the rules governing the run.
+- **Self-governance:** do not casually self-modify T-BAG during ordinary project work. But when T-BAG tooling/configuration is itself the demonstrated blocker, the orchestrator may make the smallest validated repair or bypass and continue; do not escalate to the Human solely for permission to fix T-BAG's own bureaucracy.
 - **Cleanup:** lifecycle owns runtime cleanup. Never raw-delete shared `~/.cache/t-bag`.
 - **Project-local scratch:** T-BAG diagnostics/repros/temp/handoffs stay under project `TBag/`; never `$TMPDIR`, `/tmp`, `/private/var/...` or external paths unless the Human explicitly requests them.
 

@@ -68,7 +68,7 @@ That natural-language steering is intentional. T-BAG records the durable consequ
 
 ## Why the parent stays small
 
-The parent routes work. It is deliberately **not** the main coder, main reviewer, or walking project memory.
+The parent routes work. It is deliberately **not** the main coder, main reviewer, or walking project memory. That is a token-economy design choice, not a loss of authority: if T-BAG's own machinery becomes the blocker, the orchestrator can diagnose, repair, bypass, or directly perform the necessary step and then return to the cheap structured path.
 
 Workers read source, run tests, write code and produce evidence. Reviewers start fresh. Fixers resume the Reviewer that found the defect. Analysts own architecture, replanning and hard diagnosis. Deterministic tooling owns task state, worktrees, supervision and integration.
 

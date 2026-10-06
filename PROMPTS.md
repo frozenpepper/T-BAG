@@ -20,6 +20,12 @@ python3 <skill>/scripts/parent_tick.py resume-owner --run-root ... --question-id
 
 Render/ack `owner_notice`. `completion-candidate` means finish or replan. Do not pipe/filter tick or launch stdout when the adapter needs structured output.
 
+## Parent escape hatch
+
+T-BAG commands are the cheap/default route, not shackles. If an internal T-BAG guard/state/adapter is demonstrably the blocker, the orchestrator may diagnose it, apply the smallest direct fix or bypass, and continue without asking the Human for permission to override T-BAG itself. Do not bypass explicit Human constraints, destructive-operation safeguards, evidence truth, or delivery truth. Reconcile durable state afterward when practical.
+
+When tick offers a valid action, **execute it by default**. Declining an offered action requires concrete contrary evidence; uncertainty about whether the parent is “allowed” by T-BAG is not a reason to idle.
+
 ## Harness bootstrap
 
 ```bash
@@ -77,7 +83,9 @@ python3 <skill>/scripts/dsd_attempt.py launch --run-root ... --phase-id P --task
 python3 <skill>/scripts/dsd_attempt.py inspect --summary --run-root ... --phase-id P --task-id T01
 ```
 
-Launch → yield. Do not sleep/poll. Tick handles final-report/no-terminal and silent anomalies. `inspect --summary` is diagnostic; `--details` is cold forensics; `tbag_follow` is re-arm diagnostics only. Never invoke `--background-prepare` directly.
+Launch → yield. Do not sleep/poll. Report text never ends a live worker; tick handles terminal/deadline/silence supervision. `inspect --summary` is diagnostic; `--details` is cold forensics; `tbag_follow` is re-arm diagnostics only. Never invoke `--background-prepare` directly.
+
+If tick emits `relaunch-task`, launch that task's named role normally (cold unless a separate `resume-recorded-session` action explicitly supplies continuity). `active` with no live worker is recoverable work, not a prohibition state.
 
 ## Gate / Review / Fix / land
 
