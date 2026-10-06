@@ -2009,6 +2009,13 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if status=="accepted":
         return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None
     if status=="blocked":
+        escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
+        if escalation.get("source")=="control-plane":
+            return {
+                **base,"action":"review-control-block","reason":escalation.get("reason"),
+                "detail":escalation.get("detail"),
+                "override_command":"override-control-block",
+            }
         return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}
 
     if latest and attempt_status=="gated" and report_requests_capability(event/"report.md"):
@@ -2607,7 +2614,7 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
 
 
 def block_task_for_control_safety(run: Path, phase: str, task_id: str, *, reason: str, detail: dict[str, Any]) -> dict[str, Any]:
-    """Create a durable Human boundary when mechanical loop/futility safety trips."""
+    """Create a durable control boundary when mechanical loop/futility safety trips."""
     phase=slug(phase); tid=slug(task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
         task=load_json(path); status=str(task.get("status") or "")
@@ -2618,6 +2625,46 @@ def block_task_for_control_safety(run: Path, phase: str, task_id: str, *, reason
         _record_control_human_block(task,reason=reason,detail=detail)
         task["updated_at"]=now(); write_json(path,task)
         return {"blocked":True,"task_id":tid,"status":"blocked","reason":reason,"detail":detail}
+
+
+def command_override_control_block(args: argparse.Namespace) -> dict[str, Any]:
+    """Auditably override a T-BAG-internal futility/budget block.
+
+    This is an orchestrator escape hatch, not a way to bypass worker/Human authority.
+    Only blocks emitted by the control plane itself are eligible.
+    """
+    run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
+    reason=str(getattr(args,"reason","") or "").strip()
+    if not reason:
+        raise ValueError("override-control-block requires a concrete orchestrator reason")
+    with file_lock(path.with_suffix(".lock")):
+        task=load_json(path); escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
+        if str(task.get("status") or "")!="blocked" or escalation.get("source")!="control-plane":
+            raise ValueError("override-control-block applies only to a current T-BAG control-plane block; genuine worker/Human authority escalations are not overrideable here")
+        if task_has_live_attempt(task):
+            raise ValueError("cannot override a control block while a task attempt is live")
+        detail=escalation.get("detail") if isinstance(escalation.get("detail"),dict) else {}
+        prior=str(detail.get("prior_status") or "")
+        restored=prior if prior in STATUSES-{"blocked","parked","cancelled","accepted","integrated","superseded"} else "planned"
+        checkpoint=len([x for x in task.get("attempts",[]) if isinstance(x,dict)])
+        record={
+            "source":"orchestrator","reason":reason,"overrode_reason":escalation.get("reason"),
+            "overrode_recorded_at":escalation.get("recorded_at"),"restored_status":restored,
+            "attempt_budget_checkpoint":checkpoint,"recorded_at":now(),
+        }
+        task.setdefault("orchestrator_override_history",[]).append(record)
+        task["last_orchestrator_override"]=record
+        task["attempt_budget_checkpoint"]=checkpoint
+        task["status"]=restored
+        task["updated_at"]=now(); write_json(path,task)
+    run_reactivated=False
+    if str(load_run(run).get("status") or "active")=="human-blocked":
+        class RunStatusArgs: pass
+        resume=RunStatusArgs(); resume.run_root=run; resume.status="active"; resume.reason="orchestrator overrode T-BAG internal control block"
+        command_set_run_status(resume); run_reactivated=True
+    result={"task_id":tid,"status":restored,"override":record,"attempt_budget_reset_at":checkpoint}
+    if run_reactivated: result["run_status"]="active"
+    return result
 
 
 def _control_subprocess_json(argv: list[str]) -> dict[str, Any]:
@@ -3597,6 +3644,7 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("poison-scan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
     p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
+    p=sub.add_parser("override-control-block"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--reason",required=True)
     for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "supersede"):
         description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
         p=sub.add_parser(name,description=description); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True)
@@ -3635,6 +3683,7 @@ def main() -> int:
         elif args.command=="poison-scan": result=command_poison_scan(args)
         elif args.command=="advance": result=command_advance(args)
         elif args.command=="idle-check": result=command_idle_check(args)
+        elif args.command=="override-control-block": result=command_override_control_block(args)
         elif args.command=="show": result=command_show(args)
         elif args.command=="record-attempt": result=command_record_attempt(args)
         elif args.command=="update-attempt": result=command_update_attempt(args)

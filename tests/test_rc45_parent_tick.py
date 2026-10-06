@@ -81,7 +81,7 @@ class Rc45ParentTickTests(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
 
     def base_state(self,**extra):
-        state={"run_id":"R","run_status":"active","worker_budget":{"max":2,"live":0,"free":2},"backlog_count":0,"waiting_dependency_count":0}
+        state={"run_id":"R","run_status":"active","delivery":{"verified":True,"branch":"main","head":"abc","verified_integrations":0,"blocker_count":0},"worker_budget":{"max":2,"live":0,"free":2},"backlog_count":0,"waiting_dependency_count":0}
         state.update(extra); return state
 
     def test_tick_poison_scan_precedes_scheduling_and_stale_adapter_stops_advance(self):
