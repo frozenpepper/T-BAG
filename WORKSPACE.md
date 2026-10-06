@@ -95,6 +95,8 @@ The lifecycle is a **default execution framework**, not authority over the paren
 
 Prefer this in order: use the ordinary lifecycle when it works → make the smallest direct repair/bypass when it does not → involve the Human only for genuine owner authority or unresolved intent.
 
+Mechanical attempt-budget and repeated-cycle guards are deliberately **orchestrator-review boundaries**, not mandatory Human gates. Reconciliation exposes them as `review-control-block`. When the guard itself/stale T-BAG state is the problem, record the reason and reset the automatic-attempt window with `dsd_task.py override-control-block`; genuine worker/Human authority escalations are rejected by that command.
+
 ## Cleanup
 
 Cleanup is automatic: read-only results release DB/views; integration retires worktree, fixture snapshot, branches and DB. Terminal/stale attempts drop launcher `scratch/` but keep evidence. `reconcile-run` reaps safe leftovers; completed runs purge owned runtime. Package/compile caches are shared at `PROJECT/TBag/cache`.

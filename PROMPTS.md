@@ -26,6 +26,16 @@ T-BAG commands are the cheap/default route, not shackles. If an internal T-BAG g
 
 When tick offers a valid action, **execute it by default**. Declining an offered action requires concrete contrary evidence; uncertainty about whether the parent is “allowed” by T-BAG is not a reason to idle.
 
+For an internal attempt/cycle guard, tick exposes `review-control-block`. If inspection shows the T-BAG guard/state—not unresolved owner intent—is what prevents responsible progress, reopen it auditably:
+
+```bash
+python3 <skill>/scripts/dsd_task.py override-control-block \
+  --run-root ... --phase-id P --task-id T01 \
+  --reason "why this T-BAG internal block should be bypassed and what evidence supports the next route"
+```
+
+This resets the attempt-budget checkpoint and restores the pre-block task lane. It refuses genuine worker-origin Human escalations.
+
 ## Harness bootstrap
 
 ```bash
