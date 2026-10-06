@@ -732,10 +732,8 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         loop_suspected={
             "count":len(loop_violations),
             "tasks":loop_violations,
-            "next":"Affected tasks were durably blocked before another launch. Ask the Human once; resume grants a fresh attempt window, or park/cancel the task.",
+            "next":"Affected tasks hit a T-BAG internal cycle guard. Review the evidence; use override-control-block with a concrete reason when the guard/state is the problem, or involve the Human only for a genuine owner decision.",
         }
-        classification="owner-question-required"
-        turn="ask-owner"
 
     # Human blockers are an interaction boundary, not a status footnote. Independent
     # work may still be launched first, but the parent turn must end in the harness's
@@ -758,7 +756,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             run_status_transition={
                 "deferred":True,
                 "error":str(exc)[:900],
-                "next":"Run the next parent tick to advance independent authorized work. Do not inspect control-plane source; phase-scope the tick if the Human blocker belongs to one phase.",
+                "next":"Run the next parent tick to advance independent authorized work. Phase-scope the tick when useful; if T-BAG control state itself is the blocker, use the orchestrator escape hatch rather than idling.",
             }
 
     disk_usage=disk_usage_for_tick(run,loop,sample_seconds=float(getattr(args,"disk_sample_seconds",DEFAULT_DISK_SAMPLE_SECONDS)))
@@ -836,7 +834,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     if loop_suspected:
         out["loop_suspected"] = loop_suspected if details else {
             "count":loop_suspected.get("count"),
-            "actions":[_compact_action(x) for x in loop_suspected.get("actions") or []],
+            "tasks":[{k:x.get(k) for k in ("phase_id","task_id","action") if x.get(k) is not None} for x in loop_suspected.get("tasks") or []],
             "next":loop_suspected.get("next"),
         }
     if pending: out["actions"] = pending if details else [_compact_action(x) for x in pending]

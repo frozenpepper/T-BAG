@@ -236,6 +236,23 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertEqual(blocked[0]["cycle"]["repeats"],4)
         stop.assert_called_once()
 
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    def test_internal_cycle_guard_returns_parent_action_not_forced_human_question(self,_load,_poison,_advance,_owner):
+        before=self.base_state(first_useful_actions=[{"action":"resume-recorded-session","phase_id":"P","task_id":"T","role":"implementer","session_id":"s"}],backlog_count=1)
+        review={"action":"review-control-block","phase_id":"P","task_id":"T","reason":"repeated-control-cycle","override_command":"override-control-block"}
+        after=self.base_state(first_useful_actions=[review],backlog_count=1)
+        violation={"phase_id":"P","task_id":"T","action":"resume-recorded-session"}
+        with mock.patch.object(parent_tick,"reconcile",side_effect=[before,after]),              mock.patch.object(parent_tick,"_task_action_cycle_safety",return_value=[violation]),              mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"actions-ready")
+        self.assertEqual(out["turn"],"continue")
+        self.assertEqual(out["actions"][0]["action"],"review-control-block")
+        self.assertFalse(out.get("owner_question_required",False))
+        self.assertIn("override-control-block",out["loop_suspected"]["next"])
+
     def test_normal_reviewer_fixer_alternation_is_not_a_control_loop(self):
         loop={}
         calls={"n":0}
