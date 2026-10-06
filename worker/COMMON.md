@@ -33,6 +33,6 @@ Do the full work your role owns, but do not turn task-local evidence into an uns
 
 ## Report discipline
 
-Create the attempt report immediately. Keep the launcher placeholder while work is in progress and append concise status after meaningful steps; remove the marker only when the final report is complete.
+Create the attempt report immediately and keep it useful as work progresses. The launcher marker is continuity metadata, **not a process-control switch**: overwriting the report or writing a verdict never terminates a live worker. Remove the marker only after all assigned work/tooling is finished and the final self-contained report is ready, then let the worker process exit normally.
 
 The final report is self-contained. **Routing roles put their exact disposition first. Non-routing roles must not self-award `PASS`; start with a concise result/status instead.** Then give the one or two findings that change routing, decisive work/evidence, verification actually performed, remaining uncertainty/defects, and the next technical step. The parent should be able to route from the opening without redoing your analysis.
