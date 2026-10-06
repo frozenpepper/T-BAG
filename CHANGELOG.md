@@ -1,44 +1,15 @@
 # T-BAG changelog
 
 ## RC71 — orchestrator authority + non-destructive worker completion
-- Worker launch/status surfaces now distinguish T-BAG `control` blocks from genuine Human authority. Human-question rendering fails closed for internal guards, and legacy tests now exercise the orchestrator override path instead of the removed Human-gate behavior.
-- Removed stale test fixture arguments for the deleted report-completion grace kill path.
-- Bare/legacy `status=blocked` records with neither a control record nor genuine Human escalation now surface `review-unclassified-block` for orchestrator repair instead of crashing reconciliation or fabricating a Human question.
-- Tick packets now carry deterministic `owner_communication: question|notice|none`. `none` explicitly suppresses routine user-facing status, reducing repeated parent narration on unchanged autonomous wakes.
-- `owner_communication` is now part of malformed-packet validation, so a truncated tick cannot silently lose the explicit speak/silence instruction.
-- Simplified authority classification: one genuine Human-escalation accessor plus `task_block_kind()` now replace overlapping Human-block predicates.
-- Unclassified/legacy blocked state now counts as orchestrator-actionable work for Human-wait gating, so a separate owner question cannot suspend the run while stale internal state still needs repair.
-- Compact parent actions now retain `override_command`/`next`, so internal-block recovery is self-contained on the cheap tick surface instead of forcing details/docs archaeology. Removed obsolete Human-budget wording from genuine Human escalation summaries.
-- Removed the undocumented legacy `dsd_task.py idle-check` control surface and its duplicate tests. `parent_tick` is now the single owner of turn-ending, supervision, and owner-communication semantics.
-- Owner status now labels blocked tasks explicitly as internal control guard, genuine Human decision, or stale/unclassified block; internal guards no longer appear as ambiguous authority decisions.
-- Added status-snapshot regression coverage proving internal control guards surface as orchestrator `review-control-block` attention, never `await-human-decision`.
-- Repaired status-snapshot test fixtures for RC70's shared primary-delivery context by supplying the required project-root identity.
 
-
-
-
-
-
-
-
-
-
-
-
-- Removed the 30-second `report-complete-no-terminal` kill path. A live worker is never SIGTERM'd because `report.md` looks complete; report text is evidence, while transport completion requires terminal/process evidence.
-- Added explicit `relaunch-task` routing for `active` tasks with no live worker, so scheduler silence cannot be misread as prohibition.
-- Made repeated `register-plan` of the exact already-registered Analyst graph idempotent and non-erroring.
-- Reframed T-BAG bureaucracy as a token/evidence optimization beneath orchestrator authority. The parent may repair/bypass T-BAG-internal deadlocks without manufacturing Human permission gates, while Human constraints, safety, review evidence and delivery truth remain hard boundaries.
-- Clarified worker report discipline: writing/replacing a report or verdict never ends a live attempt; finalization follows completed work and normal process exit.
-- Added focused regressions for live-report non-retirement, exact/idempotent plan registration, and active/no-live relaunch.
-- Reviewer prompts now put the frozen task/acceptance authority before prior-worker evidence; resumed worker prompts avoid forced rereads of stable contracts while keeping them as compaction fallbacks.
-- Incomplete tick packets are explicitly marked `degraded: true` instead of presenting null routing fields as normal state.
-- Attempt-budget/repeated-cycle safety blocks now return to orchestrator judgment instead of forcibly becoming Human questions. `override-control-block` auditably reopens only T-BAG-internal blocks and cannot bypass genuine worker/Human authority escalations.
-- Control-plane blocks are now persisted with `target: orchestrator` rather than masquerading as Human authority. Owner status also filters legacy `target: human` / `source: control-plane` records so old runs do not resurrect false Human questions.
-- The `human-blocked` run transition now uses the same canonical Human-authority predicate, preventing legacy control-plane records from suspending an otherwise autonomous run.
-- Internal guards now use dedicated `last_control_block` / `control_block_history` state instead of overloading `last_escalation`; legacy control-plane escalation records remain readable and are cleared when explicitly overridden.
-- Human-wait and Human-resolution paths now share one genuine-authority predicate. Control-blocked tasks count as orchestrator-actionable work, so an unrelated Human question cannot suspend the run while internal recovery remains available.
-- Compact `show` now exposes the current control-block reason and override route. `active-idle` explicitly forbids status-only turns, and the parent contract defines tick turn values as executable semantics rather than narration cues.
+- Re-established the authority hierarchy: Human intent/safety and observed evidence truth remain hard boundaries; orchestrator judgment sits above T-BAG process machinery. T-BAG-internal deadlocks, stale state, attempt budgets and cycle guards may be diagnosed, repaired or auditably overridden without manufacturing Human permission.
+- Separated process guards from authority escalation. Internal stops use dedicated `last_control_block` / `control_block_history`, classify as `control`, and reconcile to `review-control-block`; genuine Human questions fail closed unless a real Human-targeted escalation exists. Legacy control-plane records remain readable, while malformed bare blocks route to orchestrator repair rather than Human wait.
+- Made parent turns executable and quiet: `continue` acts, `yield` ends, `intervene` diagnoses/repairs in the same turn, and `ask-owner` is reserved for genuine owner authority/input. Tick now emits `owner_communication: question|notice|none`; `none` suppresses routine status narration. Compact actions retain their recovery command/instruction.
+- Removed the duplicate undocumented `idle-check` control plane. `parent_tick` is the single owner of turn-ending, supervision and owner-communication semantics; `active-idle` explicitly forbids status-only turns.
+- Removed the 30-second report-completion kill path. A live worker is never terminated merely because `report.md` looks complete; report text is evidence and process/transport completion remains authoritative. Active tasks with no live worker now expose explicit relaunch routing.
+- Reduced parent archaeology and replay friction: exact repeated Analyst plan registration is idempotent; compact task/owner/status surfaces expose current control reasons and control-vs-Human classification; incomplete tick packets are marked degraded rather than presenting missing routing fields as normal.
+- Tightened worker-context economy without narrowing orchestrator authority: review prompts foreground frozen task/acceptance authority before prior-worker evidence, while resumed workers avoid forced rereads of stable contracts and retain them only as compaction fallbacks.
+- Added regressions around non-retirement of live workers, plan-registration replay, active/no-live recovery, control-vs-Human routing, quiet owner communication, legacy block compatibility, and shared status delivery context.
 
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
@@ -80,11 +51,11 @@ This release package keeps only recent architectural history. Detailed pre-RC22 
 - Landing preserves unrelated owner dirty/staged paths and fails closed on same-path owner edits, branch drift, apply/materialization conflicts, or missing receipts. Manual `dsd_task.py integrated` was removed.
 - Bounded deterministic reducer actions to one successful application per pass so a self-reproposing control action cannot consume the reducer budget and hide the next real transition.
 - Worker launch now reuses an existing project-local Playwright browser store when one is mechanically discoverable, while preserving explicit owner environment configuration; the parent no longer needs to patch shared launcher code to expose that local capability.
-- Tightened parent authority: route/freeze evidence instead of doing worker diagnosis; do not turn lifecycle-authorized scheduling into repeated Human veto questions; never self-modify installed T-BAG/global harness machinery without explicit Human tooling authority; owner notices lead with delivered Git truth rather than task counts.
+- Tightened parent authority at RC67: route/freeze evidence instead of casually shadow-doing worker diagnosis, do not turn lifecycle-authorized scheduling into repeated Human veto questions, and lead owner notices with delivered Git truth. RC71 supersedes RC67's blanket prohibition on repairing T-BAG itself when T-BAG machinery is the demonstrated blocker.
 
 ## v2.2.0 RC66 — bounded autonomy and poisoned-session escape
 
-- Added a hard per-task automatic-attempt budget (default 10, configurable at run initialization). Exhaustion becomes one durable Human decision boundary rather than an unbounded retry loop; explicit Human resume/analysis opens a fresh budget window.
+- Added a hard per-task automatic-attempt budget (default 10, configurable at run initialization). RC66 originally routed exhaustion to a Human decision boundary; RC71 supersedes that policy with an orchestrator-owned control block and auditably reset budget window.
 - Reworked session-poison detection from consecutive-tail matching to cumulative same-session failure accounting, preserving the three-strike threshold. Known nonretryable provider/session failures such as encrypted reasoning content issued to another caller are classified narrowly and poison after three occurrences even when unrelated attempts interleave.
 - A poisoned conversational session is now abandoned as transport state and retried cold in the same role on the retained workspace. Transport failure no longer consumes Analyst authority merely to escape an unusable session.
 - Replaced the packet-level three-identical-ticks alarm with bounded per-task action-cycle history. Repeating launch/resume cycles are detected despite interleaved work and durably block the affected task before another attempt starts.
