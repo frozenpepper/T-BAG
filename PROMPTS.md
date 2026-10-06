@@ -8,7 +8,7 @@ Commands only. Policy: `SKILL.md`; lifecycle: `WORKSPACE.md`; wake behavior: `HA
 python3 <skill>/scripts/parent_tick.py tick --run-root ... [--phase-id ...]
 ```
 
-Run on owner turn/resume/wake. Default output is compact; `state_changed=false` means routing state is materially unchanged. Use `tick --details` only for bounded control/transport diagnosis.
+Run on owner turn/resume/wake. Default output is compact; `state_changed=false` means routing state is materially unchanged. `owner_communication=none` means **do not emit a routine user-facing status message**; execute the packet's turn/action semantics and, for `yield`, end quietly. `owner_communication=notice` means render then ack that notice; `question` means use the genuine Human-question path. Use `tick --details` only for bounded control/transport diagnosis.
 
 For `owner_question_required`: execute `actions_before_question`, then:
 

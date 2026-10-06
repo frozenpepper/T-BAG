@@ -781,6 +781,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
             loop["pending_owner_update"] = {"token": owner.get("token"), "signature": owner.get("signature"), "reasons": owner.get("reasons"), "created_at": now()}
 
     notice=None if questions else owner_notice(owner)
+    owner_communication="question" if questions else "notice" if notice is not None else "none"
     prior_tick_signature=str(loop.get("last_tick_signature") or "")
     tick_signature=str(owner.get("signature") or "")
     state_changed=not prior_tick_signature or prior_tick_signature!=tick_signature
@@ -796,6 +797,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "run_status": run_status,
         "classification": classification,
         "turn": turn,
+        "owner_communication": owner_communication,
         "delivery":state.get("delivery"),
         "worker_budget": state.get("worker_budget"),
         "state_changed": state_changed,

@@ -64,7 +64,7 @@ T-BAG may optimize the first three; it may not overrule them.
 
 **`owner_question`** is the preferred blocking authority/input channel after deterministic + Analyst routes are exhausted: launch `actions_before_question`, `wait-owner`, use the harness-native question UI, then end the turn. Both heartbeat lanes stay suspended until the answer is applied and `resume-owner` runs. Do not ask Humans to approve scheduling already authorized by lifecycle/plan or choices precedent/Analyst authority can resolve. If the native question path itself is broken, use the orchestrator escape hatch rather than deadlocking merely because plain chat is “not the official channel.”
 
-**`owner_notice`** is passive progress: render `━━ T-BAG UPDATE ━━`, send the bounded digest, then ack. Lead with primary-branch delivery truth; never bury questions or sell task counts as progress. Attempts/bookkeeping are not product outcomes. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**.
+**`owner_communication` is authoritative for whether to speak:** `question` → ask the genuine blocking Human question; `notice` → render/ack the supplied `owner_notice`; `none` → emit no routine user-facing status. Do not turn autonomous wakes into status theatre. When a notice exists, lead with primary-branch delivery truth; never sell task counts as progress. Attempts/bookkeeping are not product outcomes. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**.
 
 ## Instruction architecture
 

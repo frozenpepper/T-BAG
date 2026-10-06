@@ -316,6 +316,7 @@ class Rc45ParentTickTests(unittest.TestCase):
             out=parent_tick.command_tick(self.args)
         self.assertEqual(out["classification"],"owner-question-required")
         self.assertEqual(out["turn"],"ask-owner")
+        self.assertEqual(out["owner_communication"],"question")
         self.assertTrue(out["owner_question_required"])
         self.assertEqual(out["owner_questions"],[question])
         self.assertNotIn("owner_notice",out)
@@ -332,10 +333,14 @@ class Rc45ParentTickTests(unittest.TestCase):
         with mock.patch.object(parent_tick,"reconcile",return_value=state), \
              mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={"owned_total_bytes":123456}):
             first=parent_tick.command_tick(self.args)
+            self.assertEqual(first["owner_communication"],"notice")
+            parent_tick.command_ack_update(SimpleNamespace(run_root=self.run,token=first["owner_notice"]["ack_token"]))
             second=parent_tick.command_tick(self.args)
         self.assertTrue(first["state_changed"])
         self.assertFalse(second["state_changed"])
         self.assertEqual(second["classification"],"workers-running")
+        self.assertEqual(second["owner_communication"],"none")
+        self.assertNotIn("owner_notice",second)
         self.assertNotIn("monitoring",second)
         self.assertNotIn("attention",second)
         self.assertNotIn("disk_usage",second)
