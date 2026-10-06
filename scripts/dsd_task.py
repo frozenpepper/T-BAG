@@ -896,7 +896,11 @@ def task_can_advance_without_human(run: Path, task: dict[str, Any]) -> bool:
     status=str(task.get("status") or "")
     if status in {"integrated","superseded","parked"} or valid_human_cancellation(task): return False
     if status=="accepted": return bool(task.get("requires_integration"))
-    if status=="blocked": return False
+    if status=="blocked":
+        # Internal control guards are actionable by the orchestrator and therefore
+        # must prevent the whole run from being suspended behind an unrelated Human
+        # question. Genuine Human authority blocks remain non-advancing here.
+        return _current_control_block(task) is not None
     if _quiescent_reusable_review_conduit(task): return False
     if status in {"planned","ready"}:
         try:
@@ -2561,12 +2565,17 @@ def _record_control_block(task: dict[str, Any], *, reason: str, detail: dict[str
     task["status"]="blocked"
 
 
-def _is_human_authority_block(task: dict[str, Any]) -> bool:
-    """True only for a real Human-targeted authority block."""
-    if str(task.get("status") or "")!="blocked" or _current_control_block(task) is not None:
+def _has_human_authority_escalation(task: dict[str, Any]) -> bool:
+    """Whether the task's current authority escalation genuinely targets the Human."""
+    if _current_control_block(task) is not None:
         return False
     escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-    return escalation.get("target")=="human"
+    return escalation.get("target")=="human" and escalation.get("source")!="control-plane"
+
+
+def _is_human_authority_block(task: dict[str, Any]) -> bool:
+    """True only for a currently blocked genuine Human authority escalation."""
+    return str(task.get("status") or "")=="blocked" and _has_human_authority_escalation(task)
 
 
 def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
@@ -3397,8 +3406,8 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         task=load_json(path); decision=args.decision.resolve()
         escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
         status=str(task.get("status") or "")
-        if status not in {"blocked","parked"} or escalation.get("target")!="human":
-            raise ValueError(f"resolve-escalation requires a Human-targeted blocked/parked escalation; current status is {status!r}")
+        if status not in {"blocked","parked"} or not _has_human_authority_escalation(task):
+            raise ValueError(f"resolve-escalation requires a genuine Human-targeted blocked/parked escalation; current status is {status!r}")
         if not decision.is_file(): raise ValueError(f"decision file missing: {decision}")
         if decision.is_symlink(): raise ValueError("Human decision input must be a regular file, not a symlink")
         route=getattr(args,"route","resume")

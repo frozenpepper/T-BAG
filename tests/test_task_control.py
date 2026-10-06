@@ -179,7 +179,10 @@ class TaskControlTests(unittest.TestCase):
         self.assertFalse(dsd_task._is_human_authority_block(legacy))
         genuine={"status":"blocked","last_escalation":{"target":"human","source":"worker"}}
         self.assertIsNone(dsd_task._current_control_block(genuine))
+        self.assertTrue(dsd_task._has_human_authority_escalation(genuine))
         self.assertTrue(dsd_task._is_human_authority_block(genuine))
+        self.assertTrue(dsd_task.task_can_advance_without_human(self.run,task))
+        self.assertFalse(dsd_task.task_can_advance_without_human(self.run,genuine))
 
     def test_legacy_control_block_cannot_put_run_into_human_blocked_status(self):
         self.write_plan([{"task_id":"T-LEGACY-CTRL","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
@@ -212,6 +215,16 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(restored["last_orchestrator_override"]["overrode_reason"],"repeated-control-cycle")
         self.assertEqual(restored["attempt_budget_checkpoint"],0)
         self.assertNotIn("last_control_block",restored)
+
+    def test_legacy_control_record_cannot_use_human_resolve_escalation_path(self):
+        self.write_plan([{"task_id":"T-LEGACY-RESOLVE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        path=dsd_task.task_file(self.run,"P1","T-LEGACY-RESOLVE"); task=dsd_task.load_json(path)
+        task["status"]="blocked"; task["last_escalation"]={"target":"human","source":"control-plane","reason":"attempt-budget-exhausted","detail":{"prior_status":"planned"}}; dsd_task.write_json(path,task)
+        decision=self.run/"legacy-control-decision.md"; decision.write_text("resume")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-LEGACY-RESOLVE"; a.decision=decision; a.route="resume"
+        with self.assertRaisesRegex(ValueError,"genuine Human-targeted"):
+            dsd_task.command_resolve_escalation(a)
 
     def test_orchestrator_override_refuses_genuine_worker_human_escalation(self):
         self.write_plan([{"task_id":"T-HUMAN-ONLY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
