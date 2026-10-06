@@ -111,8 +111,9 @@ class StatusSnapshotTests(unittest.TestCase):
     def test_status_is_read_only_and_labels_registered_progress(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); run=root/"TBag"/"runs"/"R"; run.mkdir(parents=True)
-            (run/"run.json").write_text(json.dumps({"format":dsd_task.RUN_FORMAT,"run_id":"R","status":"active","max_workers":4}))
-            with mock.patch.object(tbag_status,"_transport",return_value={"available":False,"parent_sessions":[],"observers":[]}), mock.patch.object(tbag_status.dsd_task,"load_run",return_value={"run_id":"R","status":"active","max_workers":4}):
+            run_info={"format":dsd_task.RUN_FORMAT,"run_id":"R","status":"active","max_workers":4,"project_root":str(root)}
+            (run/"run.json").write_text(json.dumps(run_info))
+            with mock.patch.object(tbag_status,"_transport",return_value={"available":False,"parent_sessions":[],"observers":[]}), mock.patch.object(tbag_status.dsd_task,"load_run",return_value=run_info):
                 snap=tbag_status.build_snapshot(root,run_root=run)
             self.assertEqual(snap["format"],"tbag-status-v1")
             self.assertEqual(snap["progress"]["registered_total"],0)
@@ -122,7 +123,7 @@ class StatusSnapshotTests(unittest.TestCase):
     def test_status_labels_internal_control_block_as_orchestrator_attention(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); run=root/"TBag"/"runs"/"R"; task_root=run/"phases"/"P"/"tasks"/"T"; task_root.mkdir(parents=True)
-            dsd_task.write_json(run/"run.json",{"format":dsd_task.RUN_FORMAT,"run_id":"R","status":"active","max_workers":2})
+            dsd_task.write_json(run/"run.json",{"format":dsd_task.RUN_FORMAT,"run_id":"R","status":"active","max_workers":2,"project_root":str(root)})
             dsd_task.write_json(task_root/"task.json",{
                 "format":dsd_task.FORMAT,"phase_id":"P","task_id":"T","kind":"implementation",
                 "role":"implementer","tier":"grunt","dependencies":[],"requires_integration":True,
