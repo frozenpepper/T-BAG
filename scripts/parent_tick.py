@@ -78,6 +78,22 @@ def args_for(**values: Any) -> SimpleNamespace:
 def action_key(item: dict[str, Any]) -> str:
     return json.dumps(item,sort_keys=True,separators=(",",":"),default=str)
 
+
+def mark_degraded_packet(packet: dict[str, Any]) -> dict[str, Any]:
+    """Make malformed routing output explicit instead of inviting blind action."""
+    missing=[]
+    for key in ("run_id","run_status","classification","turn"):
+        if not isinstance(packet.get(key),str) or not str(packet.get(key) or "").strip():
+            missing.append(key)
+    for key in ("delivery","worker_budget"):
+        if not isinstance(packet.get(key),dict):
+            missing.append(key)
+    if missing:
+        packet["degraded"]=True
+        packet["degraded_fields"]=missing
+        packet["packet_warning"]="Routing packet is incomplete. Re-tick or diagnose the control path; do not infer prohibition or success from null fields."
+    return packet
+
 def disk_usage_for_tick(run: Path, loop: dict[str, Any], *, sample_seconds: float) -> dict[str, Any]:
     """Return throttled disk telemetry without making every owner turn walk the tree."""
     current=time.time()
@@ -866,9 +882,9 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         out["control_error"] = {
             "code":"active-idle",
             "message":"Active run has no live worker, authorized action, owner block, or mechanical completion.",
-            "next":"Use a bounded planning/recovery action from the current phase; do not inspect T-BAG source merely to explain this state.",
+            "next":"Try the bounded recovery/relaunch path. If durable state contradicts evidence or repeats without progress, use the orchestrator escape hatch to inspect/repair T-BAG rather than idling or asking the Human for permission.",
         }
-    return out
+    return mark_degraded_packet(out)
 
 
 def command_ack_update(args: argparse.Namespace) -> dict[str, Any]:

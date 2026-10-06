@@ -199,6 +199,17 @@ class Rc45ParentTickTests(unittest.TestCase):
             self.assertIsNone(parent_tick._launch_action_blocker(self.run,action))
         blocker.assert_called_once_with(self.run,"P","T","planner",continuing=False)
 
+    def test_tick_packet_marks_missing_routing_fields_degraded_without_inventing_state(self):
+        packet={"run_id":None,"run_status":"active","classification":None,"turn":None,"delivery":None,"worker_budget":{"max":2}}
+        out=parent_tick.mark_degraded_packet(packet)
+        self.assertTrue(out["degraded"])
+        self.assertEqual(set(out["degraded_fields"]),{"run_id","classification","turn","delivery"})
+        self.assertIn("Re-tick or diagnose",out["packet_warning"])
+
+    def test_complete_tick_packet_is_not_marked_degraded(self):
+        packet={"run_id":"R","run_status":"active","classification":"workers-running","turn":"yield","delivery":{},"worker_budget":{}}
+        self.assertNotIn("degraded",parent_tick.mark_degraded_packet(packet))
+
     def test_per_task_cycle_detector_survives_interleaved_packet_changes(self):
         loop={}
         calls={"n":0}
