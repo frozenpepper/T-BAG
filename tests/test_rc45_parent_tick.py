@@ -193,6 +193,12 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertEqual(out["preparing"],[{"phase_id":"P","task_id":"T","action":"launch-ready-task"}])
         self.assertNotIn("blocked_actions",out)
 
+    def test_relaunch_task_uses_action_role_and_is_launchable(self):
+        action={"action":"relaunch-task","phase_id":"P","task_id":"T","role":"planner"}
+        with mock.patch.object(parent_tick.dsd_attempt,"launch_blocker",return_value=None) as blocker:
+            self.assertIsNone(parent_tick._launch_action_blocker(self.run,action))
+        blocker.assert_called_once_with(self.run,"P","T","planner",continuing=False)
+
     def test_per_task_cycle_detector_survives_interleaved_packet_changes(self):
         loop={}
         calls={"n":0}

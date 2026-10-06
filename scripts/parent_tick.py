@@ -474,7 +474,7 @@ def _launch_action_blocker(run:Path, action:dict[str,Any])->str|None:
     if name=="launch-ready-task":
         try: role=str(dsd_task.load_task(run,phase,tid).get("role") or "")
         except Exception as exc: return str(exc)
-    elif name in {"resume-recorded-session","retry-same-role-retained-workspace"}:
+    elif name in {"resume-recorded-session","retry-same-role-retained-workspace","relaunch-task"}:
         role=str(action.get("role") or "")
         if not role:
             try: role=str(dsd_task.load_task(run,phase,tid).get("role") or "")
