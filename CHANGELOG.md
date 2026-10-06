@@ -10,6 +10,8 @@
 - Unclassified/legacy blocked state now counts as orchestrator-actionable work for Human-wait gating, so a separate owner question cannot suspend the run while stale internal state still needs repair.
 - Compact parent actions now retain `override_command`/`next`, so internal-block recovery is self-contained on the cheap tick surface instead of forcing details/docs archaeology. Removed obsolete Human-budget wording from genuine Human escalation summaries.
 - Removed the undocumented legacy `dsd_task.py idle-check` control surface and its duplicate tests. `parent_tick` is now the single owner of turn-ending, supervision, and owner-communication semantics.
+- Owner status now labels blocked tasks explicitly as internal control guard, genuine Human decision, or stale/unclassified block; internal guards no longer appear as ambiguous authority decisions.
+
 
 
 

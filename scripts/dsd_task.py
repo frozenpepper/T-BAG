@@ -2269,7 +2269,7 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     phases=[slug(args.phase_id)] if getattr(args,"phase_id",None) else sorted(p.name for p in phases_root.iterdir() if p.is_dir()) if phases_root.is_dir() else []
     state_labels={
         "planned":"queued","ready":"ready to start","active":"active without live worker","awaiting-review":"independent review pending",
-        "needs-fix":"review findings being fixed","needs-analysis":"Analyst diagnosis/replanning needed","blocked":"control/authority decision required",
+        "needs-fix":"review findings being fixed","needs-analysis":"Analyst diagnosis/replanning needed",
         "parked":"parked by owner","cancelled":"cancelled by owner",
         "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
     }
@@ -2319,7 +2319,16 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
                     completed.append({"phase":phase,"task_id":task.get("task_id"),"outcome":outcome,"at":task.get("updated_at") or task.get("accepted_at") or task.get("integrated_at")})
                     if details: completed_sources[(phase,tid)]=task
                 continue
-            item={"phase":phase,"task_id":task.get("task_id"),"state":"delivery unverified" if status=="integrated" and task.get("requires_integration") else state_labels.get(status,status)}
+            if status=="blocked":
+                block_kind=task_block_kind(task)
+                blocked_states={
+                    "control":"T-BAG control guard needs orchestrator review",
+                    "human":"Human decision required",
+                    "unknown":"stale blocked state needs orchestrator repair",
+                }
+                item={"phase":phase,"task_id":task.get("task_id"),"state":blocked_states.get(block_kind,"stale blocked state needs orchestrator repair"),"block_kind":block_kind}
+            else:
+                item={"phase":phase,"task_id":task.get("task_id"),"state":"delivery unverified" if status=="integrated" and task.get("requires_integration") else state_labels.get(status,status)}
             if live_now:
                 item["state"]="worker running"
                 item["purpose"]=task_brief_objective(task,max_chars=purpose_chars); running.append(item)

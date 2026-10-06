@@ -239,6 +239,12 @@ class TaskControlTests(unittest.TestCase):
         show=dsd_task.command_show(SimpleNamespace(run_root=self.run,phase_id="P1",task_id="T-CTRL",details=False))
         self.assertEqual(show["control_block"]["reason"],"repeated-control-cycle")
         self.assertEqual(show["control_block"]["override_command"],"override-control-block")
+        with mock.patch("dsd_workspace.delivery_audit",return_value={"verified":True,"branch":"main","head":"abc","verified_integrations":0,"blockers":[]}):
+            owner=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id="P1",details=False,disk_usage={}))
+        row=next(x for x in owner["backlog_preview"] if x["task_id"]=="T-CTRL")
+        self.assertEqual(row["block_kind"],"control")
+        self.assertEqual(row["state"],"T-BAG control guard needs orchestrator review")
+        self.assertNotIn("T-CTRL",[x["task_id"] for x in owner.get("decisions_needed",[])])
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-CTRL"; a.reason="The guard is looping on stale T-BAG state; cold relaunch is the evidence-backed recovery."
         out=dsd_task.command_override_control_block(a)
