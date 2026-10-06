@@ -937,10 +937,7 @@ def command_set_run_status(args: argparse.Namespace) -> dict[str, Any]:
             if delivery.get("blockers"):
                 raise ValueError("DELIVERY_BEFORE_HUMAN_BLOCK: repair primary-branch delivery before converting the run into an owner-attention wait")
             tasks=list(iter_run_tasks(run))
-            blocked=any(
-                t.get("status")=="blocked" and isinstance(t.get("last_escalation"),dict) and t["last_escalation"].get("target")=="human"
-                for t in tasks
-            )
+            blocked=any(_is_human_authority_block(t) for t in tasks)
             if not blocked: raise ValueError("human-blocked run status requires at least one Human-targeted blocked task")
             advancing=[t for t in tasks if task_can_advance_without_human(run,t)]
             if advancing:

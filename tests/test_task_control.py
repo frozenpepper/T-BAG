@@ -178,6 +178,17 @@ class TaskControlTests(unittest.TestCase):
         genuine={"status":"blocked","last_escalation":{"target":"human","source":"worker"}}
         self.assertTrue(dsd_task._is_human_authority_block(genuine))
 
+    def test_legacy_control_block_cannot_put_run_into_human_blocked_status(self):
+        self.write_plan([{"task_id":"T-LEGACY-CTRL","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        path=dsd_task.task_file(self.run,"P1","T-LEGACY-CTRL"); task=dsd_task.load_json(path)
+        task["status"]="blocked"; task["last_escalation"]={"target":"human","source":"control-plane","reason":"attempt-budget-exhausted","detail":{"prior_status":"planned"}}; dsd_task.write_json(path,task)
+        class A: pass
+        a=A(); a.run_root=self.run; a.status="human-blocked"; a.reason="should not be allowed"
+        with mock.patch("dsd_workspace.delivery_audit",return_value={"blockers":[]}):
+            with self.assertRaisesRegex(ValueError,"requires at least one Human-targeted blocked task"):
+                dsd_task.command_set_run_status(a)
+        self.assertEqual(dsd_task.load_run(self.run)["status"],"active")
+
     def test_control_plane_block_is_parent_reviewable_and_orchestrator_can_override_it(self):
         self.write_plan([{"task_id":"T-CTRL","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         blocked=dsd_task.block_task_for_control_safety(self.run,"P1","T-CTRL",reason="repeated-control-cycle",detail={"prior_status":"planned"})
