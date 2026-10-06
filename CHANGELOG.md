@@ -7,7 +7,9 @@
 - Made repeated `register-plan` of the exact already-registered Analyst graph idempotent and non-erroring.
 - Reframed T-BAG bureaucracy as a token/evidence optimization beneath orchestrator authority. The parent may repair/bypass T-BAG-internal deadlocks without manufacturing Human permission gates, while Human constraints, safety, review evidence and delivery truth remain hard boundaries.
 - Clarified worker report discipline: writing/replacing a report or verdict never ends a live attempt; finalization follows completed work and normal process exit.
-- Added focused regressions for live-report non-retirement, idempotent plan registration, and active/no-live relaunch.
+- Added focused regressions for live-report non-retirement, exact/idempotent plan registration, and active/no-live relaunch.
+- Reviewer prompts now put the frozen task/acceptance authority before prior-worker evidence; resumed worker prompts avoid forced rereads of stable contracts while keeping them as compaction fallbacks.
+- Incomplete tick packets are explicitly marked `degraded: true` instead of presenting null routing fields as normal state.
 
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.

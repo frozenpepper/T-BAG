@@ -42,19 +42,11 @@ Explicit owner-supplied `--project-protocol` / `--worker-skill` inputs remain ex
 
 ## Worker context composition
 
-A new session normally gets, in order:
+A fresh session normally gets the frozen run/core contracts, one role skill, optional reusable context, task-selected skills, the Analyst-authored task brief, and typed exact evidence paths. **Fresh task Review is intentionally acceptance-first:** the frozen task brief is presented before generic method and prior-worker evidence so the Reviewer anchors on the predicate it must falsify.
 
-1. frozen run rules;
-2. universal `COMMON.md`;
-3. shared `QUALITY.md` for roles that own technical engineering conclusions (not Context Reviewer or Evidence Clerk);
-4. one role skill;
-5. shared Analyst routing guidance for Planner/Discovery/Phase Surveyor/Recovery;
-6. `PLAN-AUTHORING.md` only for roles allowed to write task graphs;
-7. metadata-only worker-skill catalog only for planning/review roles that need discovery;
-8. optional Project Protocol;
-9. only role-applicable task-selected skills;
-10. the Analyst-authored task brief;
-11. typed exact paths: governing authority, owner decisions, accepted Analyst/dependency findings, current escalation packets, current Review findings, prior worker claims, recovery evidence, and proposals under review as applicable.
+A resumed worker conversation does not mechanically reread every unchanged contract. It reasserts the current task, current role, and role-selected skills, while the already-supplied run/common/quality/project context remains an explicit fallback if compaction or context loss makes an exact rule unavailable. This keeps Fixer-as-resumed-Reviewer continuity without paying for ritual rereads of stable context.
+
+Typed evidence includes governing authority, owner decisions, accepted Analyst/dependency findings, current escalation packets, current Review findings, prior worker claims, recovery evidence, and proposals under review as applicable.
 
 Phase Planner, Phase Surveyor and Phase Auditor receive the frozen authoritative plan directly as typed governing authority. Ordinary Grunts do not receive the full plan unless their task explicitly requires it.
 
