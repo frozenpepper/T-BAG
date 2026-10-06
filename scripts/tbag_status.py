@@ -286,7 +286,17 @@ def build_snapshot(project_root: Path, *, run_root: Path | None = None, parent_s
                 tasks.append(item)
                 recent.append({"phase_id": phase, **item})
                 if task.get("status") in {"blocked", "recovery-required", "needs-analysis"}:
-                    attention.append({"phase_id": phase, "task_id": task.get("task_id"), "status": task.get("status"), "objective": item["objective"]})
+                    attention_item={"phase_id": phase, "task_id": task.get("task_id"), "status": task.get("status"), "objective": item["objective"]}
+                    if task.get("status")=="blocked":
+                        block_kind=dsd_task.task_block_kind(task)
+                        attention_item["block_kind"]=block_kind
+                        if block_kind=="control":
+                            control=dsd_task._current_control_block(task) or {}
+                            attention_item["reason"]=control.get("reason")
+                            attention_item["next"]="review-control-block"
+                        elif block_kind=="human":
+                            attention_item["next"]="await-human-decision"
+                    attention.append(attention_item)
                 attempts = [x for x in task.get("attempts", []) if isinstance(x, dict)]
                 live_attempts = [x for x in attempts if dsd_task.attempt_is_live(x)]
                 preparation=_preparation_worker(run,phase,task)

@@ -285,7 +285,7 @@ def plan_review_target(run:Path, phase:str, task:dict[str,Any]) -> dict[str,str]
     if target.get("status") in {"accepted","integrated","superseded","cancelled","parked"}:
         raise ValueError(f"Goal-Planner target is already {target.get('status')!r}; do not launch another Plan Review")
     if target.get("status")=="blocked":
-        raise ValueError("Goal-Planner target is blocked on an owner decision; do not launch another Plan Review")
+        raise ValueError(f"Goal-Planner target cannot enter Plan Review while blocked: {_blocked_launch_error(target)}")
     # The Goal-Planner task is the authoritative record of Plan-Review outcomes.
     # Using it here also keeps recovery sane if a process dies after persisting the
     # target outcome but before mirroring convenience history onto the reviewer task.
@@ -437,12 +437,25 @@ def task_input_groups(run:Path, phase:str, task:dict[str,Any], role:str, extra:l
     return groups
 
 
+def _blocked_launch_error(task:dict[str,Any])->str:
+    kind=dsd_task.task_block_kind(task)
+    if kind=="control":
+        control=dsd_task._current_control_block(task) or {}
+        reason=str(control.get("reason") or "internal-control-guard")
+        return f"task is stopped by T-BAG control guard {reason!r}; review-control-block and override/repair the internal guard before launching"
+    if kind=="human":
+        return "task is blocked on a genuine Human authority escalation; resolve that authority decision before launching more technical work"
+    return "task has an unclassified blocked state; inspect/reconcile durable task state instead of inferring Human prohibition"
+
+
 def validate_launch_role(task:dict[str,Any], role:str, *, continuing:bool=False)->None:
     kind=str(task.get("kind") or "")
     status=str(task.get("status") or "")
     base=str(task.get("role") or "")
-    if status in {"accepted","integrated","superseded","cancelled","parked","blocked"}:
-        raise ValueError(f"task is closed/parked/owner-blocked and cannot launch role {role!r}: {status}")
+    if status in {"accepted","integrated","superseded","cancelled","parked"}:
+        raise ValueError(f"task is closed/parked and cannot launch role {role!r}: {status}")
+    if status=="blocked":
+        raise ValueError(_blocked_launch_error(task))
     if role==base:
         if status=="recovery-required":
             raise ValueError("task requires Analyst Recovery before the base role may continue")
@@ -525,7 +538,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     if live: raise ValueError(f"task already has a live attempt: {live[-1].get('event_dir')}")
     status=str(task.get("status") or "")
     if status in {"accepted","integrated","superseded","cancelled","parked"}: raise ValueError(f"task is closed/parked and cannot launch another worker: {status}")
-    if status=="blocked": raise ValueError("task is blocked on a Human-targeted escalation; resolve the escalation before launching more technical work")
+    if status=="blocked": raise ValueError(_blocked_launch_error(task))
     role=args.role or str(task.get("role") or "")
     if role not in ROLE_NAMES: raise ValueError(f"unknown role: {role}")
     tier=DEFAULT_TIER[role]

@@ -594,7 +594,7 @@ class ComponentsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'HARNESS_DRIFT'):
                 dsd_attempt._command_launch(args)
 
-    def test_attempt_budget_blocks_once_and_human_can_park_then_resume_new_window(self):
+    def test_attempt_budget_blocks_once_and_returns_to_orchestrator_for_disposition(self):
         self.register_impl('T-BUDGET')
         info=dsd_task.load_run(self.run); info['max_attempts_per_task']=3; dsd_task.write_json(dsd_task.run_file(self.run),info)
         task=dsd_task.load_task(self.run,'P1','T-BUDGET')
@@ -602,18 +602,18 @@ class ComponentsTests(unittest.TestCase):
         task['status']='planned'; dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-BUDGET'),task)
         out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
         self.assertEqual(len(out['budget_blocks']),1)
+        self.assertEqual(out['budget_blocks'][0]['action'],'review-control-block')
         task=dsd_task.load_task(self.run,'P1','T-BUDGET')
         self.assertEqual(task['status'],'blocked')
-        q=dsd_task.human_decision_question(task)
-        values=[x['value'] for x in q['options']]
-        self.assertIn('park',values); self.assertIn('cancel',values); self.assertNotIn('defer',values)
-        decision=self.root/'park.md'; decision.write_text('Park this task until the lane exists.\n')
-        parked=dsd_task.command_resolve_escalation(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-BUDGET',decision=decision,route='park'))
-        self.assertEqual(parked['status'],'parked')
-        task=dsd_task.load_task(self.run,'P1','T-BUDGET')
-        self.assertIsNone(dsd_task._reconcile_action(self.run,'P1',task))
-        decision2=self.root/'resume.md'; decision2.write_text('Try again with a fresh budget window.\n')
-        resumed=dsd_task.command_resolve_escalation(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-BUDGET',decision=decision2,route='resume'))
+        self.assertEqual(dsd_task.task_block_kind(task),'control')
+        with self.assertRaisesRegex(ValueError,'genuine Human authority block'):
+            dsd_task.human_decision_question(task)
+        action=dsd_task._reconcile_action(self.run,'P1',task)
+        self.assertEqual(action['action'],'review-control-block')
+        resumed=dsd_task.command_override_control_block(SimpleNamespace(
+            run_root=self.run,phase_id='P1',task_id='T-BUDGET',
+            reason='The automatic budget is exhausted, but the orchestrator has reviewed the evidence and authorizes one fresh bounded window.'
+        ))
         self.assertEqual(resumed['status'],'planned')
         self.assertEqual(resumed['attempt_budget_reset_at'],3)
         task=dsd_task.load_task(self.run,'P1','T-BUDGET')
@@ -622,8 +622,8 @@ class ComponentsTests(unittest.TestCase):
     def test_human_cancel_closes_verification_without_satisfying_dependency(self):
         self.register_impl('T-CANCEL')
         path=dsd_task.task_file(self.run,'P1','T-CANCEL'); task=dsd_task.load_json(path)
-        task['kind']='verification'; task['role']='verification'; task['tier']='grunt'; task['requires_integration']=False; task['status']='planned'
-        dsd_task._record_control_human_block(task,reason='lane-unavailable',detail={'prior_status':'planned'})
+        task['kind']='verification'; task['role']='verification'; task['tier']='grunt'; task['requires_integration']=False
+        task['status']='blocked'; task['last_escalation']={'target':'human','source':'worker','reason':'lane-unavailable','recorded_at':dsd_task.now()}
         dsd_task.write_json(path,task)
         decision=self.root/'cancel.md'; decision.write_text('Cancel this verification obligation explicitly.\n')
         out=dsd_task.command_resolve_escalation(SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T-CANCEL',decision=decision,route='cancel'))

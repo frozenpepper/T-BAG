@@ -1964,7 +1964,9 @@ def _human_escalation_excerpt(task: dict[str, Any], *, max_chars: int = 700) -> 
 
 
 def human_decision_question(task: dict[str, Any]) -> dict[str, Any]:
-    """Describe one durable Human blocker for a native harness question UI."""
+    """Describe one genuine durable Human blocker for a native harness question UI."""
+    if not _is_human_authority_block(task):
+        raise ValueError("human_decision_question requires a genuine Human authority block; T-BAG control guards belong to review-control-block")
     phase=str(task.get("phase_id") or "")
     tid=str(task.get("task_id") or "")
     seq=len(task.get("human_decision_history",[]) if isinstance(task.get("human_decision_history"),list) else [])+1
@@ -2586,6 +2588,17 @@ def _has_human_authority_escalation(task: dict[str, Any]) -> bool:
 def _is_human_authority_block(task: dict[str, Any]) -> bool:
     """True only for a currently blocked genuine Human authority escalation."""
     return str(task.get("status") or "")=="blocked" and _has_human_authority_escalation(task)
+
+
+def task_block_kind(task: dict[str, Any]) -> str | None:
+    """Classify current blocked state without conflating process and authority."""
+    if str(task.get("status") or "")!="blocked":
+        return None
+    if _current_control_block(task) is not None:
+        return "control"
+    if _has_human_authority_escalation(task):
+        return "human"
+    return "unknown"
 
 
 def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:

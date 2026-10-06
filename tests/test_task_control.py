@@ -181,6 +181,9 @@ class TaskControlTests(unittest.TestCase):
         self.assertIsNone(dsd_task._current_control_block(genuine))
         self.assertTrue(dsd_task._has_human_authority_escalation(genuine))
         self.assertTrue(dsd_task._is_human_authority_block(genuine))
+        self.assertEqual(dsd_task.task_block_kind(task),"control")
+        self.assertEqual(dsd_task.task_block_kind(legacy),"control")
+        self.assertEqual(dsd_task.task_block_kind(genuine),"human")
         self.assertTrue(dsd_task.task_can_advance_without_human(self.run,task))
         self.assertFalse(dsd_task.task_can_advance_without_human(self.run,genuine))
 
