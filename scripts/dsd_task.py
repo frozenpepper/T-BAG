@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -1301,6 +1302,7 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     graph_path = args.plan.resolve(); source = validate_analyst_plan_source(run, phase, graph_path)
     specs = preflight_plan_contents(run, phase, graph_path)
     graph=load_json(graph_path)
+    plan_source_sha256=hashlib.sha256(graph_path.read_bytes()).hexdigest()
     rederive_from_primary=set(slug(str(x)) for x in graph.get("rederive_from_primary",[]) if str(x).strip())
     carry_sources={str(spec.get("carry_from")) for spec in specs if spec.get("carry_from")}
 
@@ -1332,7 +1334,7 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
             task = {
                 "format": FORMAT, "phase_id": phase, "task_id": spec["task_id"], "kind": spec["kind"],
                 "role": spec["role"], "tier": spec["tier"], "brief": str(brief_copy),
-                "plan_source": str(graph_path), "plan_source_task": source["source_task_id"], "plan_source_attempt": source["source_attempt"], "plan_source_report": source["source_report"], "dependencies": spec["dependencies"],
+                "plan_source": str(graph_path), "plan_source_sha256": plan_source_sha256, "plan_source_task": source["source_task_id"], "plan_source_attempt": source["source_attempt"], "plan_source_report": source["source_report"], "dependencies": spec["dependencies"],
                 "requires_integration": spec["requires_integration"], "status": "planned",
                 "attempts": [], "review_rounds": 0, "review_history": [], "created_at": now(),
             }
@@ -1398,6 +1400,7 @@ def _registered_plan_replay(run: Path, phase: str, graph_path: Path) -> dict[str
     """Return an idempotent receipt when this exact Analyst graph is already registered."""
     try:
         graph=load_json(graph_path)
+        digest=hashlib.sha256(graph_path.read_bytes()).hexdigest()
     except (OSError,ValueError,json.JSONDecodeError):
         return None
     raw=graph.get("tasks")
@@ -1417,7 +1420,7 @@ def _registered_plan_replay(run: Path, phase: str, graph_path: Path) -> dict[str
             return None
         state=load_json(path)
         source=str(state.get("plan_source") or "")
-        if not source:
+        if not source or str(state.get("plan_source_sha256") or "")!=digest:
             return None
         try:
             same_source=Path(source).resolve()==graph_path.resolve()

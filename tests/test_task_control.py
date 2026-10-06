@@ -150,6 +150,11 @@ class TaskControlTests(unittest.TestCase):
         self.assertTrue(out["source_closed"]); self.assertEqual([x["task_id"] for x in out["ready_registered"]],["NEW"])
         replay=dsd_task.command_register_plan(r)
         self.assertTrue(replay["idempotent"]); self.assertEqual(replay["already_registered"],["NEW"]); self.assertEqual(replay["registered"],[])
+        original_graph=graph.read_text()
+        mutated=json.loads(original_graph); mutated["tasks"][0]["dependencies"]=["MISSING-MUTATED"]; graph.write_text(json.dumps(mutated))
+        with self.assertRaisesRegex(ValueError,"task already exists|unknown dependencies"):
+            dsd_task.command_register_plan(r)
+        graph.write_text(original_graph)
         closed=dsd_task.load_task(self.run,"P1",source_id); self.assertEqual(closed["status"],"accepted"); self.assertEqual(closed["accepted_report"],str(report.resolve()))
         q=A(); q.run_root=self.run; q.phase_id="P1"; q.no_sweep=True
         reconciled=dsd_task.command_reconcile_run(q)
