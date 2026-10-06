@@ -76,7 +76,7 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(); self.run=Path(self.tmp.name)/"run"; self.run.mkdir()
         self.args=SimpleNamespace(
             run_root=self.run,phase_id=None,max_steps=12,owner_heartbeat_seconds=1800.0,
-            changed_update_min_seconds=900.0,report_complete_grace_seconds=30.0,stall_confirm_seconds=300.0,
+            changed_update_min_seconds=900.0,stall_confirm_seconds=300.0,
         )
     def tearDown(self): self.tmp.cleanup()
 
@@ -137,16 +137,16 @@ class Rc45ParentTickTests(unittest.TestCase):
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary","applied":[]})
     @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
     @mock.patch.object(parent_tick,"retire_attempt",return_value={"retired":True})
-    @mock.patch.object(parent_tick,"inspect_attempt",return_value={"state":"running","report_state":"present","report_age_seconds":45.0,"log_age_seconds":20.0})
-    def test_final_report_without_terminal_is_retired_mechanically(self,_inspect,_retire,_load,_advance,_owner):
+    @mock.patch.object(parent_tick,"inspect_attempt",return_value={"state":"running","report_state":"present","report_age_seconds":45.0,"log_age_seconds":2.0})
+    def test_substantive_report_never_retires_a_live_worker(self,_inspect,_retire,_load,_advance,_owner):
         live={"phase_id":"P","task_id":"T","role":"discovery","event_dir":str(self.run/'e')}
-        states=[self.base_state(live_attempts=[live],backlog_count=1,worker_budget={"max":2,"live":1,"free":1}), self.base_state(first_useful_actions=[{"action":"gate-finished-attempt","phase_id":"P","task_id":"T"}],backlog_count=1)]
-        with mock.patch.object(parent_tick,"reconcile",side_effect=states):
+        state=self.base_state(live_attempts=[live],backlog_count=1,worker_budget={"max":2,"live":1,"free":1})
+        with mock.patch.object(parent_tick,"reconcile",return_value=state):
             out=parent_tick.command_tick(self.args)
-        _retire.assert_called_once()
-        self.assertTrue(out["attention"][0]["retirement_requested"]["retired"])
-        self.assertIn("worker-retired",out["owner_notice"]["reasons"])
-        self.assertNotIn("monitoring",out)
+        _retire.assert_not_called()
+        self.assertEqual(out["classification"],"workers-running")
+        self.assertEqual(out["turn"],"yield")
+        self.assertNotIn("attention",out)
 
     @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})

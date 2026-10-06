@@ -27,7 +27,6 @@ FORMAT = "tbag-parent-loop-v1"
 PULSE_FORMAT = "tbag-parent-pulse-v1"
 DEFAULT_OWNER_HEARTBEAT_SECONDS = 1800.0
 DEFAULT_CHANGED_UPDATE_MIN_SECONDS = 900.0
-DEFAULT_REPORT_COMPLETE_GRACE_SECONDS = 30.0
 DEFAULT_STALL_CONFIRM_SECONDS = 300.0
 DEFAULT_DISK_SAMPLE_SECONDS = 300.0
 
@@ -468,7 +467,7 @@ _LAUNCH_ACTION_ROLES={
 
 def _launch_action_blocker(run:Path, action:dict[str,Any])->str|None:
     name=str(action.get("action") or "")
-    if name not in set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session","retry-same-role-retained-workspace"}:
+    if name not in set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session","retry-same-role-retained-workspace","relaunch-task"}:
         return None
     phase=str(action.get("phase_id") or ""); tid=str(action.get("task_id") or "")
     if not phase or not tid: return "launch action is missing phase/task identity"
@@ -514,7 +513,7 @@ def _task_action_cycle_safety(loop: dict[str, Any], run: Path, pending: list[dic
     if not isinstance(histories,dict):
         histories={}; loop["task_action_history"]=histories
     violations=[]
-    launch_names=set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session","retry-same-role-retained-workspace"}
+    launch_names=set(_LAUNCH_ACTION_ROLES)|{"launch-ready-task","resume-recorded-session","retry-same-role-retained-workspace","relaunch-task"}
     for action in pending:
         name=str(action.get("action") or "")
         if name not in launch_names: continue
@@ -550,7 +549,7 @@ def _task_action_cycle_safety(loop: dict[str, Any], run: Path, pending: list[dic
             tail=tokens[-need:]; pattern=tail[:width]
             if all(tail[offset:offset+width]==pattern for offset in range(0,need,width)):
                 cycle={"width":width,"repeats":4,"pattern":pattern}; break
-        retry_actions={"resume-recorded-session","retry-same-role-retained-workspace"}
+        retry_actions={"resume-recorded-session","retry-same-role-retained-workspace","relaunch-task"}
         cycle_has_retry=bool(cycle and any(str(token).split(":",1)[0] in retry_actions for token in cycle.get("pattern",[])))
         if (name in retry_actions and same_action>=8) or cycle_has_retry:
             detail={
@@ -628,16 +627,10 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
                     observer_rearm.append({"run_root":str(run),"phase_id":live.get("phase_id"),"task_id":live.get("task_id"),"event_dir":event})
                 elif deadline_exceeded:
                     item["observer_attention"]="observer-not-rearmed-after-attempt-deadline"
-        report_age = observed.get("report_age_seconds")
-        if observed.get("state") == "running" and observed.get("report_state") == "present" and isinstance(report_age, (int, float)) and report_age >= float(args.report_complete_grace_seconds):
-            try:
-                item["retirement_requested"] = retire_attempt(run, live, "report-complete-no-terminal")
-                changed_runtime = True
-            except Exception as exc:
-                item["retirement_error"] = str(exc)
-                item["attention"] = "retirement-failed"
-            stalls.pop(event, None)
-        elif observed.get("state") == "running" and observed.get("attention") == "silent-long-running":
+        # Report contents are evidence, never process-control authority. Workers may
+        # write/replace report.md while still doing legitimate tool work; transport
+        # completion comes from terminal/process evidence, not report shape or age.
+        if observed.get("state") == "running" and observed.get("attention") == "silent-long-running":
             prior = stalls.get(event) if isinstance(stalls.get(event), dict) else {}
             first_seen = epoch(prior.get("first_seen_at"))
             cpu_now=((observed.get("process") or {}).get("worker") or {}).get("cpu_seconds")
@@ -954,7 +947,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--run-root", type=Path, required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps", type=int, default=12)
     p.add_argument("--owner-heartbeat-seconds", type=float, default=DEFAULT_OWNER_HEARTBEAT_SECONDS)
     p.add_argument("--changed-update-min-seconds", type=float, default=DEFAULT_CHANGED_UPDATE_MIN_SECONDS)
-    p.add_argument("--report-complete-grace-seconds", type=float, default=DEFAULT_REPORT_COMPLETE_GRACE_SECONDS)
     p.add_argument("--stall-confirm-seconds", type=float, default=DEFAULT_STALL_CONFIRM_SECONDS)
     p.add_argument("--disk-sample-seconds", type=float, default=DEFAULT_DISK_SAMPLE_SECONDS)
     p.add_argument("--details", action="store_true", help="include verbose monitoring, disk and transition diagnostics")

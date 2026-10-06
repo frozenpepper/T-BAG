@@ -1394,9 +1394,61 @@ def _command_register_plan_unlocked(args: argparse.Namespace) -> dict[str, Any]:
     return {"phase_id": phase, "registered": registered, "ready_registered":ready_registered, "source_closed":source_closed, "plan_source": str(graph_path), "carry_forward": {tid:meta["source_task"] for tid,meta in carry_snapshots.items()}}
 
 
+def _registered_plan_replay(run: Path, phase: str, graph_path: Path) -> dict[str, Any] | None:
+    """Return an idempotent receipt when this exact Analyst graph is already registered."""
+    try:
+        graph=load_json(graph_path)
+    except (OSError,ValueError,json.JSONDecodeError):
+        return None
+    raw=graph.get("tasks")
+    if graph.get("format")!=PLAN_FORMAT or not isinstance(raw,list) or not raw:
+        return None
+    ids=[]
+    for item in raw:
+        if not isinstance(item,dict) or not str(item.get("task_id") or "").strip():
+            return None
+        ids.append(slug(str(item["task_id"])))
+    if len(set(ids))!=len(ids):
+        return None
+    states=[]
+    for tid in ids:
+        path=task_file(run,phase,tid)
+        if not path.is_file():
+            return None
+        state=load_json(path)
+        source=str(state.get("plan_source") or "")
+        if not source:
+            return None
+        try:
+            same_source=Path(source).resolve()==graph_path.resolve()
+        except OSError:
+            return None
+        if not same_source:
+            return None
+        states.append(state)
+    ready_registered=[]
+    for state in states:
+        if state.get("status") not in {"planned","ready"}:
+            continue
+        ok,_=readiness(run,phase,state)
+        if ok:
+            ready_registered.append({"task_id":state["task_id"],"role":state.get("role"),"tier":state.get("tier")})
+    return {
+        "phase_id":phase,
+        "registered":[],
+        "already_registered":ids,
+        "ready_registered":ready_registered,
+        "plan_source":str(graph_path),
+        "idempotent":True,
+    }
+
+
 def command_register_plan(args: argparse.Namespace) -> dict[str, Any]:
-    run=args.run_root.resolve(); phase=slug(args.phase_id)
+    run=args.run_root.resolve(); phase=slug(args.phase_id); graph_path=args.plan.resolve()
     with file_lock(phase_root(run,phase)/".tasks.lock"):
+        replay=_registered_plan_replay(run,phase,graph_path)
+        if replay is not None:
+            return replay
         return _command_register_plan_unlocked(args)
 
 
@@ -2013,6 +2065,13 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
             if task.get("followup_triage_for") or task.get("kind") in {"implementation","verification"} or declared in {"resume","replan","replan-resume","escalate"}:
                 return {**base,"action":"record-analyst-disposition","report":str(event/"report.md")}
         if task.get("kind") in {"analysis","verification"}: return {**base,"action":"accept-specialist-result","report":str(event/"report.md")}
+    if status=="active" and not _quiescent_reusable_review_conduit(task):
+        # "active" is not a prohibition state. If no process is live and no more
+        # specific transition applies, make the recoverable parent action explicit
+        # instead of forcing the orchestrator to infer permission from silence.
+        base_role=str(task.get("role") or "")
+        if base_role in ROLE_NAMES:
+            return {**base,"action":"relaunch-task","role":base_role,"tier":DEFAULT_TIER.get(base_role),"reason":"active-without-live-worker"}
     return None
 
 def _quiescent_reusable_review_conduit(task: dict[str, Any]) -> bool:
@@ -2097,7 +2156,7 @@ def command_reconcile_run(args: argparse.Namespace) -> dict[str, Any]:
             actions.append({"phase_id":phase,"action":"prepare-phase-gate","reason":gate.get("reason")})
     limit=int(info.get("max_workers") or 1); slots=max(0,limit-len(live))
     ignored={"waiting-dependencies","await-human-decision"}
-    launch_actions={"launch-ready-task","launch-recovery","launch-analyst-discovery","launch-fixer","launch-fresh-reviewer","launch-or-reuse-fresh-plan-reviewer","resume-recorded-session","retry-same-role-retained-workspace"}
+    launch_actions={"launch-ready-task","launch-recovery","launch-analyst-discovery","launch-fixer","launch-fresh-reviewer","launch-or-reuse-fresh-plan-reviewer","resume-recorded-session","retry-same-role-retained-workspace","relaunch-task"}
     nonlaunch=[a for a in actions if a.get("action") not in ignored|launch_actions]
     launches=[a for a in actions if a.get("action") in launch_actions]
     delivery_repairs=[

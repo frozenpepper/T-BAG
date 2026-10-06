@@ -118,7 +118,7 @@ def main() -> int:
             "- Nothing may precede that token: no Markdown heading, label, preface, code fence, or commentary.",
             "- This line is parsed mechanically. A missing/moved token turns an otherwise useful report into a routing-protocol error.",
         ]
-    lines += [f"Report: {report}", "Final stdout: report path plus at most one short conclusion."]
+    lines += ["LIFECYCLE NOTE: report text is evidence, not a stop signal. Complete all assigned work/tooling before finalizing the report; writing a status/verdict does not end the attempt.", f"Report: {report}", "Final stdout: report path plus at most one short conclusion."]
     rendered = "\n".join(lines) + "\n"
     if args.output:
         out = args.output.resolve()

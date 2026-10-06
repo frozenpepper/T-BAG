@@ -148,10 +148,23 @@ class TaskControlTests(unittest.TestCase):
         r=A(); r.run_root=self.run; r.phase_id="P1"; r.plan=graph
         out=dsd_task.command_register_plan(r)
         self.assertTrue(out["source_closed"]); self.assertEqual([x["task_id"] for x in out["ready_registered"]],["NEW"])
+        replay=dsd_task.command_register_plan(r)
+        self.assertTrue(replay["idempotent"]); self.assertEqual(replay["already_registered"],["NEW"]); self.assertEqual(replay["registered"],[])
         closed=dsd_task.load_task(self.run,"P1",source_id); self.assertEqual(closed["status"],"accepted"); self.assertEqual(closed["accepted_report"],str(report.resolve()))
         q=A(); q.run_root=self.run; q.phase_id="P1"; q.no_sweep=True
         reconciled=dsd_task.command_reconcile_run(q)
         self.assertFalse(any(x.get("task_id")==source_id for x in reconciled.get("first_useful_actions",[])),reconciled)
+
+    def test_active_without_live_worker_surfaces_relaunch_instead_of_unresolved_silence(self):
+        self.write_plan([{"task_id":"T-RELAUNCH","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        path=dsd_task.task_file(self.run,"P1","T-RELAUNCH"); task=dsd_task.load_json(path); task["status"]="active"; dsd_task.write_json(path,task)
+        action=dsd_task._reconcile_action(self.run,"P1",task)
+        self.assertEqual(action["action"],"relaunch-task"); self.assertEqual(action["role"],"implementer")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.no_sweep=True; a.details=False
+        state=dsd_task.command_reconcile_run(a)
+        self.assertTrue(any(x.get("action")=="relaunch-task" and x.get("task_id")=="T-RELAUNCH" for x in state.get("first_useful_actions",[])),state)
+        self.assertFalse(any(x.get("task_id")=="T-RELAUNCH" for x in state.get("unresolved_state",[])),state)
 
     def test_independent_tasks_are_both_ready(self):
         self.write_plan([
