@@ -15,6 +15,7 @@
 - The `human-blocked` run transition now uses the same canonical Human-authority predicate, preventing legacy control-plane records from suspending an otherwise autonomous run.
 - Internal guards now use dedicated `last_control_block` / `control_block_history` state instead of overloading `last_escalation`; legacy control-plane escalation records remain readable and are cleared when explicitly overridden.
 - Human-wait and Human-resolution paths now share one genuine-authority predicate. Control-blocked tasks count as orchestrator-actionable work, so an unrelated Human question cannot suspend the run while internal recovery remains available.
+- Compact `show` now exposes the current control-block reason and override route. `active-idle` explicitly forbids status-only turns, and the parent contract defines tick turn values as executable semantics rather than narration cues.
 
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.

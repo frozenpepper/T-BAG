@@ -1488,6 +1488,16 @@ def command_show(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(value,dict):
             keep=("outcome","target","report","attempt","reviewer_attempt","recorded_at")
             result[key]={k:value.get(k) for k in keep if value.get(k) is not None}
+    control=_current_control_block(task)
+    if control is not None:
+        detail=control.get("detail") if isinstance(control.get("detail"),dict) else {}
+        result["control_block"]={
+            "reason":control.get("reason"),
+            "target":control.get("target") or "orchestrator",
+            "recorded_at":control.get("recorded_at"),
+            "override_command":"override-control-block",
+            "detail":{k:detail.get(k) for k in ("prior_status","attempts_since_budget_reset","max_attempts_per_task","attempts_total") if detail.get(k) is not None},
+        }
     burn=task.get("burn") if isinstance(task.get("burn"),dict) else task_burn_metrics(task)
     if burn and any(burn.get(k) for k in ("attempts_total","resume_failures_scanned","no_movement_resume_failures")):
         result["burn"]={k:burn.get(k) for k in (

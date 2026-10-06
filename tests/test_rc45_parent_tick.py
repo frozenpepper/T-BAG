@@ -278,6 +278,21 @@ class Rc45ParentTickTests(unittest.TestCase):
     @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
     @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0})
     @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
+    def test_active_idle_requires_same_turn_diagnosis_not_status_theatre(self,_load,_poison,_advance,_owner):
+        state=self.base_state(backlog_count=1,waiting_dependency_count=1)
+        with mock.patch.object(parent_tick,"reconcile",return_value=state), \
+             mock.patch.object(parent_tick,"disk_usage_for_tick",return_value={}):
+            out=parent_tick.command_tick(self.args)
+        self.assertEqual(out["classification"],"active-idle")
+        self.assertEqual(out["turn"],"intervene")
+        self.assertEqual(out["control_error"]["code"],"active-idle")
+        self.assertIn("Do not emit a status-only turn",out["control_error"]["next"])
+        self.assertIn("Ask the Human only for genuine owner authority",out["control_error"]["next"])
+
+    @mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={"status":"ok"})
+    @mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"quiescent","applied":[]})
+    @mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0})
+    @mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"})
     def test_parked_only_run_is_quiescent_not_recovery(self,_load,_poison,_advance,_owner):
         state=self.base_state(backlog_count=1,parked_count=1)
         with mock.patch.object(parent_tick,"reconcile",return_value=state), \

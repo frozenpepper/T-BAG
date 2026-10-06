@@ -880,7 +880,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         out["control_error"] = {
             "code":"active-idle",
             "message":"Active run has no live worker, authorized action, owner block, or mechanical completion.",
-            "next":"Try the bounded recovery/relaunch path. If durable state contradicts evidence or repeats without progress, use the orchestrator escape hatch to inspect/repair T-BAG rather than idling or asking the Human for permission.",
+            "next":"Do not emit a status-only turn. Diagnose and dispose in this turn: inspect the compact task/reconcile evidence, relaunch/recover/replan when justified, or use the orchestrator escape hatch to repair contradictory T-BAG state. Ask the Human only for genuine owner authority or unresolved intent.",
         }
     return mark_degraded_packet(out)
 

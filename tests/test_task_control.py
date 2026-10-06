@@ -206,6 +206,9 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(state["last_control_block"]["target"],"orchestrator")
         self.assertEqual(state["last_control_block"]["source"],"control-plane")
         self.assertNotIn("last_escalation",state)
+        show=dsd_task.command_show(SimpleNamespace(run_root=self.run,phase_id="P1",task_id="T-CTRL",details=False))
+        self.assertEqual(show["control_block"]["reason"],"repeated-control-cycle")
+        self.assertEqual(show["control_block"]["override_command"],"override-control-block")
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-CTRL"; a.reason="The guard is looping on stale T-BAG state; cold relaunch is the evidence-backed recovery."
         out=dsd_task.command_override_control_block(a)
