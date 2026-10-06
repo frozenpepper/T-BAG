@@ -431,7 +431,7 @@ def owner_notice(owner: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _compact_action(item: dict[str, Any]) -> dict[str, Any]:
-    keep=("action","phase_id","task_id","role","tier","reason","waiting_on","blocked_by","event_dir","report")
+    keep=("action","phase_id","task_id","role","tier","reason","waiting_on","blocked_by","event_dir","report","override_command","next")
     return {k:item.get(k) for k in keep if item.get(k) not in (None,[],{})}
 
 

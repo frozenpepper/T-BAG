@@ -253,6 +253,19 @@ class Rc45ParentTickTests(unittest.TestCase):
         self.assertFalse(out.get("owner_question_required",False))
         self.assertIn("override-control-block",out["loop_suspected"]["next"])
 
+    def test_compact_actions_keep_internal_recovery_instructions(self):
+        control=parent_tick._compact_action({
+            "action":"review-control-block","phase_id":"P","task_id":"T",
+            "reason":"attempt-budget-exhausted","override_command":"override-control-block",
+        })
+        self.assertEqual(control["override_command"],"override-control-block")
+        unknown=parent_tick._compact_action({
+            "action":"review-unclassified-block","phase_id":"P","task_id":"U",
+            "reason":"blocked-without-control-or-human-authority-record",
+            "next":"inspect and repair stale T-BAG state",
+        })
+        self.assertIn("repair stale T-BAG state",unknown["next"])
+
     def test_normal_reviewer_fixer_alternation_is_not_a_control_loop(self):
         loop={}
         calls={"n":0}

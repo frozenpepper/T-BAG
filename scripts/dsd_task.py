@@ -1945,15 +1945,8 @@ def _human_accept_route_allowed(task: dict[str, Any]) -> bool:
 def _human_escalation_excerpt(task: dict[str, Any], *, max_chars: int = 700) -> str:
     escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
     reason=str(escalation.get("reason") or "")
-    detail=escalation.get("detail") if isinstance(escalation.get("detail"),dict) else {}
     if reason:
-        suffix=""
-        if reason=="attempt-budget-exhausted":
-            suffix=(
-                f" ({detail.get('attempts_since_budget_reset')} attempts since the last Human budget reset; "
-                f"limit {detail.get('max_attempts_per_task')})"
-            )
-        return (reason.replace("-"," ")+suffix)[:max_chars]
+        return reason.replace("-"," ")[:max_chars]
     report=Path(str(escalation.get("report") or ""))
     if not report.is_file(): return "A Human decision is required before this task can continue."
     try:

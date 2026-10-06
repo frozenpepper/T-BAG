@@ -8,6 +8,8 @@
 - `owner_communication` is now part of malformed-packet validation, so a truncated tick cannot silently lose the explicit speak/silence instruction.
 - Simplified authority classification: one genuine Human-escalation accessor plus `task_block_kind()` now replace overlapping Human-block predicates.
 - Unclassified/legacy blocked state now counts as orchestrator-actionable work for Human-wait gating, so a separate owner question cannot suspend the run while stale internal state still needs repair.
+- Compact parent actions now retain `override_command`/`next`, so internal-block recovery is self-contained on the cheap tick surface instead of forcing details/docs archaeology. Removed obsolete Human-budget wording from genuine Human escalation summaries.
+
 
 
 
