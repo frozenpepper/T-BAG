@@ -621,6 +621,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         _add_input(input_groups,"proposal_input",snapshot_root)
         context_review_binding={**context_review_binding,"context_snapshot":str(snapshot_root.resolve())}
     prompt_cmd=[sys.executable,str(scripts/"render_worker_prompt.py"),"--role",role,"--task-id",tid,"--phase-id",phase,"--run-root",str(run),"--worker-rules",str(rules),"--task",str(brief),"--report",str(report),"--project-root",str(wt),"--output",str(prompt)]
+    if resume: prompt_cmd.append("--continuation")
     for key,values in input_groups.items():
         flag="--"+key.replace("_","-")
         for value in values: prompt_cmd += [flag,str(Path(value).resolve())]

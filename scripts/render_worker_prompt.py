@@ -35,6 +35,7 @@ def main() -> int:
     ap.add_argument("--task", type=Path, required=True)
     ap.add_argument("--report", type=Path, required=True)
     ap.add_argument("--project-root", type=Path)
+    ap.add_argument("--continuation", action="store_true", help="resume an existing worker conversation without forcing stable-context rereads")
     for flag in INPUT_FLAGS:
         ap.add_argument("--" + flag.replace("_", "-"), action="append", default=[])
     ap.add_argument("--output", type=Path)
@@ -76,18 +77,38 @@ def main() -> int:
             if not p.exists(): raise SystemExit(f"ERROR: input missing: {p}")
         if paths: groups.append((label, list(dict.fromkeys(paths))))
 
-    reads = [rules, common] + ([quality] if quality else []) + [role_skill] + ([analyst_escalation] if analyst_escalation else []) + ([plan_authoring] if plan_authoring else []) + ([skill_catalog] if skill_catalog else []) + ([project_protocol] if project_protocol else []) + task_skills + [task]
+    stable = [rules, common] + ([quality] if quality else []) + ([analyst_escalation] if analyst_escalation else []) + ([plan_authoring] if plan_authoring else []) + ([skill_catalog] if skill_catalog else []) + ([project_protocol] if project_protocol else [])
+    if args.continuation:
+        # The recorded CLI session already received immutable run/common/quality context.
+        # Reassert the current task/role and any role-selected skills, but keep stable
+        # contracts as explicit fallbacks if compaction made an exact rule unavailable.
+        reads=[task,role_skill]+task_skills
+        fallback=[p for p in stable if p not in reads]
+        orientation="This is a resumed worker conversation. Read the current task and role material below; do not reread unchanged stable contracts unless compaction/context loss makes an exact rule unavailable."
+    elif args.role=="reviewer":
+        # Anchor fresh acceptance review on its frozen predicate before worker claims.
+        reads=[task,role_skill]+stable+task_skills
+        fallback=[]
+        orientation="REVIEWER PRIORITY: read the frozen task brief first as the acceptance authority, then the Reviewer role/method contracts, then typed evidence. Do not let prior worker claims define the predicate."
+    else:
+        reads=stable+[role_skill]+task_skills+[task]
+        fallback=[]
+        orientation="Read the supplied contracts in order. COMMON defines universal boundaries; QUALITY (when supplied) defines the shared technical method; the role skill defines your mandate; the task brief defines this job."
+    reads=list(dict.fromkeys(reads))
+    fallback=list(dict.fromkeys(fallback))
     attempt_dir=report.parent
     lines = [
         f"T-BAG {args.role.upper().replace('-', ' ')} for task {args.task_id}.",
-        "Read the supplied contracts in order. COMMON defines universal boundaries; QUALITY (when supplied) defines the shared technical method; the role skill defines your mandate; the task brief defines this job.",
+        orientation,
     ]
     if args.project_root:
         project_root=args.project_root.resolve()
         if not project_root.is_dir(): raise SystemExit(f"ERROR: assigned project view missing: {project_root}")
         lines += [f"Assigned project view: {project_root}", "Project reads/tools must target only that assigned view; it may differ from the process cwd used to protect read-only tasks."]
-    lines += ["Read, in order:"]
+    lines += ["Read now, in order:"]
     lines += [f"{i}. {p}" for i, p in enumerate(reads, 1)]
+    if fallback:
+        lines += ["Stable fallback references — already supplied in this resumed session; reread only if exact context was lost:", *[f"- {p}" for p in fallback]]
     for label, paths in groups:
         lines += [f"{label}:", *[f"- {p}" for p in paths]]
     lines += [f"Attempt directory: {attempt_dir}", "All attempt-output paths below are relative to that directory, never the project cwd/view.", f"Scratch/temp directory: {attempt_dir/'scratch'} (TMPDIR/TMP/TEMP point here). Never place T-BAG evidence or work products in system /tmp or outside the project-owned run tree."]

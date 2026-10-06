@@ -491,6 +491,15 @@ class ComponentsTests(unittest.TestCase):
         self.assertIn('Replace OUTCOME with one of',gate)
         self.assertIn('do not relaunch solely to repair formatting',gate.lower())
 
+    def test_worker_prompt_prioritizes_reviewer_brief_and_compacts_continuations(self):
+        text=(SCRIPTS/'render_worker_prompt.py').read_text()
+        self.assertIn('REVIEWER PRIORITY',text)
+        self.assertIn('reads=[task,role_skill]+stable+task_skills',text)
+        self.assertIn('--continuation',text)
+        self.assertIn('Stable fallback references',text)
+        attempt=(SCRIPTS/'dsd_attempt.py').read_text()
+        self.assertIn('if resume: prompt_cmd.append("--continuation")',attempt)
+
     def test_opencode_install_prunes_ended_transport_but_preserves_active_run_registry(self):
         project=self.root/'adapter-opencode-transport-prune'; project.mkdir(); git(project,'init','-q')
         ended=project/'TBag'/'runs'/'ENDED'; active=project/'TBag'/'runs'/'ACTIVE'
