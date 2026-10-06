@@ -82,7 +82,7 @@ def action_key(item: dict[str, Any]) -> str:
 def mark_degraded_packet(packet: dict[str, Any]) -> dict[str, Any]:
     """Make malformed routing output explicit instead of inviting blind action."""
     missing=[]
-    for key in ("run_id","run_status","classification","turn"):
+    for key in ("run_id","run_status","classification","turn","owner_communication"):
         if not isinstance(packet.get(key),str) or not str(packet.get(key) or "").strip():
             missing.append(key)
     for key in ("delivery","worker_budget"):

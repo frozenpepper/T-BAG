@@ -203,11 +203,11 @@ class Rc45ParentTickTests(unittest.TestCase):
         packet={"run_id":None,"run_status":"active","classification":None,"turn":None,"delivery":None,"worker_budget":{"max":2}}
         out=parent_tick.mark_degraded_packet(packet)
         self.assertTrue(out["degraded"])
-        self.assertEqual(set(out["degraded_fields"]),{"run_id","classification","turn","delivery"})
+        self.assertEqual(set(out["degraded_fields"]),{"run_id","classification","turn","owner_communication","delivery"})
         self.assertIn("Re-tick or diagnose",out["packet_warning"])
 
     def test_complete_tick_packet_is_not_marked_degraded(self):
-        packet={"run_id":"R","run_status":"active","classification":"workers-running","turn":"yield","delivery":{},"worker_budget":{}}
+        packet={"run_id":"R","run_status":"active","classification":"workers-running","turn":"yield","owner_communication":"none","delivery":{},"worker_budget":{}}
         self.assertNotIn("degraded",parent_tick.mark_degraded_packet(packet))
 
     def test_per_task_cycle_detector_survives_interleaved_packet_changes(self):

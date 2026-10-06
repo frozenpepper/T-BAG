@@ -5,6 +5,8 @@
 - Removed stale test fixture arguments for the deleted report-completion grace kill path.
 - Bare/legacy `status=blocked` records with neither a control record nor genuine Human escalation now surface `review-unclassified-block` for orchestrator repair instead of crashing reconciliation or fabricating a Human question.
 - Tick packets now carry deterministic `owner_communication: question|notice|none`. `none` explicitly suppresses routine user-facing status, reducing repeated parent narration on unchanged autonomous wakes.
+- `owner_communication` is now part of malformed-packet validation, so a truncated tick cannot silently lose the explicit speak/silence instruction.
+
 
 
 
