@@ -22,7 +22,7 @@ This escape hatch never authorizes falsifying evidence, weakening an explicit Hu
 
 Run until `COMPLETED`, `HUMAN-BLOCKED`, `PAUSED-BY-USER`, or `ABANDONED`. Runs are re-entrant.
 
-## Parent loop
+## Normal parent loop
 
 Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an answer to an open `owner_question`: apply it, `resume-owner`, then tick.
 
@@ -31,26 +31,38 @@ Every owner turn/resume/wake starts with **`parent_tick.py tick`**, except an an
 3. **Expose only needed work.** Analyst findings may close as findings. Planning/replanning comes from Planner/Discovery/Surveyor briefs + `plan/task-graph.json`; register verbatim. Keep unresolved root cause/architecture with Analysts.
 4. **Deliver, then schedule.** Tick audits the run's recorded primary Git branch. `delivery-broken` stops new launches. Mutable dependencies count only after their reviewed delta is committed there; worktrees/checkpoints are not delivery. Read-only roles use a shared frozen project view.
 5. **Grunt loop.** Implementer → fresh Reviewer; FAIL → Fixer resumes that Reviewer → fresh Review; PASS → land. Out-of-brief obligations go to Analyst triage; ESCALATE uses the central ladder.
-6. **Authority ladder.** Grunt → Analyst → Human. Stronger runtime profiles do not widen authority.
+6. **Authority ladder.** Grunt → Analyst → Human is the normal **worker escalation path**, not a restriction on direct parent intervention. Stronger runtime profiles do not widen worker authority.
 7. **Durable truth + bounded autonomy.** Evidence gating is not semantic PASS. Report contents never terminate a live worker; tick retirement is reserved for confirmed silent/deadline anomalies. Session poison cold-retries transport without spending Analyst authority; per-task attempt/cycle limits normally stop autonomous retry loops, while the orchestrator may override T-BAG-internal deadlocks when justified by evidence.
-8. **Harness wake.** `OPENCODE.md` is the sole protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. After launch, yield—never sleep/poll. Waiting/paused/ended runs do not heartbeat. Never run core `follow` or model-authored wait/poll loops. Routine parent control uses compact tick/status/show surfaces; full details are diagnostic-only.
+8. **Harness wake.** `OPENCODE.md` is the normal protocol: detached launch auto-arms when possible; a 60s deterministic completion pulse detects ended calls and a slower health heartbeat checks active orchestration. After launch, normally yield instead of sleeping/polling. Waiting/paused/ended runs do not heartbeat. Avoid core `follow` or model-authored wait/poll loops in normal operation; use the escape hatch when the transport itself is broken. Routine parent control uses compact tick/status/show surfaces; full details are diagnostic-only.
+
+## Precedence when rules collide
+
+1. **Human intent and real safety/irreversibility constraints.**
+2. **Observed product/source/evidence truth.**
+3. **Orchestrator judgment about how to achieve the goal responsibly.**
+4. **T-BAG process machinery and conventions.**
+
+T-BAG may optimize the first three; it may not overrule them.
 
 ## Hard truth and safety boundaries
 
-- **Authority/acceptance:** brief + typed authority define scope; evidence never widens it. Red predicates stay red; contract correction needs Analyst/Human authority.
+- **Human authority/safety:** never weaken an explicit Human constraint, invent permission for a destructive/irreversible action, or use the escape hatch to bypass genuine safety boundaries.
 - **Delivery truth:** accepted/reviewed/integrated labels are not delivery. A mutable result is delivered only when its recorded integration commit is on the run's primary branch. Never say “landed” without that proof.
-- **Semantic truth:** accepted evidence is not automatically green. Preserve failed prerequisites and explicit `FAIL`/`BLOCKED`.
-- **Review ownership:** fresh Reviewer owns task acceptance; Human may explicitly accept a Human-targeted escalation without rewriting its red Review. After PASS the parent does not shadow-review.
-- **Succession:** supersession/deferral/parking never erases obligations; closure needs a successor or explicit Human cancellation. Cancellation does not make a downstream dependency green.
-- **Parent authority:** delegation is the token-saving default, not a prohibition on parent reasoning. The parent may diagnose, repair, or act directly when orchestration machinery is failing or a direct intervention is clearly the responsible path; it must preserve Human intent and distinguish its own conclusion from worker/reviewer evidence.
-- **Context:** workers get frozen rules, one role, selected skills, brief and typed inputs—not rich parent history or raw logs.
+- **Semantic truth:** accepted evidence is not automatically green. Preserve failed prerequisites and explicit `FAIL`/`BLOCKED`. If the parent overrides a process decision, keep the original evidence visible rather than relabelling it.
+- **Evidence honesty:** review, test, and worker evidence may be superseded by later evidence or an explicit parent decision, but never rewritten to claim something happened when it did not.
+
+## Normal operating disciplines
+
+- **Authority/acceptance:** brief + typed authority normally define worker scope. Analyst/Human routes are the cheap default for contract changes; the orchestrator may correct T-BAG-generated scope/plan mechanics directly when that is the responsible way to preserve Human intent.
+- **Review ownership:** fresh Reviewer normally owns task acceptance and the parent does not shadow-review after PASS. If the Review mechanism itself is wrong/broken, the parent may intervene, but preserves the Review record and makes its override explicit.
+- **Succession:** supersession/deferral/parking should preserve obligations; do not silently lose work. The orchestrator may repair broken succession directly rather than waiting for permission from T-BAG.
+- **Context:** workers get frozen rules, one role, selected skills, brief and typed inputs—not rich parent history or raw logs. This is a token-control default, not a limit on what the orchestrator may inspect when diagnosing a problem.
 - **Self-governance:** do not casually self-modify T-BAG during ordinary project work. But when T-BAG tooling/configuration is itself the demonstrated blocker, the orchestrator may make the smallest validated repair or bypass and continue; do not escalate to the Human solely for permission to fix T-BAG's own bureaucracy.
-- **Cleanup:** lifecycle owns runtime cleanup. Never raw-delete shared `~/.cache/t-bag`.
-- **Project-local scratch:** T-BAG diagnostics/repros/temp/handoffs stay under project `TBag/`; never `$TMPDIR`, `/tmp`, `/private/var/...` or external paths unless the Human explicitly requests them.
+- **Cleanup/scratch:** use lifecycle cleanup and project-local `TBag/` scratch by default; avoid raw shared-cache deletion or external temp sprawl. The orchestrator may deviate when required by the real environment, with the usual care for destructive actions.
 
-## Owner communication
+## Normal owner communication
 
-Two channels only. **`owner_question`** is blocking authority/input after deterministic + Analyst routes are exhausted: launch `actions_before_question`, `wait-owner`, use the harness-native question UI, then end the turn. Both heartbeat lanes stay suspended until the answer is applied and `resume-owner` runs. Plain chat is invalid; do not ask Humans to approve scheduling already authorized by lifecycle/plan or choices precedent/Analyst authority can resolve.
+**`owner_question`** is the preferred blocking authority/input channel after deterministic + Analyst routes are exhausted: launch `actions_before_question`, `wait-owner`, use the harness-native question UI, then end the turn. Both heartbeat lanes stay suspended until the answer is applied and `resume-owner` runs. Do not ask Humans to approve scheduling already authorized by lifecycle/plan or choices precedent/Analyst authority can resolve. If the native question path itself is broken, use the orchestrator escape hatch rather than deadlocking merely because plain chat is “not the official channel.”
 
 **`owner_notice`** is passive progress: render `━━ T-BAG UPDATE ━━`, send the bounded digest, then ack. Lead with primary-branch delivery truth; never bury questions or sell task counts as progress. Attempts/bookkeeping are not product outcomes. State **Status; Decisions/blockers; Material outcomes; Running now; Backlog**.
 
