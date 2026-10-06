@@ -173,14 +173,14 @@ class TaskControlTests(unittest.TestCase):
     def test_control_plane_block_is_not_human_authority_even_for_legacy_target_value(self):
         task={"status":"blocked","last_control_block":{"target":"orchestrator","source":"control-plane"}}
         self.assertIsNotNone(dsd_task._current_control_block(task))
-        self.assertFalse(dsd_task._is_human_authority_block(task))
+        self.assertFalse(dsd_task.task_block_kind(task)=="human")
         legacy={"status":"blocked","last_escalation":{"target":"human","source":"control-plane"}}
         self.assertIsNotNone(dsd_task._current_control_block(legacy))
-        self.assertFalse(dsd_task._is_human_authority_block(legacy))
+        self.assertFalse(dsd_task.task_block_kind(legacy)=="human")
         genuine={"status":"blocked","last_escalation":{"target":"human","source":"worker"}}
         self.assertIsNone(dsd_task._current_control_block(genuine))
-        self.assertTrue(dsd_task._has_human_authority_escalation(genuine))
-        self.assertTrue(dsd_task._is_human_authority_block(genuine))
+        self.assertTrue(dsd_task._human_authority_escalation(genuine) is not None)
+        self.assertTrue(dsd_task.task_block_kind(genuine)=="human")
         self.assertEqual(dsd_task.task_block_kind(task),"control")
         self.assertEqual(dsd_task.task_block_kind(legacy),"control")
         self.assertEqual(dsd_task.task_block_kind(genuine),"human")

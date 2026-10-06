@@ -941,7 +941,7 @@ def command_set_run_status(args: argparse.Namespace) -> dict[str, Any]:
             if delivery.get("blockers"):
                 raise ValueError("DELIVERY_BEFORE_HUMAN_BLOCK: repair primary-branch delivery before converting the run into an owner-attention wait")
             tasks=list(iter_run_tasks(run))
-            blocked=any(_is_human_authority_block(t) for t in tasks)
+            blocked=any(task_block_kind(t)=="human" for t in tasks)
             if not blocked: raise ValueError("human-blocked run status requires at least one Human-targeted blocked task")
             advancing=[t for t in tasks if task_can_advance_without_human(run,t)]
             if advancing:
@@ -1965,7 +1965,7 @@ def _human_escalation_excerpt(task: dict[str, Any], *, max_chars: int = 700) -> 
 
 def human_decision_question(task: dict[str, Any]) -> dict[str, Any]:
     """Describe one genuine durable Human blocker for a native harness question UI."""
-    if not _is_human_authority_block(task):
+    if not task_block_kind(task)=="human":
         raise ValueError("human_decision_question requires a genuine Human authority block; T-BAG control guards belong to review-control-block")
     phase=str(task.get("phase_id") or "")
     tid=str(task.get("task_id") or "")
@@ -2029,7 +2029,7 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
                 "detail":control.get("detail"),
                 "override_command":"override-control-block",
             }
-        if _is_human_authority_block(task):
+        if task_block_kind(task)=="human":
             return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}
         return {
             **base,"action":"review-unclassified-block",
@@ -2371,7 +2371,7 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     human=[]
     for task in iter_run_tasks(run):
         esc=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-        if _is_human_authority_block(task):
+        if task_block_kind(task)=="human":
             item={"phase":task.get("phase_id"),"task_id":task.get("task_id")}
             if details: item["purpose"]=task_brief_objective(task,max_chars=420)
             human.append(item)
@@ -2583,17 +2583,12 @@ def _record_control_block(task: dict[str, Any], *, reason: str, detail: dict[str
     task["status"]="blocked"
 
 
-def _has_human_authority_escalation(task: dict[str, Any]) -> bool:
-    """Whether the task's current authority escalation genuinely targets the Human."""
-    if _current_control_block(task) is not None:
-        return False
-    escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-    return escalation.get("target")=="human" and escalation.get("source")!="control-plane"
-
-
-def _is_human_authority_block(task: dict[str, Any]) -> bool:
-    """True only for a currently blocked genuine Human authority escalation."""
-    return str(task.get("status") or "")=="blocked" and _has_human_authority_escalation(task)
+def _human_authority_escalation(task: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the genuine current Human-targeted authority record, if any."""
+    escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else None
+    if escalation is None or escalation.get("target")!="human" or escalation.get("source")=="control-plane":
+        return None
+    return escalation
 
 
 def task_block_kind(task: dict[str, Any]) -> str | None:
@@ -2602,7 +2597,7 @@ def task_block_kind(task: dict[str, Any]) -> str | None:
         return None
     if _current_control_block(task) is not None:
         return "control"
-    if _has_human_authority_escalation(task):
+    if _human_authority_escalation(task) is not None:
         return "human"
     return "unknown"
 
@@ -3435,7 +3430,7 @@ def command_resolve_escalation(args: argparse.Namespace) -> dict[str, Any]:
         task=load_json(path); decision=args.decision.resolve()
         escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
         status=str(task.get("status") or "")
-        if status not in {"blocked","parked"} or not _has_human_authority_escalation(task):
+        if status not in {"blocked","parked"} or not _human_authority_escalation(task) is not None:
             raise ValueError(f"resolve-escalation requires a genuine Human-targeted blocked/parked escalation; current status is {status!r}")
         if not decision.is_file(): raise ValueError(f"decision file missing: {decision}")
         if decision.is_symlink(): raise ValueError("Human decision input must be a regular file, not a symlink")
