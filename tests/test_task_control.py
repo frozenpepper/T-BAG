@@ -170,6 +170,14 @@ class TaskControlTests(unittest.TestCase):
         self.assertTrue(any(x.get("action")=="relaunch-task" and x.get("task_id")=="T-RELAUNCH" for x in state.get("first_useful_actions",[])),state)
         self.assertFalse(any(x.get("task_id")=="T-RELAUNCH" for x in state.get("unresolved_state",[])),state)
 
+    def test_control_plane_block_is_not_human_authority_even_for_legacy_target_value(self):
+        task={"status":"blocked","last_escalation":{"target":"orchestrator","source":"control-plane"}}
+        self.assertFalse(dsd_task._is_human_authority_block(task))
+        legacy={"status":"blocked","last_escalation":{"target":"human","source":"control-plane"}}
+        self.assertFalse(dsd_task._is_human_authority_block(legacy))
+        genuine={"status":"blocked","last_escalation":{"target":"human","source":"worker"}}
+        self.assertTrue(dsd_task._is_human_authority_block(genuine))
+
     def test_control_plane_block_is_parent_reviewable_and_orchestrator_can_override_it(self):
         self.write_plan([{"task_id":"T-CTRL","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         blocked=dsd_task.block_task_for_control_safety(self.run,"P1","T-CTRL",reason="repeated-control-cycle",detail={"prior_status":"planned"})
@@ -178,6 +186,8 @@ class TaskControlTests(unittest.TestCase):
         action=dsd_task._reconcile_action(self.run,"P1",state)
         self.assertEqual(action["action"],"review-control-block")
         self.assertEqual(action["override_command"],"override-control-block")
+        self.assertEqual(state["last_escalation"]["target"],"orchestrator")
+        self.assertEqual(state["last_escalation"]["source"],"control-plane")
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-CTRL"; a.reason="The guard is looping on stale T-BAG state; cold relaunch is the evidence-backed recovery."
         out=dsd_task.command_override_control_block(a)

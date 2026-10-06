@@ -11,6 +11,7 @@
 - Reviewer prompts now put the frozen task/acceptance authority before prior-worker evidence; resumed worker prompts avoid forced rereads of stable contracts while keeping them as compaction fallbacks.
 - Incomplete tick packets are explicitly marked `degraded: true` instead of presenting null routing fields as normal state.
 - Attempt-budget/repeated-cycle safety blocks now return to orchestrator judgment instead of forcibly becoming Human questions. `override-control-block` auditably reopens only T-BAG-internal blocks and cannot bypass genuine worker/Human authority escalations.
+- Control-plane blocks are now persisted with `target: orchestrator` rather than masquerading as Human authority. Owner status also filters legacy `target: human` / `source: control-plane` records so old runs do not resurrect false Human questions.
 
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.

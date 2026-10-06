@@ -2352,7 +2352,7 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
     human=[]
     for task in iter_run_tasks(run):
         esc=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-        if task.get("status")=="blocked" and esc.get("target")=="human":
+        if _is_human_authority_block(task):
             item={"phase":task.get("phase_id"),"task_id":task.get("task_id")}
             if details: item["purpose"]=task_brief_objective(task,max_chars=420)
             human.append(item)
@@ -2535,11 +2535,12 @@ def _cold_retry_status(task: dict[str, Any], role: str) -> str:
     return str(task.get("status") or "planned")
 
 
-def _record_control_human_block(task: dict[str, Any], *, reason: str, detail: dict[str, Any]) -> None:
+def _record_control_block(task: dict[str, Any], *, reason: str, detail: dict[str, Any]) -> None:
+    """Record a T-BAG-internal stop without pretending Human authority is required."""
     detail=dict(detail)
     detail.setdefault("prior_status",str(task.get("status") or "planned"))
     record={
-        "target":"human",
+        "target":"orchestrator",
         "source":"control-plane",
         "reason":reason,
         "detail":detail,
@@ -2548,6 +2549,18 @@ def _record_control_human_block(task: dict[str, Any], *, reason: str, detail: di
     task["last_escalation"]=record
     task.setdefault("escalation_history",[]).append(record)
     task["status"]="blocked"
+
+
+def _is_human_authority_block(task: dict[str, Any]) -> bool:
+    """True only for a real Human-targeted authority block.
+
+    Older runs may contain control-plane records written with target=human. Source
+    takes precedence so those legacy records do not leak back into owner questions.
+    """
+    if str(task.get("status") or "")!="blocked":
+        return False
+    escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
+    return escalation.get("target")=="human" and escalation.get("source")!="control-plane"
 
 
 def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
@@ -2597,8 +2610,8 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
                     "max_attempts_per_task":max_attempts,
                     "session_poison":candidate,
                 }
-                _record_control_human_block(task,reason="attempt-budget-exhausted",detail=detail)
-                budget_blocks.append({"phase_id":phase,"task_id":tid,**detail,"action":"await-human-decision"})
+                _record_control_block(task,reason="attempt-budget-exhausted",detail=detail)
+                budget_blocks.append({"phase_id":phase,"task_id":tid,**detail,"action":"review-control-block"})
                 changed=True
 
             burn=task_burn_metrics(task)
@@ -2622,7 +2635,7 @@ def block_task_for_control_safety(run: Path, phase: str, task_id: str, *, reason
             return {"blocked":False,"task_id":tid,"status":status,"reason":"already-terminal-or-blocked"}
         if task_has_live_attempt(task):
             return {"blocked":False,"task_id":tid,"status":status,"reason":"live-attempt"}
-        _record_control_human_block(task,reason=reason,detail=detail)
+        _record_control_block(task,reason=reason,detail=detail)
         task["updated_at"]=now(); write_json(path,task)
         return {"blocked":True,"task_id":tid,"status":"blocked","reason":reason,"detail":detail}
 

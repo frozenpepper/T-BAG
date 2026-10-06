@@ -341,7 +341,7 @@ class Rc45ParentTickTests(unittest.TestCase):
             out=parent_tick.command_tick(self.args)
         self.assertTrue(out["run_status_transition"]["deferred"])
         self.assertIn("ADVANCE_BEFORE_HUMAN_BLOCK",out["run_status_transition"]["error"])
-        self.assertIn("Do not inspect control-plane source",out["run_status_transition"]["next"])
+        self.assertIn("orchestrator escape hatch",out["run_status_transition"]["next"])
 
     @mock.patch.object(parent_tick.dsd_task,"command_set_run_status",return_value={"status":"completed"})
     def test_finish_refuses_nonquiescent_and_accepts_completion_candidate(self,set_status):
