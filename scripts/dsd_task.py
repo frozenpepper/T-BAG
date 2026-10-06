@@ -2029,7 +2029,13 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
                 "detail":control.get("detail"),
                 "override_command":"override-control-block",
             }
-        return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}
+        if _is_human_authority_block(task):
+            return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}
+        return {
+            **base,"action":"review-unclassified-block",
+            "reason":"blocked-without-control-or-human-authority-record",
+            "next":"Inspect compact/show evidence and repair the stale T-BAG state or re-route the task. Do not infer Human prohibition from a bare blocked status.",
+        }
 
     if latest and attempt_status=="gated" and report_requests_capability(event/"report.md"):
         return {**base,"action":"route-capability-escalation","report":str(event/"report.md"),"role":role}

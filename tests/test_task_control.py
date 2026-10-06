@@ -187,6 +187,17 @@ class TaskControlTests(unittest.TestCase):
         self.assertTrue(dsd_task.task_can_advance_without_human(self.run,task))
         self.assertFalse(dsd_task.task_can_advance_without_human(self.run,genuine))
 
+    def test_unclassified_block_routes_to_orchestrator_recovery_not_human_question(self):
+        self.write_plan([{"task_id":"T-UNKNOWN-BLOCK","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        path=dsd_task.task_file(self.run,"P1","T-UNKNOWN-BLOCK"); task=dsd_task.load_json(path)
+        task["status"]="blocked"; task.pop("last_escalation",None); task.pop("last_control_block",None); dsd_task.write_json(path,task)
+        action=dsd_task._reconcile_action(self.run,"P1",task)
+        self.assertEqual(action["action"],"review-unclassified-block")
+        self.assertIn("Do not infer Human prohibition",action["next"])
+        self.assertEqual(dsd_task.task_block_kind(task),"unknown")
+        with self.assertRaisesRegex(ValueError,"genuine Human authority block"):
+            dsd_task.human_decision_question(task)
+
     def test_legacy_control_block_cannot_put_run_into_human_blocked_status(self):
         self.write_plan([{"task_id":"T-LEGACY-CTRL","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         path=dsd_task.task_file(self.run,"P1","T-LEGACY-CTRL"); task=dsd_task.load_json(path)

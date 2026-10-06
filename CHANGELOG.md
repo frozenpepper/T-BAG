@@ -3,6 +3,8 @@
 ## RC71 — orchestrator authority + non-destructive worker completion
 - Worker launch/status surfaces now distinguish T-BAG `control` blocks from genuine Human authority. Human-question rendering fails closed for internal guards, and legacy tests now exercise the orchestrator override path instead of the removed Human-gate behavior.
 - Removed stale test fixture arguments for the deleted report-completion grace kill path.
+- Bare/legacy `status=blocked` records with neither a control record nor genuine Human escalation now surface `review-unclassified-block` for orchestrator repair instead of crashing reconciliation or fabricating a Human question.
+
 
 
 - Removed the 30-second `report-complete-no-terminal` kill path. A live worker is never SIGTERM'd because `report.md` looks complete; report text is evidence, while transport completion requires terminal/process evidence.
