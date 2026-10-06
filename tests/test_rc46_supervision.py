@@ -119,6 +119,24 @@ class StatusSnapshotTests(unittest.TestCase):
             self.assertEqual(snap["worker_budget"],{"max":4,"live":0,"free":4})
             self.assertFalse((run/"parent-loop.json").exists(),"status snapshot must not mutate orchestration state")
 
+    def test_status_labels_internal_control_block_as_orchestrator_attention(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); run=root/"TBag"/"runs"/"R"; task_root=run/"phases"/"P"/"tasks"/"T"; task_root.mkdir(parents=True)
+            dsd_task.write_json(run/"run.json",{"format":dsd_task.RUN_FORMAT,"run_id":"R","status":"active","max_workers":2})
+            dsd_task.write_json(task_root/"task.json",{
+                "format":dsd_task.FORMAT,"phase_id":"P","task_id":"T","kind":"implementation",
+                "role":"implementer","tier":"grunt","dependencies":[],"requires_integration":True,
+                "status":"blocked","attempts":[],
+                "last_control_block":{"target":"orchestrator","source":"control-plane","reason":"attempt-budget-exhausted","detail":{"prior_status":"planned"}},
+            })
+            with mock.patch.object(tbag_status,"_transport",return_value={"available":False,"parent_sessions":[],"observers":[]}):
+                snap=tbag_status.build_snapshot(root,run_root=run)
+            attention=next(x for x in snap["attention"] if x.get("task_id")=="T")
+            self.assertEqual(attention["block_kind"],"control")
+            self.assertEqual(attention["reason"],"attempt-budget-exhausted")
+            self.assertEqual(attention["next"],"review-control-block")
+            self.assertNotEqual(attention["next"],"await-human-decision")
+
     def test_tui_source_uses_documented_status_slots_and_panel(self):
         tui=(Path(__file__).resolve().parents[1]/"adapters"/"opencode"/"tbag-ui"/"tui.tsx").read_text()
         self.assertIn('from "@opencode/plugin/tui"',tui)
