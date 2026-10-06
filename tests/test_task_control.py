@@ -481,17 +481,6 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(out["role_duration_reference"]["samples"],2); self.assertEqual(out["role_duration_reference"]["median_seconds"],600.0)
         self.assertGreater(out["elapsed_seconds"],1900); self.assertGreater(out["report_age_seconds"],1800)
 
-    def test_idle_check_requires_generic_harness_observer_without_embedding_harness_policy(self):
-        self.write_plan([{"task_id":"T-LIVE-GENERIC","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
-        event=dsd_task.task_root(self.run,"P1","T-LIVE-GENERIC")/"attempts"/"implementer-1"; event.mkdir(parents=True)
-        task=dsd_task.load_task(self.run,"P1","T-LIVE-GENERIC"); task["attempts"].append({"task_id":"T-LIVE-GENERIC","role":"implementer","tier":"grunt","status":"started","event_dir":str(event),"monitor_pid":os.getpid()}); task["status"]="active"; dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-LIVE-GENERIC"),task)
-        class A: pass
-        a=A(); a.run_root=self.run; a.phase_id="P1"
-        out=dsd_task.command_idle_check(a)
-        self.assertTrue(out["safe_to_end_routine_turn"]); self.assertEqual(out["reason"],"workers-live")
-        self.assertTrue(out["observer_required"]); self.assertNotIn("live_supervision_rule",out)
-        self.assertNotIn("harness_supervision",out); self.assertNotIn("opencode",json.dumps(out).lower())
-
     def test_reconcile_run_sweeps_stale_and_surfaces_ready_work_without_repo_archaeology(self):
         self.write_plan([
             {"task_id":"T-READY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[],"text":"# Improve startup routing (T-READY)\n"},

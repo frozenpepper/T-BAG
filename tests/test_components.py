@@ -107,25 +107,6 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual((wt/"a.txt").read_text(),"task-delta\n")
         self.assertFalse((wt/"b.txt").exists())
 
-    def test_idle_check_catches_ready_work_before_parent_returns(self):
-        self.register_impl('T-IDLE')
-        class A: pass
-        a=A(); a.run_root=self.run; a.phase_id='P1'
-        out=dsd_task.command_idle_check(a)
-        self.assertFalse(out['safe_to_end_routine_turn']); self.assertEqual(out['reason'],'authorized-action-remains')
-        self.assertTrue(any(x.get('action')=='launch-ready-task' for x in out['required_actions']))
-        self.assertEqual(out['routine_user_update'],'suppress')
-
-    def test_idle_check_requires_harness_supervision_without_foreground_wait(self):
-        self.register_impl('T-LIVE-SUP')
-        event=dsd_task.task_root(self.run,'P1','T-LIVE-SUP')/'attempts'/'implementer-1'; event.mkdir(parents=True)
-        task=dsd_task.load_task(self.run,'P1','T-LIVE-SUP'); task['attempts'].append({'task_id':'T-LIVE-SUP','role':'implementer','tier':'grunt','status':'started','event_dir':str(event),'monitor_pid':os.getpid()}); task['status']='active'; dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-LIVE-SUP'),task)
-        class A: pass
-        a=A(); a.run_root=self.run; a.phase_id='P1'
-        out=dsd_task.command_idle_check(a)
-        self.assertTrue(out['safe_to_end_routine_turn']); self.assertEqual(out['reason'],'workers-live')
-        self.assertTrue(out['observer_required']); self.assertNotIn('live_supervision_rule',out); self.assertNotIn('rule',out)
-
     def test_follow_is_per_attempt_observation_only(self):
         self.register_impl('T-FOLLOW')
         event=dsd_task.task_root(self.run,'P1','T-FOLLOW')/'attempts'/'implementer-1'; event.mkdir(parents=True)
@@ -230,24 +211,6 @@ class ComponentsTests(unittest.TestCase):
         out=dsd_attempt.command_follow(a)
         self.assertEqual(out['follow_status'],'deadline')
         self.assertEqual(dsd_task.load_task(self.run,'P1','T-FOLLOW-DEADLINE')['status'],'active')
-
-    def test_idle_check_surfaces_human_decision_as_nonroutine_communication(self):
-        self.register_impl('T-HUMAN')
-        task=dsd_task.load_task(self.run,'P1','T-HUMAN'); task['status']='blocked'; task['last_escalation']={'target':'human','report':'decision-needed.md'}
-        dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-HUMAN'),task)
-        class A: pass
-        a=A(); a.run_root=self.run; a.phase_id='P1'
-        out=dsd_task.command_idle_check(a)
-        self.assertTrue(out['safe_to_end_routine_turn']); self.assertEqual(out['reason'],'human-blocked-with-no-independent-action')
-        self.assertEqual(out['routine_user_update'],'human-decision')
-
-    def test_idle_check_run_level_human_block_still_requests_decision(self):
-        run=dsd_task.load_json(self.run/'run.json'); run['status']='human-blocked'; dsd_task.write_json(self.run/'run.json',run)
-        class A: pass
-        a=A(); a.run_root=self.run; a.phase_id='P1'
-        out=dsd_task.command_idle_check(a)
-        self.assertEqual(out['routine_user_update'],'human-decision')
-
 
     def test_launch_blocker_sees_other_preparation_but_not_child_own_marker(self):
         self.register_impl('T-PREP')

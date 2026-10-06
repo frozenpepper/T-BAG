@@ -2859,37 +2859,6 @@ def command_advance(args: argparse.Namespace) -> dict[str, Any]:
     return result
 
 
-def command_idle_check(args: argparse.Namespace) -> dict[str, Any]:
-    """Turn-boundary guard: say mechanically whether routine orchestration may stop."""
-    class R: pass
-    probe=R(); probe.run_root=args.run_root; probe.phase_id=getattr(args,"phase_id",None); probe.no_sweep=True
-    state=command_reconcile_run(probe); pending=list(state.get("first_useful_actions") or [])
-    status=str(state.get("run_status") or "active")
-    if status!="active": safe=True; reason=f"run-{status}"
-    elif pending: safe=False; reason="authorized-action-remains"
-    elif state.get("live_attempts"): safe=True; reason="workers-live"
-    elif state.get("human_blocks"): safe=True; reason="human-blocked-with-no-independent-action"
-    elif state.get("unresolved_state"): safe=False; reason="unresolved-durable-state-needs-analyst-routing"
-    else: safe=True; reason="no-authorized-action-remains"
-    if status=="human-blocked": routine_user_update="human-decision"
-    elif status!="active": routine_user_update="terminal-summary"
-    elif state.get("human_blocks") and not pending: routine_user_update="human-decision"
-    else: routine_user_update="suppress"
-    result={
-        "run_status":status,"safe_to_end_routine_turn":safe,"reason":reason,
-        "worker_budget":state.get("worker_budget"),"routine_user_update":routine_user_update,
-    }
-    if pending: result["required_actions"]=pending
-    if state.get("live_attempts"):
-        result["live_attempts"]=state.get("live_attempts"); result["observer_required"]=True
-    if state.get("human_blocks"):
-        result["human_blocks"]=state.get("human_blocks")
-        result["owner_question_required"]=True
-        result["owner_questions"]=[item["owner_question"] for item in state.get("human_blocks") if isinstance(item,dict) and isinstance(item.get("owner_question"),dict)]
-    if state.get("unresolved_state"): result["unresolved_state"]=state.get("unresolved_state")
-    return result
-
-
 def command_record_attempt(args: argparse.Namespace) -> dict[str, Any]:
     run=args.run_root.resolve(); phase=slug(args.phase_id); tid=slug(args.task_id); path=task_file(run,phase,tid)
     with file_lock(path.with_suffix(".lock")):
@@ -3692,7 +3661,6 @@ def parser() -> argparse.ArgumentParser:
     p=sub.add_parser("owner-status"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--summary",action="store_true",help="compact owner digest (default)"); p.add_argument("--details",action="store_true")
     p=sub.add_parser("poison-scan"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("advance"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id"); p.add_argument("--max-steps",type=int,default=12)
-    p=sub.add_parser("idle-check"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id")
     p=sub.add_parser("override-control-block"); p.add_argument("--run-root",type=Path,required=True); p.add_argument("--phase-id",required=True); p.add_argument("--task-id",required=True); p.add_argument("--reason",required=True)
     for name in ("show", "record-attempt", "update-attempt", "review", "plan-review", "context-review", "verification-result", "analysis-result", "escalate", "resolve-escalation", "accept", "supersede"):
         description="Record a gated Analyst outcome. resume also closes mechanically assigned Review follow-up triage when the frozen plan already covers it; replan-resume remains implementation/verification-only." if name=="analysis-result" else None
@@ -3731,7 +3699,6 @@ def main() -> int:
         elif args.command=="owner-status": result=command_owner_status(args)
         elif args.command=="poison-scan": result=command_poison_scan(args)
         elif args.command=="advance": result=command_advance(args)
-        elif args.command=="idle-check": result=command_idle_check(args)
         elif args.command=="override-control-block": result=command_override_control_block(args)
         elif args.command=="show": result=command_show(args)
         elif args.command=="record-attempt": result=command_record_attempt(args)
