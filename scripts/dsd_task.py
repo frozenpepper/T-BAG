@@ -2006,11 +2006,11 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if status=="accepted":
         return {**base,"action":"integrate-accepted-task"} if task.get("requires_integration") else None
     if status=="blocked":
-        escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-        if escalation.get("source")=="control-plane":
+        control=_current_control_block(task)
+        if control is not None:
             return {
-                **base,"action":"review-control-block","reason":escalation.get("reason"),
-                "detail":escalation.get("detail"),
+                **base,"action":"review-control-block","reason":control.get("reason"),
+                "detail":control.get("detail"),
                 "override_command":"override-control-block",
             }
         return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}
@@ -2532,8 +2532,21 @@ def _cold_retry_status(task: dict[str, Any], role: str) -> str:
     return str(task.get("status") or "planned")
 
 
+def _current_control_block(task: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the current T-BAG-internal control block, including legacy records."""
+    if str(task.get("status") or "")!="blocked":
+        return None
+    current=task.get("last_control_block") if isinstance(task.get("last_control_block"),dict) else None
+    if current is not None:
+        return current
+    legacy=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else None
+    if legacy is not None and legacy.get("source")=="control-plane":
+        return legacy
+    return None
+
+
 def _record_control_block(task: dict[str, Any], *, reason: str, detail: dict[str, Any]) -> None:
-    """Record a T-BAG-internal stop without pretending Human authority is required."""
+    """Record a T-BAG-internal stop without polluting authority-escalation state."""
     detail=dict(detail)
     detail.setdefault("prior_status",str(task.get("status") or "planned"))
     record={
@@ -2543,21 +2556,17 @@ def _record_control_block(task: dict[str, Any], *, reason: str, detail: dict[str
         "detail":detail,
         "recorded_at":now(),
     }
-    task["last_escalation"]=record
-    task.setdefault("escalation_history",[]).append(record)
+    task["last_control_block"]=record
+    task.setdefault("control_block_history",[]).append(record)
     task["status"]="blocked"
 
 
 def _is_human_authority_block(task: dict[str, Any]) -> bool:
-    """True only for a real Human-targeted authority block.
-
-    Older runs may contain control-plane records written with target=human. Source
-    takes precedence so those legacy records do not leak back into owner questions.
-    """
-    if str(task.get("status") or "")!="blocked":
+    """True only for a real Human-targeted authority block."""
+    if str(task.get("status") or "")!="blocked" or _current_control_block(task) is not None:
         return False
     escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-    return escalation.get("target")=="human" and escalation.get("source")!="control-plane"
+    return escalation.get("target")=="human"
 
 
 def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
@@ -2648,24 +2657,28 @@ def command_override_control_block(args: argparse.Namespace) -> dict[str, Any]:
     if not reason:
         raise ValueError("override-control-block requires a concrete orchestrator reason")
     with file_lock(path.with_suffix(".lock")):
-        task=load_json(path); escalation=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else {}
-        if str(task.get("status") or "")!="blocked" or escalation.get("source")!="control-plane":
+        task=load_json(path); control=_current_control_block(task)
+        if control is None:
             raise ValueError("override-control-block applies only to a current T-BAG control-plane block; genuine worker/Human authority escalations are not overrideable here")
         if task_has_live_attempt(task):
             raise ValueError("cannot override a control block while a task attempt is live")
-        detail=escalation.get("detail") if isinstance(escalation.get("detail"),dict) else {}
+        detail=control.get("detail") if isinstance(control.get("detail"),dict) else {}
         prior=str(detail.get("prior_status") or "")
         restored=prior if prior in STATUSES-{"blocked","parked","cancelled","accepted","integrated","superseded"} else "planned"
         checkpoint=len([x for x in task.get("attempts",[]) if isinstance(x,dict)])
         record={
-            "source":"orchestrator","reason":reason,"overrode_reason":escalation.get("reason"),
-            "overrode_recorded_at":escalation.get("recorded_at"),"restored_status":restored,
+            "source":"orchestrator","reason":reason,"overrode_reason":control.get("reason"),
+            "overrode_recorded_at":control.get("recorded_at"),"restored_status":restored,
             "attempt_budget_checkpoint":checkpoint,"recorded_at":now(),
         }
         task.setdefault("orchestrator_override_history",[]).append(record)
         task["last_orchestrator_override"]=record
         task["attempt_budget_checkpoint"]=checkpoint
         task["status"]=restored
+        task.pop("last_control_block",None)
+        legacy=task.get("last_escalation") if isinstance(task.get("last_escalation"),dict) else None
+        if legacy is not None and legacy.get("source")=="control-plane":
+            task.pop("last_escalation",None)
         task["updated_at"]=now(); write_json(path,task)
     run_reactivated=False
     if str(load_run(run).get("status") or "active")=="human-blocked":

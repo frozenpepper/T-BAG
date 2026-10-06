@@ -171,11 +171,14 @@ class TaskControlTests(unittest.TestCase):
         self.assertFalse(any(x.get("task_id")=="T-RELAUNCH" for x in state.get("unresolved_state",[])),state)
 
     def test_control_plane_block_is_not_human_authority_even_for_legacy_target_value(self):
-        task={"status":"blocked","last_escalation":{"target":"orchestrator","source":"control-plane"}}
+        task={"status":"blocked","last_control_block":{"target":"orchestrator","source":"control-plane"}}
+        self.assertIsNotNone(dsd_task._current_control_block(task))
         self.assertFalse(dsd_task._is_human_authority_block(task))
         legacy={"status":"blocked","last_escalation":{"target":"human","source":"control-plane"}}
+        self.assertIsNotNone(dsd_task._current_control_block(legacy))
         self.assertFalse(dsd_task._is_human_authority_block(legacy))
         genuine={"status":"blocked","last_escalation":{"target":"human","source":"worker"}}
+        self.assertIsNone(dsd_task._current_control_block(genuine))
         self.assertTrue(dsd_task._is_human_authority_block(genuine))
 
     def test_legacy_control_block_cannot_put_run_into_human_blocked_status(self):
@@ -197,8 +200,9 @@ class TaskControlTests(unittest.TestCase):
         action=dsd_task._reconcile_action(self.run,"P1",state)
         self.assertEqual(action["action"],"review-control-block")
         self.assertEqual(action["override_command"],"override-control-block")
-        self.assertEqual(state["last_escalation"]["target"],"orchestrator")
-        self.assertEqual(state["last_escalation"]["source"],"control-plane")
+        self.assertEqual(state["last_control_block"]["target"],"orchestrator")
+        self.assertEqual(state["last_control_block"]["source"],"control-plane")
+        self.assertNotIn("last_escalation",state)
         class A: pass
         a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-CTRL"; a.reason="The guard is looping on stale T-BAG state; cold relaunch is the evidence-backed recovery."
         out=dsd_task.command_override_control_block(a)
@@ -207,6 +211,7 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(restored["status"],"planned")
         self.assertEqual(restored["last_orchestrator_override"]["overrode_reason"],"repeated-control-cycle")
         self.assertEqual(restored["attempt_budget_checkpoint"],0)
+        self.assertNotIn("last_control_block",restored)
 
     def test_orchestrator_override_refuses_genuine_worker_human_escalation(self):
         self.write_plan([{"task_id":"T-HUMAN-ONLY","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])

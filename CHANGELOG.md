@@ -13,6 +13,7 @@
 - Attempt-budget/repeated-cycle safety blocks now return to orchestrator judgment instead of forcibly becoming Human questions. `override-control-block` auditably reopens only T-BAG-internal blocks and cannot bypass genuine worker/Human authority escalations.
 - Control-plane blocks are now persisted with `target: orchestrator` rather than masquerading as Human authority. Owner status also filters legacy `target: human` / `source: control-plane` records so old runs do not resurrect false Human questions.
 - The `human-blocked` run transition now uses the same canonical Human-authority predicate, preventing legacy control-plane records from suspending an otherwise autonomous run.
+- Internal guards now use dedicated `last_control_block` / `control_block_history` state instead of overloading `last_escalation`; legacy control-plane escalation records remain readable and are cleared when explicitly overridden.
 
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
