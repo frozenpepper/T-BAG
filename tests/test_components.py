@@ -366,7 +366,7 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(out['status'],'blocked')
         task=dsd_task.load_task(self.run,'P1','T1'); self.assertEqual(task['last_escalation']['target'],'human')
         launch=SimpleNamespace(run_root=self.run,phase_id='P1',task_id='T1',role='implementer',tier='grunt',model=None,worker_rules=None,db=None,attempt=None,input=[],resume_session=None,resume_last=False,auto_flag='--auto')
-        with self.assertRaisesRegex(ValueError,'Human-targeted escalation'):
+        with self.assertRaisesRegex(ValueError,'genuine Human authority escalation'):
             dsd_attempt._command_launch(launch)
         decision=self.root/'decision.md'; decision.write_text('Choose option A.\n')
         r=A(); r.run_root=self.run; r.phase_id='P1'; r.task_id='T1'; r.decision=decision; r.route='resume'

@@ -115,7 +115,7 @@ class ParentEdgePolicyTests(unittest.TestCase):
             "process":{"worker":{"cpu_seconds":500.0}},
         }
         args=SimpleNamespace(
-            run_root=Path("/tmp/run"),phase_id=None,max_steps=12,report_complete_grace_seconds=30,
+            run_root=Path("/tmp/run"),phase_id=None,max_steps=12,
             stall_confirm_seconds=300,owner_heartbeat_seconds=1800,changed_update_min_seconds=900,
         )
         with mock.patch.object(parent_tick,"load_loop",return_value=loop), \

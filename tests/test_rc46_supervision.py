@@ -99,7 +99,7 @@ class ParentTickCpuGuardTests(unittest.TestCase):
             parent_tick.save_loop(run,{"format":parent_tick.FORMAT,"stall_observations":{live["event_dir"]:{"first_seen_at":old,"cpu_seconds_at_first_seen":10.0}}})
             state={"run_id":"R","run_status":"active","live_attempts":[live],"worker_budget":{"max":2,"live":1,"free":1},"backlog_count":1,"waiting_dependency_count":0}
             observed={"state":"running","report_state":"in-progress","report_age_seconds":5000.0,"log_age_seconds":5000.0,"attention":"silent-long-running","process":{"worker":{"cpu_seconds":15.0}}}
-            args=SimpleNamespace(run_root=run,phase_id=None,max_steps=12,owner_heartbeat_seconds=1800.0,changed_update_min_seconds=900.0,report_complete_grace_seconds=30.0,stall_confirm_seconds=300.0)
+            args=SimpleNamespace(run_root=run,phase_id=None,max_steps=12,owner_heartbeat_seconds=1800.0,changed_update_min_seconds=900.0,stall_confirm_seconds=300.0)
             with mock.patch.object(parent_tick.dsd_task,"load_run",return_value={"status":"active"}), mock.patch.object(parent_tick.dsd_task,"command_advance",return_value={"stopped":"semantic-or-launch-boundary"}), mock.patch.object(parent_tick.dsd_task,"command_poison_scan",return_value={"count":0,"marked":[]}), mock.patch.object(parent_tick,"reconcile",return_value=state), mock.patch.object(parent_tick,"inspect_attempt",return_value=observed), mock.patch.object(parent_tick,"retire_attempt") as retire, mock.patch.object(parent_tick.dsd_task,"command_owner_status",return_value={}):
                 out=parent_tick.command_tick(args)
             retire.assert_not_called()
