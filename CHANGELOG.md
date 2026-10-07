@@ -15,6 +15,8 @@
 - Phase exit now respects follow-up blocking scope: merely-visible or dependency-only obligations no longer become an accidental global phase barrier; only unresolved `phase` obligations hold phase completion.
 - Candidate evidence now writes a tiny attempt-local index automatically supplied to the next fresh Reviewer, so reuse does not depend on worker prose. Reuse keys also include Git submodule state and high-impact runtime environment; ignored/generated/external verification inputs must be explicitly `--bind`-bound.
 - Fixed RC71.42 launch ordering: pre-resume lifecycle checks now use the explicit `launch_continuation` decision instead of referencing `continuing` before session resolution.
+- Fixed candidate-evidence identity across T-BAG checkpoints: the reuse key now hashes the canonical current path/content/mode tree (with submodule content state) rather than incidental `HEAD + diff`, so identical bytes remain reusable after checkpoint commits.
+
 
 
 

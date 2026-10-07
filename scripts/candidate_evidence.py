@@ -83,21 +83,61 @@ def files_fingerprint(root:Path,patterns:tuple[str,...],extra:list[Path]|None=No
     return {"sha256":sha(payload),"files":rows}
 
 
-def candidate_fingerprint(root:Path)->dict[str,Any]:
-    head=run_bytes(["git","rev-parse","HEAD"],root).decode().strip()
-    pathspec=[".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**"]
-    diff=run_bytes(["git","diff","--binary","--no-ext-diff","HEAD","--",*pathspec],root)
-    raw=run_bytes(["git","ls-files","-z","--others","--exclude-standard","--",*pathspec],root)
-    untracked=[]
+def _tracked_modes(root:Path)->dict[str,str]:
+    raw=run_bytes(["git","ls-files","--stage","-z","--",".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**"],root)
+    modes={}
     for item in raw.split(b"\0"):
         if not item: continue
+        meta,sep,path_raw=item.partition(b"\t")
+        if not sep: continue
+        fields=meta.decode("ascii",errors="replace").split()
+        if len(fields)<3 or fields[2]!="0": continue
+        modes[path_raw.decode("utf-8",errors="surrogateescape")]=fields[0]
+    return modes
+
+
+def _submodule_manifest(path:Path)->dict[str,Any]:
+    head=subprocess.run(["git","rev-parse","HEAD"],cwd=path,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    diff=subprocess.run(["git","diff","--binary","--no-ext-diff","HEAD","--","."],cwd=path,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    others=subprocess.run(["git","ls-files","-z","--others","--exclude-standard"],cwd=path,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    untracked=[]
+    if others.returncode==0:
+        for raw in others.stdout.split(b"\0"):
+            if not raw: continue
+            rel=raw.decode("utf-8",errors="surrogateescape"); candidate=path/rel
+            if candidate.is_file() or candidate.is_symlink():
+                row=path_digest(candidate); row["relative"]=rel; row.pop("path",None); untracked.append(row)
+    return {
+        "head":head.stdout.strip() if head.returncode==0 else None,
+        "diff_sha256":sha(diff.stdout) if diff.returncode==0 else None,
+        "untracked":untracked,
+    }
+
+
+def candidate_fingerprint(root:Path)->dict[str,Any]:
+    """Canonical current candidate tree, independent of checkpoint/HEAD representation."""
+    pathspec=[".",":(exclude)TBag/**",":(exclude)AnalystAndGrunt/**"]
+    raw=run_bytes(["git","ls-files","-z","--cached","--others","--exclude-standard","--",*pathspec],root)
+    modes=_tracked_modes(root)
+    rows=[]
+    for item in sorted({x for x in raw.split(b"\0") if x}):
         rel=item.decode("utf-8",errors="surrogateescape"); path=root/rel
-        if path.is_file() or path.is_symlink():
-            row=path_digest(path); row["relative"]=rel; row.pop("path",None); untracked.append(row)
-    submodules=subprocess.run(["git","submodule","status","--recursive"],cwd=root,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
-    submodule_state=submodules.stdout.strip() if submodules.returncode==0 else ""
-    payload=json.dumps({"head":head,"diff_sha256":sha(diff),"untracked":untracked,"submodules":submodule_state},sort_keys=True,separators=(",",":")).encode()
-    return {"sha256":sha(payload),"head":head,"diff_sha256":sha(diff),"diff_bytes":len(diff),"untracked":untracked,"submodules":submodule_state}
+        mode=modes.get(rel)
+        if mode=="160000":
+            if path.is_dir():
+                rows.append({"relative":rel,"kind":"submodule","mode":mode,**_submodule_manifest(path)})
+            # Missing gitlink is a deletion and therefore absent from the current tree.
+            continue
+        if not (path.is_file() or path.is_symlink()):
+            # A tracked path missing from disk is deleted from the current candidate.
+            continue
+        row=path_digest(path); row["relative"]=rel; row.pop("path",None)
+        if path.is_symlink(): row["mode"]="120000"
+        else: row["mode"]="100755" if (path.stat().st_mode & 0o111) else "100644"
+        rows.append(row)
+    payload=json.dumps(rows,sort_keys=True,separators=(",",":")).encode()
+    head=run_bytes(["git","rev-parse","HEAD"],root).decode().strip()
+    return {"sha256":sha(payload),"head_observed":head,"entry_count":len(rows),"entries":rows}
 
 
 def executable_fingerprint(command:list[str])->dict[str,Any]:

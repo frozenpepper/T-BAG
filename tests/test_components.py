@@ -607,6 +607,22 @@ class ComponentsTests(unittest.TestCase):
         self.assertIn('and not launch_continuation',segment)
         self.assertNotIn('and not continuing',segment)
 
+    def test_candidate_fingerprint_is_content_stable_across_checkpoint_commit(self):
+        project=self.root/'candidate-tree'; project.mkdir()
+        subprocess.run(['git','init','-q',str(project)],check=True)
+        subprocess.run(['git','-C',str(project),'config','user.email','tbag@example.invalid'],check=True)
+        subprocess.run(['git','-C',str(project),'config','user.name','T-BAG Test'],check=True)
+        (project/'file.txt').write_text('base\n')
+        subprocess.run(['git','-C',str(project),'add','file.txt'],check=True)
+        subprocess.run(['git','-C',str(project),'commit','-qm','base'],check=True)
+        (project/'file.txt').write_text('candidate\n')
+        before=candidate_evidence.candidate_fingerprint(project)
+        subprocess.run(['git','-C',str(project),'add','file.txt'],check=True)
+        subprocess.run(['git','-C',str(project),'commit','-qm','checkpoint'],check=True)
+        after=candidate_evidence.candidate_fingerprint(project)
+        self.assertNotEqual(before['head_observed'],after['head_observed'])
+        self.assertEqual(before['sha256'],after['sha256'])
+
     def test_report_only_source_attempt_requires_zero_delta_terminal_evidence(self):
         event=self.root/'report-only-source'; event.mkdir()
         scope=event/'scope-diff.json'; scope.write_text(json.dumps({'changed_count':0,'changed_paths':[]})+'\n')
