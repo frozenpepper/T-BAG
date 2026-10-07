@@ -98,6 +98,12 @@ Do **not** use:
 
 Do not block merely because a newer optional adapter capability is absent. On the current adapter the stable contract is parent tick + detached launch with automatic wake enrollment; `tbag_follow` is an optional re-arm path, not setup ceremony.
 
+## Wake delivery proof
+
+Heartbeat enrollment or a resume/context hook is not proof that OpenCode actually started another parent turn. The disposable transport mirror records successful and failed `session.prompt` wake delivery for the enrolled parent session. Tick/status expose `wake_delivery` as `armed-unproven`, `proven`, `failed`, or `unavailable`.
+
+A new session may yield while `armed-unproven`; the first real completion wake is the proof event. Once `proven`, normal launch → yield is demonstrated for that session. `failed` or `unavailable` is an orchestrator transport problem: repair/reinstall/re-arm as appropriate, or use an explicit owner turn as the supported fallback. Do not treat a resume hook as autonomous wake proof, and do not ask the Human merely for permission to repair T-BAG transport.
+
 ## Compaction
 
 The project plugin injects tick-first orientation plus launch → yield; explicit `tbag_follow` appears only for re-arm/recovery. It creates no parallel checkpoint stream.

@@ -6,6 +6,9 @@
 - Repair loops now stop for orchestrator causal diagnosis after two failed Reviews or three completed source-writing turns without acceptance. Pending fresh Review is allowed first; reopening records what changed and rejects verbatim reuse of the previous diagnosis.
 - Implementation planning and worker prompts now make stale-premise detection explicit: Planner briefs capture current owner/existing/missing behavior when known, while Implementer/Fixer/Reviewer verify actual current code before editing or judging and narrow/escalate instead of recreating already-existing mechanisms.
 - Worker launch now performs attempt-free execution preflight in the actual post-refresh view for expected fixtures, task-required executables/local Node modules, Node runtime/ABI when relevant, and technical-role cache writability. Failures become orchestrator-owned environment control blocks; successful facts are retained on the attempt for evidence/diagnostics.
+- OpenCode transport now persists actual parent-wake delivery/failure per session; tick/status distinguish `armed-unproven|proven|failed|unavailable` and name the explicit fallback instead of treating heartbeat enrollment or resume hooks as wake proof.
+- Owner status now reports delivered outcomes separately from mechanical orchestration cost: attempts, source-writing turns, failed Reviews, causal diagnoses, repeated follow-up observations, environment-preflight failures and worker wall time. Exact test-command time is not guessed from worker duration.
+
 
 
 

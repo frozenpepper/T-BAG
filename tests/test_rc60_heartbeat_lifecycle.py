@@ -155,6 +155,17 @@ class RC60HeartbeatLifecycleTests(unittest.TestCase):
             self.assertIn("onPulse:", source)
             self.assertIn('"health"', source)
 
+    def test_adapters_persist_actual_parent_wake_delivery_proof(self):
+        core=(ROOT/"adapters/tbag-opencode-transport-core.js").read_text()
+        self.assertIn("wakeDeliveryCount",core)
+        self.assertIn("lastWakeDeliveredAt",core)
+        for rel in ("adapters/opencode/tbag.js","adapters/opencode/tbag-v2.js"):
+            source=(ROOT/rel).read_text()
+            self.assertIn("recordWakeOutcome",source)
+            self.assertIn("last_wake_delivered_at_ms",source)
+            self.assertIn("last_wake_error_at_ms",source)
+            self.assertIn("wake_delivery_count",source)
+
     def test_owner_update_reasons_distinguish_wait_pause_and_terminal(self):
         waiting = parent_tick.update_due(
             {},
