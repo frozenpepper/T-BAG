@@ -32,6 +32,10 @@ INSTALLED_METADATA=(
     "node_modules/.package-lock.json","node_modules/.modules.yaml",
     ".venv/pyvenv.cfg","venv/pyvenv.cfg",
 )
+RUNTIME_ENV_NAMES=(
+    "PATH","VIRTUAL_ENV","PYTHONPATH","NODE_OPTIONS","NODE_ENV","CI",
+    "PLAYWRIGHT_BROWSERS_PATH","npm_config_userconfig",
+)
 
 
 def sha(data:bytes)->str:
@@ -90,8 +94,10 @@ def candidate_fingerprint(root:Path)->dict[str,Any]:
         rel=item.decode("utf-8",errors="surrogateescape"); path=root/rel
         if path.is_file() or path.is_symlink():
             row=path_digest(path); row["relative"]=rel; row.pop("path",None); untracked.append(row)
-    payload=json.dumps({"head":head,"diff_sha256":sha(diff),"untracked":untracked},sort_keys=True,separators=(",",":")).encode()
-    return {"sha256":sha(payload),"head":head,"diff_sha256":sha(diff),"diff_bytes":len(diff),"untracked":untracked}
+    submodules=subprocess.run(["git","submodule","status","--recursive"],cwd=root,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    submodule_state=submodules.stdout.strip() if submodules.returncode==0 else ""
+    payload=json.dumps({"head":head,"diff_sha256":sha(diff),"untracked":untracked,"submodules":submodule_state},sort_keys=True,separators=(",",":")).encode()
+    return {"sha256":sha(payload),"head":head,"diff_sha256":sha(diff),"diff_bytes":len(diff),"untracked":untracked,"submodules":submodule_state}
 
 
 def executable_fingerprint(command:list[str])->dict[str,Any]:
@@ -115,6 +121,7 @@ def runtime_fingerprint(command:list[str])->dict[str,Any]:
         "worker_model":os.environ.get("TBAG_WORKER_MODEL"),
         "worker_role":os.environ.get("TBAG_WORKER_ROLE"),
         "virtual_env":os.environ.get("VIRTUAL_ENV"),
+        "environment":{name:os.environ.get(name) for name in RUNTIME_ENV_NAMES},
         "command_executable":executable_fingerprint(command),
     }
     node=shutil.which("node")
@@ -142,6 +149,21 @@ def hash_file(path:Path)->str:
             if not chunk: break
             h.update(chunk)
     return h.hexdigest()
+
+
+def record_attempt_reference(*,record_path:Path,key:str,label:str|None,reused:bool,result:dict[str,Any])->None:
+    raw=os.environ.get("TBAG_ATTEMPT_DIR")
+    if not raw: return
+    attempt=Path(raw).resolve()
+    if not attempt.is_dir(): return
+    index=attempt/"candidate-evidence.jsonl"
+    entry={
+        "format":"tbag-candidate-evidence-reference-v1","key":key,"label":label,
+        "record":str(record_path),"reused":reused,
+        "exit_code":result.get("exit_code"),"duration_seconds":result.get("duration_seconds"),
+    }
+    with index.open("a",encoding="utf-8") as handle:
+        handle.write(json.dumps(entry,sort_keys=True,separators=(",",":"))+"\n")
 
 
 def resolve_path(raw:str|None,env_name:str,flag_name:str)->Path:
@@ -179,8 +201,10 @@ def command_run(args:argparse.Namespace)->int:
     record_path=cache/f"{key}.json"
     if args.reuse and record_path.is_file():
         record=json.loads(record_path.read_text(encoding="utf-8"))
-        exit_code=int(record.get("result",{}).get("exit_code") or 0)
-        print(json.dumps({"reused":True,"key":key,"record":str(record_path),"exit_code":exit_code,"duration_seconds":record.get("result",{}).get("duration_seconds")},sort_keys=True))
+        result=record.get("result",{}) if isinstance(record.get("result"),dict) else {}
+        exit_code=int(result.get("exit_code") or 0)
+        record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=True,result=result)
+        print(json.dumps({"reused":True,"key":key,"record":str(record_path),"exit_code":exit_code,"duration_seconds":result.get("duration_seconds")},sort_keys=True))
         return exit_code
 
     started=time.time()
@@ -202,6 +226,7 @@ def command_run(args:argparse.Namespace)->int:
     }
     tmp=record_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record,indent=2,sort_keys=True)+"\n",encoding="utf-8"); os.replace(tmp,record_path)
+    record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=False,result=result)
     try:
         sys.stdout.write(result["stdout"]["tail"])
         if result["stderr"]["tail"]: sys.stderr.write(result["stderr"]["tail"])

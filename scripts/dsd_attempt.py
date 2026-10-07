@@ -408,7 +408,7 @@ def task_input_groups(run:Path, phase:str, task:dict[str,Any], role:str, extra:l
         recorded=planner_attempt.get("inputs_by_type") if isinstance(planner_attempt.get("inputs_by_type"),dict) else None
         if recorded:
             for key,values in recorded.items():
-                if key not in {"authority_input","owner_decision","analyst_finding","dependency_finding","decision_context","review_finding","worker_report","recovery_evidence","proposal_input"}: continue
+                if key not in {"authority_input","owner_decision","analyst_finding","dependency_finding","decision_context","review_finding","worker_report","recovery_evidence","verification_evidence","proposal_input"}: continue
                 if isinstance(values,list):
                     for value in values: _add_input(groups,key,value)
         else:
@@ -428,7 +428,10 @@ def task_input_groups(run:Path, phase:str, task:dict[str,Any], role:str, extra:l
         else:
             for original in source_attempt.get("inputs",[]): _add_input(groups,"authority_input",original)
     elif role=="reviewer":
-        _add_input(groups,"worker_report",latest_attempt_report(task,{"implementer","fixer","verification"}))
+        latest=latest_attempt_report(task,{"implementer","fixer","verification"})
+        _add_input(groups,"worker_report",latest)
+        if latest:
+            _add_input(groups,"verification_evidence",Path(latest).parent/"candidate-evidence.jsonl")
     elif role=="fixer":
         review=task.get("last_review") or {}; _add_input(groups,"review_finding",review.get("report"))
     elif role in {"discovery","recovery"}:
@@ -717,7 +720,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     brief=Path(str(task["brief"])).resolve(); input_groups=task_input_groups(run,phase,task,role,args.input or [])
     if report_only and report_only_attempt is not None:
         prior_event=Path(str(report_only_attempt.get("event_dir") or "")).resolve()
-        for evidence_name in ("report.md","terminal.json","evidence-gate.json"):
+        for evidence_name in ("report.md","terminal.json","evidence-gate.json","candidate-evidence.jsonl"):
             _add_input(input_groups,"recovery_evidence",prior_event/evidence_name)
     if role=="phase-auditor":
         dossier=event/"phase-gate-dossier.md"

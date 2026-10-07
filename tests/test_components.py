@@ -587,12 +587,17 @@ class ComponentsTests(unittest.TestCase):
         (run/'run.json').write_text(json.dumps({'project_root':str(project)})+'\n')
         counter=project/'TBag'/'counter.txt'
         command=[sys.executable,'-c',f"from pathlib import Path; p=Path({str(counter)!r}); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')"]
+        attempt=run/'attempt'; attempt.mkdir()
         args=SimpleNamespace(run_root=str(run),project_root=str(project),label='suite',bind=[],reuse=True,fresh=False,argv=command)
-        self.assertEqual(candidate_evidence.command_run(args),0)
-        self.assertEqual(candidate_evidence.command_run(args),0)
-        self.assertEqual(counter.read_text(),'1')
-        (project/'file.txt').write_text('v2\n')
-        self.assertEqual(candidate_evidence.command_run(args),0)
+        with mock.patch.dict(os.environ,{'TBAG_ATTEMPT_DIR':str(attempt)},clear=False):
+            self.assertEqual(candidate_evidence.command_run(args),0)
+            self.assertEqual(candidate_evidence.command_run(args),0)
+            self.assertEqual(counter.read_text(),'1')
+            refs=[json.loads(x) for x in (attempt/'candidate-evidence.jsonl').read_text().splitlines()]
+            self.assertEqual([x['reused'] for x in refs],[False,True])
+            self.assertEqual(refs[0]['record'],refs[1]['record'])
+            (project/'file.txt').write_text('v2\n')
+            self.assertEqual(candidate_evidence.command_run(args),0)
         self.assertEqual(counter.read_text(),'2')
 
     def test_report_only_source_attempt_requires_zero_delta_terminal_evidence(self):

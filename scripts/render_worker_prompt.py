@@ -20,6 +20,7 @@ INPUT_FLAGS = {
     "review_finding": "Current Review findings",
     "worker_report": "Prior worker report / claims",
     "recovery_evidence": "Recovery evidence",
+    "verification_evidence": "Candidate-bound verification evidence",
     "proposal_input": "Proposal under review",
     "input": "Explicit task inputs",
 }

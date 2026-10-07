@@ -743,7 +743,7 @@ NONE
 
     def test_typed_exact_inputs_render_with_semantic_labels(self):
         rules=self.prepare(); paths=[]
-        flags=[("--authority-input","Governing authority inputs"),("--owner-decision","Owner decisions"),("--analyst-finding","Accepted Analyst findings"),("--dependency-finding","Accepted dependency findings"),("--escalation-context","Current escalation packet"),("--decision-context","Legacy decision-boundary evidence"),("--review-finding","Current Review findings"),("--worker-report","Prior worker report / claims"),("--recovery-evidence","Recovery evidence")]
+        flags=[("--authority-input","Governing authority inputs"),("--owner-decision","Owner decisions"),("--analyst-finding","Accepted Analyst findings"),("--dependency-finding","Accepted dependency findings"),("--escalation-context","Current escalation packet"),("--decision-context","Legacy decision-boundary evidence"),("--review-finding","Current Review findings"),("--worker-report","Prior worker report / claims"),("--recovery-evidence","Recovery evidence"),("--verification-evidence","Candidate-bound verification evidence")]
         args=[]
         for i,(flag,_) in enumerate(flags):
             p=self.run/f"input-{i}.md"; p.write_text(str(i)); paths.append(p); args += [flag,str(p.resolve())]
