@@ -95,7 +95,7 @@ The lifecycle is a **default execution framework**, not authority over the paren
 
 Prefer this in order: use the ordinary lifecycle when it works → make the smallest direct repair/bypass when it does not → involve the Human only for genuine owner authority or unresolved intent.
 
-Mechanical attempt-budget and repeated-cycle guards are deliberately **orchestrator-review boundaries**, not mandatory Human gates. Reconciliation exposes them as `review-control-block`. When the guard itself/stale T-BAG state is the problem, record the reason and reset the automatic-attempt window with `dsd_task.py override-control-block`; genuine worker/Human authority escalations are rejected by that command.
+Mechanical attempt-budget, repair-loop diagnosis and repeated-cycle guards are deliberately **orchestrator-review boundaries**, not mandatory Human gates. Two failed Review/Fix cycles or three completed source-writing turns without acceptance require a causal diagnosis before another source-writing turn; a fresh pending Reviewer is still allowed to judge the current candidate first. Reconciliation exposes these as `review-control-block`. When reopening a repair-loop diagnosis block, record what the previous loop misunderstood and what changes now; merely increasing retry allowance is not a diagnosis. Genuine worker/Human authority escalations are rejected by `override-control-block`.
 
 ## Cleanup
 

@@ -557,6 +557,49 @@ class ComponentsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'HARNESS_DRIFT'):
                 dsd_attempt._command_launch(args)
 
+    def test_two_failed_review_cycles_require_causal_diagnosis_before_next_source_write(self):
+        self.register_impl('T-DIAG')
+        task=dsd_task.load_task(self.run,'P1','T-DIAG')
+        task['status']='needs-fix'
+        task['attempts']=[
+            {'role':'implementer','status':'gated','event_dir':str(self.root/'diag-impl')},
+            {'role':'fixer','status':'gated','event_dir':str(self.root/'diag-fix')},
+        ]
+        task['review_history']=[
+            {'outcome':'fail','round':1},{'outcome':'fail','round':2},
+        ]
+        dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-DIAG'),task)
+        out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
+        self.assertEqual(len(out['diagnosis_blocks']),1)
+        blocked=dsd_task.load_task(self.run,'P1','T-DIAG')
+        self.assertEqual(blocked['status'],'blocked')
+        self.assertEqual(blocked['last_control_block']['reason'],'repair-loop-needs-causal-diagnosis')
+        reopened=dsd_task.command_override_control_block(SimpleNamespace(
+            run_root=self.run,phase_id='P1',task_id='T-DIAG',
+            reason='The prior fixes patched symptoms in the adapter; the next turn will repair the shared lifecycle owner and update its contract-level regression.'
+        ))
+        self.assertEqual(reopened['status'],'needs-fix')
+        self.assertEqual(reopened['repair_diagnosis_checkpoint']['failed_reviews_total'],2)
+        self.assertEqual(reopened['repair_diagnosis_checkpoint']['source_writes_total'],2)
+        out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
+        self.assertEqual(out['diagnosis_blocks'],[])
+
+    def test_three_source_writes_wait_for_pending_reviewer_before_diagnosis(self):
+        self.register_impl('T-DIAG-REVIEW')
+        task=dsd_task.load_task(self.run,'P1','T-DIAG-REVIEW')
+        task['status']='awaiting-review'
+        task['attempts']=[
+            {'role':'implementer','status':'gated','event_dir':str(self.root/'w1')},
+            {'role':'fixer','status':'gated','event_dir':str(self.root/'w2')},
+            {'role':'fixer','status':'gated','event_dir':str(self.root/'w3')},
+        ]
+        dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-DIAG-REVIEW'),task)
+        out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
+        self.assertEqual(out['diagnosis_blocks'],[])
+        task=dsd_task.load_task(self.run,'P1','T-DIAG-REVIEW'); task['status']='needs-fix'; dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-DIAG-REVIEW'),task)
+        out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
+        self.assertEqual(len(out['diagnosis_blocks']),1)
+
     def test_attempt_budget_blocks_once_and_returns_to_orchestrator_for_disposition(self):
         self.register_impl('T-BUDGET')
         info=dsd_task.load_run(self.run); info['max_attempts_per_task']=3; dsd_task.write_json(dsd_task.run_file(self.run),info)

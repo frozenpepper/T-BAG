@@ -36,6 +36,8 @@ python3 <skill>/scripts/dsd_task.py override-control-block \
 
 This resets the attempt-budget checkpoint and restores the pre-block task lane. It refuses genuine worker-origin Human escalations.
 
+For `repair-loop-needs-causal-diagnosis`, the override reason is the durable diagnosis record. State **what the prior repair loop misunderstood and what is changing now** (ownership, contract, root cause, task shape, or implementation approach). Do not use “try again,” a larger retry allowance, or an unchanged prior diagnosis as the reason.
+
 ## Harness bootstrap
 
 ```bash

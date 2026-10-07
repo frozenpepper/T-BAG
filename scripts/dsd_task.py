@@ -36,6 +36,8 @@ CACHE_DIR = "t-bag"
 SUPPORTED_WORKER_DRIVERS = {"opencode", "opencode2", "codex", "claude"}
 DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
 DEFAULT_MAX_ATTEMPTS_PER_TASK = 10
+REPAIR_DIAGNOSIS_REVIEW_FAILURES = 2
+REPAIR_DIAGNOSIS_SOURCE_WRITES = 3
 DEFAULT_SESSION_FAILURE_LIMIT = 3
 DETERMINISTIC_SESSION_FAILURE_LIMIT = 1
 RUN_STATUSES = {"active", "completed", "human-blocked", "paused-by-user", "abandoned"}
@@ -1579,7 +1581,7 @@ def command_show(args: argparse.Namespace) -> dict[str, Any]:
             "target":control.get("target") or "orchestrator",
             "recorded_at":control.get("recorded_at"),
             "override_command":"override-control-block",
-            "detail":{k:detail.get(k) for k in ("prior_status","attempts_since_budget_reset","max_attempts_per_task","attempts_total") if detail.get(k) is not None},
+            "detail":{k:detail.get(k) for k in ("prior_status","attempts_since_budget_reset","max_attempts_per_task","attempts_total","source_writes_since_diagnosis","failed_reviews_since_diagnosis","required_record") if detail.get(k) is not None},
         }
     burn=task.get("burn") if isinstance(task.get("burn"),dict) else task_burn_metrics(task)
     if burn and any(burn.get(k) for k in ("attempts_total","resume_failures_scanned","no_movement_resume_failures")):
@@ -2599,6 +2601,36 @@ def task_burn_metrics(task: dict[str, Any], *, scan_limit: int = 200) -> dict[st
     return result
 
 
+def repair_loop_metrics(task: dict[str,Any]) -> dict[str,int]:
+    """Count source-writing/review-failure churn since the last causal diagnosis."""
+    attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
+    source_total=sum(1 for x in attempts if str(x.get("role") or "") in {"implementer","fixer"} and str(x.get("status") or "")!="started")
+    review_total=sum(1 for x in task.get("review_history",[]) if isinstance(x,dict) and str(x.get("outcome") or "")=="fail")
+    checkpoint=task.get("repair_diagnosis_checkpoint") if isinstance(task.get("repair_diagnosis_checkpoint"),dict) else {}
+    source_base=max(0,int(checkpoint.get("source_writes_total") or 0))
+    review_base=max(0,int(checkpoint.get("failed_reviews_total") or 0))
+    return {
+        "source_writes_total":source_total,
+        "failed_reviews_total":review_total,
+        "source_writes_since_diagnosis":max(0,source_total-source_base),
+        "failed_reviews_since_diagnosis":max(0,review_total-review_base),
+    }
+
+
+def repair_loop_needs_diagnosis(task: dict[str,Any]) -> dict[str,int] | None:
+    if task.get("kind")!="implementation": return None
+    # Let a frozen candidate reach its fresh Reviewer before diagnosing another repair.
+    if str(task.get("status") or "") in {"awaiting-review","review-passed","accepted","integrated","superseded","cancelled","parked","blocked"}:
+        return None
+    metrics=repair_loop_metrics(task)
+    if (
+        metrics["failed_reviews_since_diagnosis"]>=REPAIR_DIAGNOSIS_REVIEW_FAILURES
+        or metrics["source_writes_since_diagnosis"]>=REPAIR_DIAGNOSIS_SOURCE_WRITES
+    ):
+        return metrics
+    return None
+
+
 def poisoned_session_candidate(
     task:dict[str,Any],
     *,
@@ -2700,7 +2732,7 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
     run=args.run_root.resolve(); info=load_run(run)
     selected=slug(args.phase_id) if getattr(args,"phase_id",None) else None
     max_attempts=max(1,int(info.get("max_attempts_per_task") or DEFAULT_MAX_ATTEMPTS_PER_TASK))
-    poisoned=[]; budget_blocks=[]
+    poisoned=[]; budget_blocks=[]; diagnosis_blocks=[]
     terminal_statuses={"accepted","integrated","superseded","cancelled","parked"}
     for initial in list(iter_run_tasks(run) or []):
         phase=str(initial.get("phase_id") or ""); tid=str(initial.get("task_id") or "")
@@ -2733,6 +2765,16 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
                         "cold_retry_role":candidate.get("role"),
                     })
                     changed=True
+            diagnosis=repair_loop_needs_diagnosis(task)
+            if diagnosis is not None and task.get("status") not in terminal_statuses|{"blocked"}:
+                detail={
+                    **diagnosis,
+                    "required_record":"causal diagnosis plus what changes in understanding, ownership, contract or implementation approach before another source-writing attempt",
+                }
+                _record_control_block(task,reason="repair-loop-needs-causal-diagnosis",detail=detail)
+                diagnosis_blocks.append({"phase_id":phase,"task_id":tid,**detail,"action":"review-control-block"})
+                changed=True
+
             checkpoint=max(0,int(task.get("attempt_budget_checkpoint") or 0))
             used=max(0,len(attempts)-checkpoint)
             if used>=max_attempts and task.get("status") not in terminal_statuses|{"blocked"}:
@@ -2752,8 +2794,9 @@ def command_poison_scan(args:argparse.Namespace)->dict[str,Any]:
             if changed:
                 task["updated_at"]=now(); write_json(path,task)
     return {
-        "count":len(poisoned)+len(budget_blocks),
+        "count":len(poisoned)+len(budget_blocks)+len(diagnosis_blocks),
         "poisoned_sessions":poisoned,
+        "diagnosis_blocks":diagnosis_blocks,
         "budget_blocks":budget_blocks,
     }
 
@@ -2799,6 +2842,18 @@ def command_override_control_block(args: argparse.Namespace) -> dict[str, Any]:
         }
         task.setdefault("orchestrator_override_history",[]).append(record)
         task["last_orchestrator_override"]=record
+        if control.get("reason")=="repair-loop-needs-causal-diagnosis":
+            metrics=repair_loop_metrics(task)
+            prior_diagnoses=task.setdefault("repair_diagnosis_history",[])
+            if prior_diagnoses and str(prior_diagnoses[-1].get("diagnosis") or "").strip()==reason:
+                raise ValueError("repair-loop diagnosis must identify what changed; repeating the previous diagnosis verbatim cannot authorize another source-writing cycle")
+            diagnosis_record={**metrics,"diagnosis":reason,"recorded_at":now()}
+            prior_diagnoses.append(diagnosis_record)
+            task["repair_diagnosis_checkpoint"]={
+                "source_writes_total":metrics["source_writes_total"],
+                "failed_reviews_total":metrics["failed_reviews_total"],
+                "recorded_at":diagnosis_record["recorded_at"],
+            }
         task["attempt_budget_checkpoint"]=checkpoint
         task["status"]=restored
         task.pop("last_control_block",None)

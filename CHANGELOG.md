@@ -3,6 +3,8 @@
 ## RC71 — orchestrator authority + non-destructive worker completion
 - Follow-up obligations now support stable structured identity, existing owner-task binding and explicit `none|dependency|phase` blocking scope. Already-owned nonblocking work remains visible without creating duplicate Planner triage or freezing unrelated phase work; legacy bullets retain conservative behavior.
 - Owned blocking obligations inspect the named owner's own delivered/result state directly, avoiding dependency-recursion cycles when the owner is downstream of the reviewed source.
+- Repair loops now stop for orchestrator causal diagnosis after two failed Reviews or three completed source-writing turns without acceptance. Pending fresh Review is allowed first; reopening records what changed and rejects verbatim reuse of the previous diagnosis.
+
 
 
 
