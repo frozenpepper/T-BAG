@@ -147,6 +147,24 @@ def transport_registry(run:Path)->dict[str,Any]:
     except (OSError,json.JSONDecodeError):
         return {}
 
+def wake_delivery_state(registry:dict[str,Any])->dict[str,Any]:
+    adapter_pid=registry.get("adapter_pid"); adapter_alive=False
+    if isinstance(adapter_pid,int) and adapter_pid>0:
+        try: os.kill(adapter_pid,0); adapter_alive=True
+        except OSError: pass
+    parents=[x for x in registry.get("parent_sessions",[]) if isinstance(x,dict)] if isinstance(registry.get("parent_sessions"),list) else []
+    delivered=max((int(x.get("last_wake_delivered_at_ms") or 0) for x in parents),default=0)
+    failed=max((int(x.get("last_wake_error_at_ms") or 0) for x in parents),default=0)
+    if not registry or not adapter_alive or not parents:
+        return {"state":"unavailable","next":"Repair/reinstall the active adapter or use an explicit owner turn; do not silently rely on a resume hook."}
+    if failed>delivered:
+        latest=max(parents,key=lambda x:int(x.get("last_wake_error_at_ms") or 0))
+        return {"state":"failed","error":str(latest.get("last_wake_error") or "")[:500],"next":"Repair wake transport before relying on autonomous yield; use an explicit owner turn as the supported fallback."}
+    if delivered:
+        return {"state":"proven","delivered_at_ms":delivered,"delivery_count":sum(int(x.get("wake_delivery_count") or 0) for x in parents)}
+    return {"state":"armed-unproven","next":"Wake is enrolled but not yet demonstrated in this session. First completion may prove it; if it does not, resume explicitly and repair transport."}
+
+
 def observer_for(registry:dict[str,Any], event_dir:str)->dict[str,Any]|None:
     target=str(Path(event_dir).resolve()) if event_dir else ""
     adapter_pid=registry.get("adapter_pid"); adapter_alive=False
@@ -621,6 +639,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
     changed_runtime = False
     current_time = time.time()
     transport=transport_registry(run)
+    wake_delivery=wake_delivery_state(transport)
     observer_rearm=[]
 
     for live in list(state.get("live_attempts") or []):
@@ -800,6 +819,7 @@ def command_tick(args: argparse.Namespace) -> dict[str, Any]:
         "owner_communication": owner_communication,
         "delivery":state.get("delivery"),
         "worker_budget": state.get("worker_budget"),
+        "wake_delivery": wake_delivery,
         "state_changed": state_changed,
         "state_signature": tick_signature,
     }

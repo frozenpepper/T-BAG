@@ -33,7 +33,11 @@ class Rc45ProtocolTests(unittest.TestCase):
             report.write_text("PASS\n\n## Follow-up obligations\nNone.\nAttempt: x\nBaseline: y\n")
             self.assertEqual(dsd_task.review_followup_items(report),[])
             report.write_text("PASS\n\n## Follow-up obligations\n- Preserve the public API while changing\n  the internal composition boundary.\nAttempt: x\nBaseline: y\n")
-            self.assertEqual(dsd_task.review_followup_items(report),["Preserve the public API while changing the internal composition boundary."])
+            items=dsd_task.review_followup_items(report)
+            self.assertEqual(len(items),1)
+            self.assertEqual(items[0]["text"],"Preserve the public API while changing the internal composition boundary.")
+            self.assertTrue(items[0]["legacy"])
+            self.assertEqual(items[0]["blocking"],"phase")
 
     def test_superseded_mutable_task_can_succeed_through_integrated_successor(self):
         task={"task_id":"OLD","status":"superseded","requires_integration":True}
@@ -72,6 +76,16 @@ class Rc45ProtocolTests(unittest.TestCase):
 
 
 class Rc45ParentTickTests(unittest.TestCase):
+    def test_wake_delivery_state_is_explicit_and_non_authoritative(self):
+        with mock.patch.object(parent_tick.os,"kill",return_value=None):
+            unproven=parent_tick.wake_delivery_state({"adapter_pid":123,"parent_sessions":[{"session_id":"s"}]})
+            self.assertEqual(unproven["state"],"armed-unproven")
+            proven=parent_tick.wake_delivery_state({"adapter_pid":123,"parent_sessions":[{"session_id":"s","last_wake_delivered_at_ms":10,"wake_delivery_count":1}]})
+            self.assertEqual(proven["state"],"proven")
+            failed=parent_tick.wake_delivery_state({"adapter_pid":123,"parent_sessions":[{"session_id":"s","last_wake_delivered_at_ms":10,"last_wake_error_at_ms":20,"last_wake_error":"boom"}]})
+            self.assertEqual(failed["state"],"failed"); self.assertIn("owner turn",failed["next"])
+        self.assertEqual(parent_tick.wake_delivery_state({})["state"],"unavailable")
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.run=Path(self.tmp.name)/"run"; self.run.mkdir()
         self.args=SimpleNamespace(
