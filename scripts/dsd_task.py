@@ -2364,6 +2364,10 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
         "review-passed":"review passed; landing pending","accepted":"accepted result; integration pending","recovery-required":"recovery/diagnosis needed",
     }
     running=[]; backlog=[]; completed=[]; gates=[]; open_followups=[]; burn_hotspots=[]
+    orchestration_cost={
+        "attempts_total":0,"source_writing_turns":0,"failed_reviews":0,"causal_diagnoses":0,
+        "repeated_followup_observations":0,"environment_preflight_failures":0,"worker_wall_seconds":0.0,
+    }
     backlog_sources: dict[tuple[str,str],dict[str,Any]]={}; completed_sources: dict[tuple[str,str],dict[str,Any]]={}
     purpose_chars=420 if details else 140
     for phase in phases:
@@ -2390,6 +2394,8 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
                 open_followups.append({k:v for k,v in item.items() if v not in (None,"")})
             if task.get("role")=="phase-auditor" and status=="accepted": continue
             live_now=task_has_live_attempt(task); tid=str(task.get("task_id") or "")
+            cost=task_orchestration_cost(task)
+            for key,value in cost.items(): orchestration_cost[key]+=value
             burn=task.get("burn") if isinstance(task.get("burn"),dict) else {}
             attempts_total=int(burn.get("attempts_total") or len([a for a in task.get("attempts",[]) if isinstance(a,dict)]))
             no_move=int(burn.get("no_movement_resume_failures") or 0)
@@ -2454,7 +2460,9 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
             "blocker_count":len(delivery.get("blockers") or []),
         },
         "running":running,
+        "delivered_outcomes_total":len(completed),
         "recent_outcomes":recent,
+        "orchestration_cost":{**orchestration_cost,"worker_wall_seconds":round(float(orchestration_cost["worker_wall_seconds"]),1)},
         "backlog_count":len(backlog),
         "backlog_by_state":backlog_by_state,
         "backlog_preview":backlog_preview,
@@ -2616,6 +2624,39 @@ def repair_loop_metrics(task: dict[str,Any]) -> dict[str,int]:
         "failed_reviews_total":review_total,
         "source_writes_since_diagnosis":max(0,source_total-source_base),
         "failed_reviews_since_diagnosis":max(0,review_total-review_base),
+    }
+
+
+def task_orchestration_cost(task: dict[str,Any]) -> dict[str,Any]:
+    """Mechanical orchestration cost only; never a semantic progress/quality score."""
+    attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
+    source_writes=0; worker_seconds=0.0
+    for attempt in attempts:
+        event=Path(str(attempt.get("event_dir") or ""))
+        terminal=None
+        if event.is_dir() and (event/"terminal.json").is_file():
+            try: terminal=load_json(event/"terminal.json")
+            except (OSError,ValueError,json.JSONDecodeError): terminal=None
+        completed=str(attempt.get("status") or "")!="started" or terminal is not None
+        if completed and str(attempt.get("role") or "") in {"implementer","fixer"}: source_writes+=1
+        if isinstance(terminal,dict):
+            try:
+                start=datetime.fromisoformat(str(terminal.get("started_at") or "").replace("Z","+00:00"))
+                end=datetime.fromisoformat(str(terminal.get("ended_at") or "").replace("Z","+00:00"))
+                worker_seconds+=max(0.0,(end-start).total_seconds())
+            except (TypeError,ValueError):
+                pass
+    failed_reviews=sum(1 for x in task.get("review_history",[]) if isinstance(x,dict) and str(x.get("outcome") or "")=="fail")
+    diagnoses=len([x for x in task.get("repair_diagnosis_history",[]) if isinstance(x,dict)])
+    environment_failures=sum(1 for x in task.get("control_block_history",[]) if isinstance(x,dict) and str(x.get("reason") or "")=="execution-environment-preflight-failed")
+    repeated_followups=0
+    for finding in all_review_findings(task):
+        rounds=finding.get("seen_in_review_rounds") if isinstance(finding.get("seen_in_review_rounds"),list) else []
+        repeated_followups+=max(0,len(rounds)-1)
+    return {
+        "attempts_total":len(attempts),"source_writing_turns":source_writes,"failed_reviews":failed_reviews,
+        "causal_diagnoses":diagnoses,"repeated_followup_observations":repeated_followups,
+        "environment_preflight_failures":environment_failures,"worker_wall_seconds":round(worker_seconds,1),
     }
 
 

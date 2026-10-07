@@ -1495,6 +1495,27 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(packet["count"],1); self.assertEqual(packet["preview"][0]["finding_id"],finding_id)
         self.assertIn("cutover wiring",packet["preview"][0]["finding"])
 
+    def test_owner_status_reports_delivered_behavior_separately_from_orchestration_cost(self):
+        self.write_plan([{"task_id":"T-COST","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        path=dsd_task.task_file(self.run,"P1","T-COST"); task=dsd_task.load_json(path)
+        e1=dsd_task.task_root(self.run,"P1","T-COST")/"attempts"/"implementer-1"; e1.mkdir(parents=True)
+        dsd_task.write_json(e1/"terminal.json",{"started_at":"2026-10-07T10:00:00+00:00","ended_at":"2026-10-07T10:02:00+00:00"})
+        e2=dsd_task.task_root(self.run,"P1","T-COST")/"attempts"/"fixer-1"; e2.mkdir(parents=True)
+        dsd_task.write_json(e2/"terminal.json",{"started_at":"2026-10-07T10:03:00+00:00","ended_at":"2026-10-07T10:04:30+00:00"})
+        task["attempts"]=[{"role":"implementer","status":"gated","event_dir":str(e1)},{"role":"fixer","status":"gated","event_dir":str(e2)}]
+        task["review_history"]=[{"outcome":"fail","findings":[{"finding_id":"F","text":"gap","status":"open","seen_in_review_rounds":[1,2,3]}]},{"outcome":"fail"}]
+        task["repair_diagnosis_history"]=[{"diagnosis":"root cause corrected"}]
+        task["control_block_history"]=[{"reason":"execution-environment-preflight-failed"}]
+        dsd_task.write_json(path,task)
+        cost=dsd_task.task_orchestration_cost(task)
+        self.assertEqual(cost["source_writing_turns"],2); self.assertEqual(cost["failed_reviews"],2)
+        self.assertEqual(cost["causal_diagnoses"],1); self.assertEqual(cost["repeated_followup_observations"],2)
+        self.assertEqual(cost["environment_preflight_failures"],1); self.assertEqual(cost["worker_wall_seconds"],210.0)
+        out=dsd_task.command_owner_status(SimpleNamespace(run_root=self.run,phase_id="P1",details=False,disk_usage={}))
+        self.assertEqual(out["delivered_outcomes_total"],0)
+        self.assertEqual(out["orchestration_cost"]["source_writing_turns"],2)
+        self.assertEqual(out["orchestration_cost"]["worker_wall_seconds"],210.0)
+
     def test_owner_status_is_bounded_but_keeps_complete_backlog_counts(self):
         self.write_plan([
             {"task_id":f"T-STATUS-{i:02d}","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}
