@@ -65,6 +65,17 @@ def _transport(run: Path) -> dict[str, Any]:
             "healthy": bool(adapter_alive and _pid_alive(observer_pid) and not item.get("done") and not item.get("orphaned")),
         })
     parents = [x for x in raw.get("parent_sessions", []) if isinstance(x, dict)] if isinstance(raw.get("parent_sessions"), list) else []
+    delivered=max((int(x.get("last_wake_delivered_at_ms") or 0) for x in parents),default=0)
+    failed=max((int(x.get("last_wake_error_at_ms") or 0) for x in parents),default=0)
+    if not raw or not adapter_alive or not parents:
+        wake_delivery={"state":"unavailable","next":"Reinstall/repair the active OpenCode adapter or use an explicit owner turn; do not assume a resume hook will wake the parent."}
+    elif failed>delivered:
+        latest=max(parents,key=lambda x:int(x.get("last_wake_error_at_ms") or 0))
+        wake_delivery={"state":"failed","error":str(latest.get("last_wake_error") or "")[:600],"next":"Repair the wake transport before relying on autonomous yield; durable state will reconcile on the next explicit owner turn."}
+    elif delivered:
+        wake_delivery={"state":"proven","delivered_at_ms":delivered,"delivery_count":sum(int(x.get("wake_delivery_count") or 0) for x in parents)}
+    else:
+        wake_delivery={"state":"armed-unproven","next":"The adapter is enrolled but this session has not yet demonstrated a delivered wake. First completion may prove it; if no wake arrives, use an explicit owner turn and repair transport rather than repeated blind waiting."}
     return {
         "available": bool(raw),
         "path": str(path),
@@ -72,6 +83,7 @@ def _transport(run: Path) -> dict[str, Any]:
         "adapter_alive": adapter_alive,
         "age_seconds": round(age, 1) if age is not None else None,
         "parent_sessions": parents,
+        "wake_delivery": wake_delivery,
         "observers": observers,
     }
 
@@ -364,6 +376,7 @@ def build_snapshot(project_root: Path, *, run_root: Path | None = None, parent_s
         "attention": attention[:16],
         "recent": recent[:10],
         "transport": transport,
+        "wake_delivery": transport.get("wake_delivery"),
     }
 
 

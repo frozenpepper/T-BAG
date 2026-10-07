@@ -138,6 +138,21 @@ class StatusSnapshotTests(unittest.TestCase):
             self.assertEqual(attention["next"],"review-control-block")
             self.assertNotEqual(attention["next"],"await-human-decision")
 
+    def test_status_transport_distinguishes_unproven_proven_and_failed_wake(self):
+        with tempfile.TemporaryDirectory() as td:
+            run=Path(td)/"run"; transport=run/".transport"; transport.mkdir(parents=True)
+            path=transport/"opencode.json"
+            base={"adapter_pid":os.getpid(),"parent_sessions":[{"session_id":"s","wake_delivery_count":0}]}
+            path.write_text(json.dumps(base))
+            self.assertEqual(tbag_status._transport(run)["wake_delivery"]["state"],"armed-unproven")
+            base["parent_sessions"][0].update({"last_wake_delivered_at_ms":100,"wake_delivery_count":1})
+            path.write_text(json.dumps(base))
+            self.assertEqual(tbag_status._transport(run)["wake_delivery"]["state"],"proven")
+            base["parent_sessions"][0].update({"last_wake_error_at_ms":200,"last_wake_error":"prompt failed"})
+            path.write_text(json.dumps(base))
+            wake=tbag_status._transport(run)["wake_delivery"]
+            self.assertEqual(wake["state"],"failed"); self.assertIn("prompt failed",wake["error"])
+
     def test_tui_source_uses_documented_status_slots_and_panel(self):
         tui=(Path(__file__).resolve().parents[1]/"adapters"/"opencode"/"tbag-ui"/"tui.tsx").read_text()
         self.assertIn('from "@opencode/plugin/tui"',tui)
