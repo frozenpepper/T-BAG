@@ -1516,6 +1516,10 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(out["orchestration_cost"]["source_writing_turns"],2)
         self.assertEqual(out["orchestration_cost"]["worker_wall_seconds"],210.0)
 
+    def test_legacy_completed_source_attempt_without_scope_remains_conservatively_counted(self):
+        attempt={"role":"implementer","status":"gated","event_dir":str(self.root/"missing-legacy-event")}
+        self.assertTrue(dsd_task._source_writing_attempt(attempt))
+
     def test_owner_status_is_bounded_but_keeps_complete_backlog_counts(self):
         self.write_plan([
             {"task_id":f"T-STATUS-{i:02d}","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}

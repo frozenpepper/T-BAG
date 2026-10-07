@@ -618,6 +618,37 @@ class ComponentsTests(unittest.TestCase):
         out=dsd_task.command_poison_scan(SimpleNamespace(run_root=self.run,phase_id='P1'))
         self.assertEqual(len(out['diagnosis_blocks']),1)
 
+    def test_report_only_zero_delta_turns_do_not_trigger_source_repair_diagnosis(self):
+        self.register_impl('T-DIAG-ZERO')
+        task=dsd_task.load_task(self.run,'P1','T-DIAG-ZERO')
+        attempts=[]
+        for n in range(3):
+            event=self.root/f'zero-{n}'; event.mkdir()
+            scope=event/'scope-diff.json'; scope.write_text(json.dumps({'changed_count':0,'changed_paths':[]})+'\n')
+            (event/'terminal.json').write_text(json.dumps({'exit_code':1,'scope_diff':str(scope)})+'\n')
+            attempts.append({'role':'fixer','status':'report-resume','event_dir':str(event)})
+        task['attempts']=attempts; task['status']='needs-fix'
+        dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-DIAG-ZERO'),task)
+        metrics=dsd_task.repair_loop_metrics(task)
+        self.assertEqual(metrics['source_writes_total'],0)
+        self.assertIsNone(dsd_task.repair_loop_needs_diagnosis(task))
+        self.assertEqual(dsd_task.task_orchestration_cost(task)['source_writing_turns'],0)
+
+    def test_scope_proven_source_delta_counts_toward_repair_diagnosis(self):
+        self.register_impl('T-DIAG-DELTA')
+        task=dsd_task.load_task(self.run,'P1','T-DIAG-DELTA')
+        attempts=[]
+        for n in range(3):
+            event=self.root/f'delta-{n}'; event.mkdir()
+            scope=event/'scope-diff.json'; scope.write_text(json.dumps({'changed_count':1,'changed_paths':['src/x.py']})+'\n')
+            (event/'terminal.json').write_text(json.dumps({'exit_code':0,'scope_diff':str(scope)})+'\n')
+            attempts.append({'role':'fixer','status':'gated','event_dir':str(event)})
+        task['attempts']=attempts; task['status']='needs-fix'
+        dsd_task.write_json(dsd_task.task_file(self.run,'P1','T-DIAG-DELTA'),task)
+        metrics=dsd_task.repair_loop_metrics(task)
+        self.assertEqual(metrics['source_writes_total'],3)
+        self.assertIsNotNone(dsd_task.repair_loop_needs_diagnosis(task))
+
     def test_attempt_budget_blocks_once_and_returns_to_orchestrator_for_disposition(self):
         self.register_impl('T-BUDGET')
         info=dsd_task.load_run(self.run); info['max_attempts_per_task']=3; dsd_task.write_json(dsd_task.run_file(self.run),info)

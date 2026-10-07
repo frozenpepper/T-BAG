@@ -2611,10 +2611,28 @@ def task_burn_metrics(task: dict[str, Any], *, scan_limit: int = 200) -> dict[st
     return result
 
 
+def _source_writing_attempt(attempt: dict[str,Any]) -> bool:
+    """Whether a completed source-role attempt actually authored candidate movement.
+
+    Modern attempts carry frozen scope evidence. Zero-delta report-only/transport turns
+    are not repair churn. Legacy attempts without readable scope evidence remain
+    conservatively counted once they are no longer merely started.
+    """
+    if str(attempt.get("role") or "") not in {"implementer","fixer"}:
+        return False
+    if str(attempt.get("status") or "")=="started":
+        return False
+    terminal=_attempt_terminal(attempt)
+    if terminal is None:
+        return True
+    changed=_terminal_changed_count(terminal,attempt)
+    return True if changed is None else changed>0
+
+
 def repair_loop_metrics(task: dict[str,Any]) -> dict[str,int]:
-    """Count source-writing/review-failure churn since the last causal diagnosis."""
+    """Count actual source-writing/review-failure churn since causal diagnosis."""
     attempts=[x for x in task.get("attempts",[]) if isinstance(x,dict)]
-    source_total=sum(1 for x in attempts if str(x.get("role") or "") in {"implementer","fixer"} and str(x.get("status") or "")!="started")
+    source_total=sum(1 for x in attempts if _source_writing_attempt(x))
     review_total=sum(1 for x in task.get("review_history",[]) if isinstance(x,dict) and str(x.get("outcome") or "")=="fail")
     checkpoint=task.get("repair_diagnosis_checkpoint") if isinstance(task.get("repair_diagnosis_checkpoint"),dict) else {}
     source_base=max(0,int(checkpoint.get("source_writes_total") or 0))
@@ -2637,8 +2655,7 @@ def task_orchestration_cost(task: dict[str,Any]) -> dict[str,Any]:
         if event.is_dir() and (event/"terminal.json").is_file():
             try: terminal=load_json(event/"terminal.json")
             except (OSError,ValueError,json.JSONDecodeError): terminal=None
-        completed=str(attempt.get("status") or "")!="started" or terminal is not None
-        if completed and str(attempt.get("role") or "") in {"implementer","fixer"}: source_writes+=1
+        if _source_writing_attempt(attempt): source_writes+=1
         if isinstance(terminal,dict):
             try:
                 start=datetime.fromisoformat(str(terminal.get("started_at") or "").replace("Z","+00:00"))

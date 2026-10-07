@@ -8,6 +8,8 @@
 - Worker launch now performs attempt-free execution preflight in the actual post-refresh view for expected fixtures, task-required executables/local Node modules, Node runtime/ABI when relevant, and technical-role cache writability. Failures become orchestrator-owned environment control blocks; successful facts are retained on the attempt for evidence/diagnostics.
 - OpenCode transport now persists actual parent-wake delivery/failure per session; tick/status distinguish `armed-unproven|proven|failed|unavailable` and name the explicit fallback instead of treating heartbeat enrollment or resume hooks as wake proof.
 - Owner status now reports delivered outcomes separately from mechanical orchestration cost: attempts, source-writing turns, failed Reviews, causal diagnoses, repeated follow-up observations, environment-preflight failures and worker wall time. Exact test-command time is not guessed from worker duration.
+- Repair-loop diagnosis and orchestration-cost counters now count scope-proven source movement rather than every completed Implementer/Fixer process; zero-delta report/transport turns no longer manufacture repair churn, while legacy attempts without scope evidence remain conservative.
+
 
 
 
