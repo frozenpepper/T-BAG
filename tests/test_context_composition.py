@@ -782,6 +782,21 @@ NONE
         self.assertIn("Do not edit project files",text)
         self.assertIn("rerun expensive verification",text)
 
+    def test_cold_report_only_prompt_loads_stable_contracts_but_forbids_implementation(self):
+        rules=self.prepare()
+        cp,out=self.render(
+            rules,
+            "# Task T1\n\n## Objective\nFinish the interrupted report.\n",
+            role="implementer",
+            extra_args=["--report-only-continuation"],
+        )
+        self.assertEqual(cp.returncode,0,cp.stderr)
+        text=out.read_text()
+        self.assertIn("COLD REPORT-ONLY CONTINUATION",text)
+        self.assertIn("COMMON.md",text)
+        self.assertIn("no source-write authority",text)
+        self.assertIn("Do not edit project files",text)
+
     def test_context_docs_keep_parent_notes_separate(self):
         context = (ROOT / "CONTEXT.md").read_text()
         self.assertIn("Do not attach this wholesale to workers", context)

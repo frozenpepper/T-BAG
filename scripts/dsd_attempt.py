@@ -265,9 +265,8 @@ def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:st
         return sid
     return explicit
 
-def report_only_source_attempt(task:dict[str,Any], role:str, *, continuing:bool)->dict[str,Any]|None:
-    """Return the zero-delta interrupted attempt eligible for report-only continuation."""
-    if not continuing: return None
+def report_only_source_attempt(task:dict[str,Any], role:str)->dict[str,Any]|None:
+    """Return the latest zero-delta interrupted attempt that only needs reporting."""
     for attempt in reversed(task.get("attempts",[])):
         if not isinstance(attempt,dict) or str(attempt.get("role") or "")!=role:
             continue
@@ -630,10 +629,15 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         for prior in reversed(task.get("attempts",[])):
             if isinstance(prior,dict) and prior.get("role")=="reviewer":
                 profile_name=str(prior.get("runtime_profile") or "default"); break
-    continuing=bool(args.resume_last or args.resume_session)
-    if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"} and continuing:
+    requested_continuation=bool(args.resume_last or args.resume_session)
+    report_only_attempt=report_only_source_attempt(task,role)
+    report_only=report_only_attempt is not None
+    # Freshness applies to a new semantic Review, not to finishing the report of the
+    # already-fresh interrupted Review attempt. Report-only continuation cannot mutate
+    # the candidate and remains bound to that attempt's frozen checkpoint/evidence.
+    if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"} and requested_continuation and not report_only:
         raise ValueError(f"{role} must always start in a fresh session; independent review may not resume prior worker/reviewer context")
-    blocker=launch_blocker(run,phase,tid,role,continuing=continuing)
+    blocker=launch_blocker(run,phase,tid,role,continuing=requested_continuation or report_only)
     if blocker: raise ValueError(blocker)
     if role=="implementer":
         if status=="awaiting-review" and not continuing:
@@ -647,9 +651,24 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
             raise ValueError("completed Goal-Planner work is awaiting Plan Review; launch the fresh Plan Reviewer instead of starting another planning turn")
         if status not in {"planned","active"}:
             raise ValueError(f"Goal Planner is not planning-runnable: {status}")
-    resume=resolve_resume_session(task,role,status,args.resume_session,bool(args.resume_last))
-    report_only_attempt=report_only_source_attempt(task,role,continuing=bool(resume))
-    report_only=report_only_attempt is not None
+    if report_only and report_only_attempt is not None:
+        prior_sid=attempt_session_id(report_only_attempt)
+        abandoned={str(x) for x in task.get("abandoned_sessions",[]) if str(x)} if isinstance(task.get("abandoned_sessions"),list) else set()
+        if args.resume_session:
+            if prior_sid and args.resume_session!=prior_sid:
+                raise ValueError("report-only continuation must stay bound to the interrupted attempt's session when an explicit session is supplied")
+            if args.resume_session in abandoned:
+                raise ValueError("requested report-only session was mechanically abandoned; omit explicit resume to use cold report-only continuation")
+            resume=args.resume_session
+        elif args.resume_last:
+            if not prior_sid or prior_sid in abandoned:
+                raise ValueError("report-only --resume-last requested but the interrupted attempt has no usable session; omit --resume-last to use cold report-only continuation")
+            resume=prior_sid
+        else:
+            resume=prior_sid if prior_sid and prior_sid not in abandoned else None
+    else:
+        resume=resolve_resume_session(task,role,status,args.resume_session,bool(args.resume_last))
+    continuing=bool(resume)
     if args.worker_rules:
         rules=Path(args.worker_rules).resolve()
     elif resume:
@@ -815,8 +834,7 @@ def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
     # view before reserving a global worker slot or creating attempt evidence.
     task=dsd_task.load_task(run,phase,tid)
     role=getattr(args,"role",None) or str(task.get("role") or "")
-    continuing=bool(getattr(args,"resume_last",False) or getattr(args,"resume_session",None))
-    report_only=report_only_source_attempt(task,role,continuing=continuing) is not None
+    report_only=report_only_source_attempt(task,role) is not None
     ws=dsd_workspace.prepare_launch_workspace(run,phase,tid,role)
     try:
         preflight_facts={"mode":"report-only","skipped_execution_capabilities":True} if report_only else execution_environment_preflight(run,Path(str(ws["worktree"])),task,ws,role)

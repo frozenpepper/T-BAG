@@ -600,10 +600,12 @@ class ComponentsTests(unittest.TestCase):
         scope=event/'scope-diff.json'; scope.write_text(json.dumps({'changed_count':0,'changed_paths':[]})+'\n')
         (event/'terminal.json').write_text(json.dumps({'exit_code':1,'scope_diff':str(scope)})+'\n')
         task={'attempts':[{'role':'implementer','status':'report-resume','event_dir':str(event),'checkpoint_ref':'refs/tbag/x','checkpoint_oid':'abc'}]}
-        self.assertIsNotNone(dsd_attempt.report_only_source_attempt(task,'implementer',continuing=True))
-        self.assertIsNone(dsd_attempt.report_only_source_attempt(task,'implementer',continuing=False))
+        self.assertIsNotNone(dsd_attempt.report_only_source_attempt(task,'implementer'))
+        # Eligibility is evidence-based, not session-based: a missing host session
+        # falls back to a cold report-only worker instead of a source-authoring retry.
+        self.assertIsNotNone(dsd_attempt.report_only_source_attempt(task,'implementer'))
         scope.write_text(json.dumps({'changed_count':1,'changed_paths':['src/x.py']})+'\n')
-        self.assertIsNone(dsd_attempt.report_only_source_attempt(task,'implementer',continuing=True))
+        self.assertIsNone(dsd_attempt.report_only_source_attempt(task,'implementer'))
 
     def test_two_failed_review_cycles_require_causal_diagnosis_before_next_source_write(self):
         self.register_impl('T-DIAG')

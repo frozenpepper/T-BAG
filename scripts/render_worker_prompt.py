@@ -80,9 +80,17 @@ def main() -> int:
 
     stable = [rules, common] + ([quality] if quality else []) + ([analyst_escalation] if analyst_escalation else []) + ([plan_authoring] if plan_authoring else []) + ([skill_catalog] if skill_catalog else []) + ([project_protocol] if project_protocol else [])
     if args.report_only_continuation:
-        reads=[task,role_skill]+task_skills
-        fallback=[p for p in stable if p not in reads]
-        orientation="REPORT-ONLY CONTINUATION: prior project work is already frozen and this attempt has no source-write authority. Read the current task/role plus supplied prior terminal/gate/report evidence, account for changed instructions if any, and finish the self-contained report. Do not edit project files, redo implementation setup, or rerun expensive verification merely to recreate evidence already supplied."
+        if args.continuation:
+            reads=[task,role_skill]+task_skills
+            fallback=[p for p in stable if p not in reads]
+            orientation="REPORT-ONLY CONTINUATION: resume the interrupted conversation only to finish its report/evidence. Prior project work is frozen and this attempt has no source-write authority. Read the current task/role plus supplied prior terminal/gate/report evidence, account for changed instructions if any, and finish the self-contained report. Do not edit project files, redo implementation setup, or rerun expensive verification merely to recreate evidence already supplied."
+        else:
+            # A missing/abandoned host session must not turn report completion back
+            # into a normal source-writing retry. A cold report-only worker receives
+            # the normal stable contracts because it has never seen them.
+            reads=stable+[role_skill]+task_skills+[task]
+            fallback=[]
+            orientation="COLD REPORT-ONLY CONTINUATION: the prior host session is unavailable, but its zero-delta candidate/evidence are frozen. Read the normal stable contracts plus current task/role and supplied prior evidence, then finish reporting only. You have no source-write authority. Do not edit project files, redo implementation setup, or rerun expensive verification merely to recreate supplied evidence."
     elif args.continuation:
         # The recorded CLI session already received immutable run/common/quality context.
         # Reassert the current task/role and any role-selected skills, but keep stable
