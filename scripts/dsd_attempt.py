@@ -532,11 +532,12 @@ def execution_environment_preflight(run:Path, project_view:Path, task:dict[str,A
             if cp.returncode!=0:
                 raise ValueError(f"required local Node module is not resolvable in assigned worker view: {package}: {(cp.stderr or cp.stdout).strip()[:500]}")
 
-    info=dsd_task.load_run(run); project_root=Path(str(info["project_root"])).resolve()
-    cache_root=project_root/"TBag"/"cache"
-    for cache in (cache_root/"npm-cache",cache_root/"node-compile-cache"):
-        _writable_cache_probe(cache)
-    facts["cache_root"]=str(cache_root)
+    if technical_role or capabilities:
+        info=dsd_task.load_run(run); project_root=Path(str(info["project_root"])).resolve()
+        cache_root=project_root/"TBag"/"cache"
+        for cache in (cache_root/"npm-cache",cache_root/"node-compile-cache"):
+            _writable_cache_probe(cache)
+        facts["cache_root"]=str(cache_root)
     return facts
 
 
@@ -713,6 +714,8 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     if args.auto_flag is not None: launch_cmd += [f"--auto-flag={args.auto_flag}"]
     cp=run_checked(launch_cmd); launch=json.loads(cp.stdout)
     record={"task_id":tid,"role":role,"tier":tier,"runtime_profile":selected_profile,"driver":driver,"model":model,"attempt":number,"event_dir":str(event),"status":"started","monitor_pid":launch.get("monitor_pid"),"checkpoint_ref":checkpoint,"checkpoint_oid":checkpoint_oid,"resume_session":resume,"worker_rules":str(rules),"workspace_mode":workspace_mode,"project_root":str(wt),"workspace_primary_head":ws.get("primary_head"),"workspace_primary_status":ws.get("primary_status"),"analysis_view_generation":ws.get("analysis_view_generation"),"inputs":[p for values in input_groups.values() for p in values],"inputs_by_type":input_groups}
+    execution_preflight=getattr(args,"execution_preflight",None)
+    if isinstance(execution_preflight,dict): record["execution_preflight"]=execution_preflight
     if runtime_options: record["runtime_options"]=runtime_options
     if role=="plan-reviewer": record["plan_review_target"]=plan_review_binding
     if role=="context-reviewer": record["context_review_target"]=context_review_binding
@@ -770,7 +773,8 @@ def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
     role=getattr(args,"role",None) or str(task.get("role") or "")
     ws=dsd_workspace.prepare_launch_workspace(run,phase,tid,role)
     try:
-        execution_environment_preflight(run,Path(str(ws["worktree"])),task,ws,role)
+        preflight_facts=execution_environment_preflight(run,Path(str(ws["worktree"])),task,ws,role)
+        setattr(args,"execution_preflight",preflight_facts)
     except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
         dsd_task.block_task_for_control_safety(
             run,phase,tid,reason="execution-environment-preflight-failed",

@@ -2106,10 +2106,12 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     if status=="blocked":
         control=_current_control_block(task)
         if control is not None:
+            detail=control.get("detail") if isinstance(control.get("detail"),dict) else {}
             return {
                 **base,"action":"review-control-block","reason":control.get("reason"),
-                "detail":control.get("detail"),
+                "detail":detail,
                 "override_command":"override-control-block",
+                **({"next":detail.get("next")} if detail.get("next") else {}),
             }
         if task_block_kind(task)=="human":
             return {**base,"action":"await-human-decision","escalation":task.get("last_escalation"),"owner_question":human_decision_question(task)}

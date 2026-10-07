@@ -80,6 +80,10 @@ Legacy `integrated` state without commit/receipt ancestry proof is **not deliver
 
 Fresh Reviewer PASS is normal task acceptance. Do **not** add generic post-integration review. Extra Verification/Audit needs a named predicate, cross-task interaction, or evidence gap. Skipped required gates stay gaps.
 
+## Execution preflight
+
+After workspace creation/refresh and before an attempt is reserved, launch verifies expected mirrored fixtures, declared executables/local Node modules, Node runtime/ABI when the task needs Node, and project-local cache writability for technical execution roles. These are execution-environment facts, not source defects. Failure creates an orchestrator-owned `execution-environment-preflight-failed` control block with the concrete recovery instruction; repair/provision/reroute the environment, then reopen it. Do not burn Implementer/Fixer cycles repairing source for a missing tool, vanished fixture or unwritable cache.
+
 ## Interrupted work
 
 - dead attempt without a terminal event → `sweep-stale` compares the retained view to that attempt checkpoint; mechanically admissible state retries the same role, while unprovable/forbidden movement becomes `recovery-required`;

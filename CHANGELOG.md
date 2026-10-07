@@ -5,6 +5,8 @@
 - Owned blocking obligations inspect the named owner's own delivered/result state directly, avoiding dependency-recursion cycles when the owner is downstream of the reviewed source.
 - Repair loops now stop for orchestrator causal diagnosis after two failed Reviews or three completed source-writing turns without acceptance. Pending fresh Review is allowed first; reopening records what changed and rejects verbatim reuse of the previous diagnosis.
 - Implementation planning and worker prompts now make stale-premise detection explicit: Planner briefs capture current owner/existing/missing behavior when known, while Implementer/Fixer/Reviewer verify actual current code before editing or judging and narrow/escalate instead of recreating already-existing mechanisms.
+- Worker launch now performs attempt-free execution preflight in the actual post-refresh view for expected fixtures, task-required executables/local Node modules, Node runtime/ABI when relevant, and technical-role cache writability. Failures become orchestrator-owned environment control blocks; successful facts are retained on the attempt for evidence/diagnostics.
+
 
 
 

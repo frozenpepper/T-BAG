@@ -71,6 +71,11 @@ Task-specific facts not cheap to infer.
 ## Required worktree fixtures
 NONE
 
+## Required execution capabilities
+- exec:node
+- exec:npm
+- node-module:@playwright/test
+
 ## Worker skills
 - skill-id
 ```
@@ -81,6 +86,7 @@ Mechanical sections are strict:
 - Skill sections accept only bare `- skill-id` bullets or `NONE`; explanations go elsewhere.
 - `Allowed source changes` is an exceptional authority boundary, **not an output inventory**. Omit it when the worker should choose the surface; `NONE` means no project writes.
 - Fixtures name only genuinely required ignored/runtime inputs, never ambient untracked files by habit.
+- `Required execution capabilities` is optional and should name only capabilities that the task's acceptance path actually needs: `exec:<name>` or `node-module:<package>`. Launch checks them in the actual post-refresh worker view before spending an attempt.
 
 ## Planning discipline
 
