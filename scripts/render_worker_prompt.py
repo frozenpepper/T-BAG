@@ -36,6 +36,7 @@ def main() -> int:
     ap.add_argument("--report", type=Path, required=True)
     ap.add_argument("--project-root", type=Path)
     ap.add_argument("--continuation", action="store_true", help="resume an existing worker conversation without forcing stable-context rereads")
+    ap.add_argument("--report-only-continuation", action="store_true", help="finish interrupted reporting/evidence only; project mutation is forbidden")
     for flag in INPUT_FLAGS:
         ap.add_argument("--" + flag.replace("_", "-"), action="append", default=[])
     ap.add_argument("--output", type=Path)
@@ -78,7 +79,11 @@ def main() -> int:
         if paths: groups.append((label, list(dict.fromkeys(paths))))
 
     stable = [rules, common] + ([quality] if quality else []) + ([analyst_escalation] if analyst_escalation else []) + ([plan_authoring] if plan_authoring else []) + ([skill_catalog] if skill_catalog else []) + ([project_protocol] if project_protocol else [])
-    if args.continuation:
+    if args.report_only_continuation:
+        reads=[task,role_skill]+task_skills
+        fallback=[p for p in stable if p not in reads]
+        orientation="REPORT-ONLY CONTINUATION: prior project work is already frozen and this attempt has no source-write authority. Read the current task/role plus supplied prior terminal/gate/report evidence, account for changed instructions if any, and finish the self-contained report. Do not edit project files, redo implementation setup, or rerun expensive verification merely to recreate evidence already supplied."
+    elif args.continuation:
         # The recorded CLI session already received immutable run/common/quality context.
         # Reassert the current task/role and any role-selected skills, but keep stable
         # contracts as explicit fallbacks if compaction made an exact rule unavailable.

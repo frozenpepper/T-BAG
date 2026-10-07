@@ -767,6 +767,21 @@ NONE
         for skill_id in ("production-proof","llm-boundary","preregistered-acceptance","positive-control","registered-baseline"):
             self.assertIn(skill_id,info["worker_skills"])
 
+    def test_report_only_continuation_prompt_is_explicitly_non_mutating(self):
+        rules=self.prepare()
+        cp,out=self.render(
+            rules,
+            "# Task T1\n\n## Objective\nFinish the interrupted report.\n",
+            role="implementer",
+            extra_args=["--continuation","--report-only-continuation"],
+        )
+        self.assertEqual(cp.returncode,0,cp.stderr)
+        text=out.read_text()
+        self.assertIn("REPORT-ONLY CONTINUATION",text)
+        self.assertIn("no source-write authority",text)
+        self.assertIn("Do not edit project files",text)
+        self.assertIn("rerun expensive verification",text)
+
     def test_context_docs_keep_parent_notes_separate(self):
         context = (ROOT / "CONTEXT.md").read_text()
         self.assertIn("Do not attach this wholesale to workers", context)

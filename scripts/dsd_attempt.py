@@ -265,6 +265,32 @@ def resolve_resume_session(task:dict[str,Any], role:str, status:str, explicit:st
         return sid
     return explicit
 
+def report_only_source_attempt(task:dict[str,Any], role:str, *, continuing:bool)->dict[str,Any]|None:
+    """Return the zero-delta interrupted attempt eligible for report-only continuation."""
+    if not continuing: return None
+    for attempt in reversed(task.get("attempts",[])):
+        if not isinstance(attempt,dict) or str(attempt.get("role") or "")!=role:
+            continue
+        if str(attempt.get("status") or "")!="report-resume":
+            return None
+        terminal=dsd_task._attempt_terminal(attempt)
+        if terminal is None: return None
+        changed=dsd_task._terminal_changed_count(terminal,attempt)
+        return attempt if changed==0 else None
+    return None
+
+
+def _assert_report_only_candidate_unchanged(worktree:Path, checkpoint:str)->None:
+    diff=subprocess.run(["git","diff","--quiet",checkpoint,"--","."],cwd=worktree,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    if diff.returncode not in {0,1}:
+        raise ValueError("report-only candidate comparison failed: "+diff.stderr.decode("utf-8",errors="replace")[:600])
+    untracked=subprocess.run(["git","ls-files","--others","--exclude-standard"],cwd=worktree,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+    if untracked.returncode!=0:
+        raise ValueError("report-only untracked-file probe failed: "+untracked.stderr[:600])
+    if diff.returncode==1 or untracked.stdout.strip():
+        raise ValueError("REPORT_ONLY_STALE: retained candidate changed after the zero-delta interrupted attempt; use ordinary recovery/implementation routing instead of report-only continuation")
+
+
 def latest_attempt_report(task:dict[str,Any], roles:set[str])->str|None:
     for attempt in reversed(task.get("attempts", [])):
         if not isinstance(attempt, dict) or attempt.get("role") not in roles:
@@ -622,6 +648,8 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         if status not in {"planned","active"}:
             raise ValueError(f"Goal Planner is not planning-runnable: {status}")
     resume=resolve_resume_session(task,role,status,args.resume_session,bool(args.resume_last))
+    report_only_attempt=report_only_source_attempt(task,role,continuing=bool(resume))
+    report_only=report_only_attempt is not None
     if args.worker_rules:
         rules=Path(args.worker_rules).resolve()
     elif resume:
@@ -644,9 +672,16 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     number=args.attempt or attempt_number(dsd_task.task_root(run,phase,tid),role)
     label=f"{role}-{number}"
     if workspace_mode=="isolated-worktree":
-        class C: pass
-        c=C(); c.run_root=run; c.phase_id=phase; c.task_id=tid; c.label=label
-        checkpoint_info=dsd_workspace.command_checkpoint(c); checkpoint=checkpoint_info["checkpoint_ref"]; checkpoint_oid=checkpoint_info["checkpoint_oid"]
+        if report_only:
+            checkpoint=str(report_only_attempt.get("checkpoint_ref") or "")
+            checkpoint_oid=str(report_only_attempt.get("checkpoint_oid") or "")
+            if not checkpoint or not checkpoint_oid:
+                raise ValueError("REPORT_ONLY_STALE: prior interrupted attempt lacks its frozen candidate checkpoint")
+            _assert_report_only_candidate_unchanged(wt,checkpoint)
+        else:
+            class C: pass
+            c=C(); c.run_root=run; c.phase_id=phase; c.task_id=tid; c.label=label
+            checkpoint_info=dsd_workspace.command_checkpoint(c); checkpoint=checkpoint_info["checkpoint_ref"]; checkpoint_oid=checkpoint_info["checkpoint_oid"]
     elif workspace_mode=="analysis-view":
         checkpoint=str(ws.get("baseline_ref") or "")
         if not checkpoint: raise ValueError("analysis-view workspace is missing its frozen baseline ref")
@@ -661,6 +696,10 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         scope_cmd += ["--exclude-prefix",str(rel)]
     run_checked(scope_cmd)
     brief=Path(str(task["brief"])).resolve(); input_groups=task_input_groups(run,phase,task,role,args.input or [])
+    if report_only and report_only_attempt is not None:
+        prior_event=Path(str(report_only_attempt.get("event_dir") or "")).resolve()
+        for evidence_name in ("report.md","terminal.json","evidence-gate.json"):
+            _add_input(input_groups,"recovery_evidence",prior_event/evidence_name)
     if role=="phase-auditor":
         dossier=event/"phase-gate-dossier.md"
         dossier.write_text(dsd_task.phase_gate_dossier_text(run,phase,tid),encoding="utf-8")
@@ -690,6 +729,7 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
         context_review_binding={**context_review_binding,"context_snapshot":str(snapshot_root.resolve())}
     prompt_cmd=[sys.executable,str(scripts/"render_worker_prompt.py"),"--role",role,"--task-id",tid,"--phase-id",phase,"--run-root",str(run),"--worker-rules",str(rules),"--task",str(brief),"--report",str(report),"--project-root",str(wt),"--output",str(prompt)]
     if resume: prompt_cmd.append("--continuation")
+    if report_only: prompt_cmd.append("--report-only-continuation")
     for key,values in input_groups.items():
         flag="--"+key.replace("_","-")
         for value in values: prompt_cmd += [flag,str(Path(value).resolve())]
@@ -711,9 +751,13 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     effort=str(runtime_options.get("effort") or "").strip()
     if effort: launch_cmd += ["--effort",effort]
     if resume: launch_cmd += ["--resume-session",resume]
+    if report_only: launch_cmd.append("--force-read-only")
     if args.auto_flag is not None: launch_cmd += [f"--auto-flag={args.auto_flag}"]
     cp=run_checked(launch_cmd); launch=json.loads(cp.stdout)
     record={"task_id":tid,"role":role,"tier":tier,"runtime_profile":selected_profile,"driver":driver,"model":model,"attempt":number,"event_dir":str(event),"status":"started","monitor_pid":launch.get("monitor_pid"),"checkpoint_ref":checkpoint,"checkpoint_oid":checkpoint_oid,"resume_session":resume,"worker_rules":str(rules),"workspace_mode":workspace_mode,"project_root":str(wt),"workspace_primary_head":ws.get("primary_head"),"workspace_primary_status":ws.get("primary_status"),"analysis_view_generation":ws.get("analysis_view_generation"),"inputs":[p for values in input_groups.values() for p in values],"inputs_by_type":input_groups}
+    if report_only and report_only_attempt is not None:
+        record["report_only_continuation"]=True
+        record["continuation_of"]=str(report_only_attempt.get("event_dir") or "")
     execution_preflight=getattr(args,"execution_preflight",None)
     if isinstance(execution_preflight,dict): record["execution_preflight"]=execution_preflight
     if runtime_options: record["runtime_options"]=runtime_options
@@ -771,9 +815,11 @@ def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
     # view before reserving a global worker slot or creating attempt evidence.
     task=dsd_task.load_task(run,phase,tid)
     role=getattr(args,"role",None) or str(task.get("role") or "")
+    continuing=bool(getattr(args,"resume_last",False) or getattr(args,"resume_session",None))
+    report_only=report_only_source_attempt(task,role,continuing=continuing) is not None
     ws=dsd_workspace.prepare_launch_workspace(run,phase,tid,role)
     try:
-        preflight_facts=execution_environment_preflight(run,Path(str(ws["worktree"])),task,ws,role)
+        preflight_facts={"mode":"report-only","skipped_execution_capabilities":True} if report_only else execution_environment_preflight(run,Path(str(ws["worktree"])),task,ws,role)
         setattr(args,"execution_preflight",preflight_facts)
     except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
         dsd_task.block_task_for_control_safety(

@@ -9,6 +9,8 @@
 - OpenCode transport now persists actual parent-wake delivery/failure per session; tick/status distinguish `armed-unproven|proven|failed|unavailable` and name the explicit fallback instead of treating heartbeat enrollment or resume hooks as wake proof.
 - Owner status now reports delivered outcomes separately from mechanical orchestration cost: attempts, source-writing turns, failed Reviews, causal diagnoses, repeated follow-up observations, environment-preflight failures and worker wall time. Exact test-command time is not guessed from worker duration.
 - Repair-loop diagnosis and orchestration-cost counters now count scope-proven source movement rather than every completed Implementer/Fixer process; zero-delta report/transport turns no longer manufacture repair churn, while legacy attempts without scope evidence remain conservative.
+- Added zero-delta report-only continuation: resumable `report-resume` attempts reuse the prior candidate checkpoint/evidence, skip implementation capability setup, and are evidence-gated read-only; any candidate movement invalidates the shortcut.
+
 
 
 

@@ -575,6 +575,16 @@ class ComponentsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'HARNESS_DRIFT'):
                 dsd_attempt._command_launch(args)
 
+    def test_report_only_source_attempt_requires_zero_delta_terminal_evidence(self):
+        event=self.root/'report-only-source'; event.mkdir()
+        scope=event/'scope-diff.json'; scope.write_text(json.dumps({'changed_count':0,'changed_paths':[]})+'\n')
+        (event/'terminal.json').write_text(json.dumps({'exit_code':1,'scope_diff':str(scope)})+'\n')
+        task={'attempts':[{'role':'implementer','status':'report-resume','event_dir':str(event),'checkpoint_ref':'refs/tbag/x','checkpoint_oid':'abc'}]}
+        self.assertIsNotNone(dsd_attempt.report_only_source_attempt(task,'implementer',continuing=True))
+        self.assertIsNone(dsd_attempt.report_only_source_attempt(task,'implementer',continuing=False))
+        scope.write_text(json.dumps({'changed_count':1,'changed_paths':['src/x.py']})+'\n')
+        self.assertIsNone(dsd_attempt.report_only_source_attempt(task,'implementer',continuing=True))
+
     def test_two_failed_review_cycles_require_causal_diagnosis_before_next_source_write(self):
         self.register_impl('T-DIAG')
         task=dsd_task.load_task(self.run,'P1','T-DIAG')

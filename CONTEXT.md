@@ -46,6 +46,8 @@ A fresh session normally gets the frozen run/core contracts, one role skill, opt
 
 A resumed worker conversation does not mechanically reread every unchanged contract. It reasserts the current task, current role, and role-selected skills, while the already-supplied run/common/quality/project context remains an explicit fallback if compaction or context loss makes an exact rule unavailable. This keeps Fixer-as-resumed-Reviewer continuity without paying for ritual rereads of stable context.
 
+A zero-delta interrupted attempt that needs only its report completed uses **report-only continuation** when its recorded session is resumable. It reuses the frozen candidate checkpoint, receives the prior report/terminal/gate as evidence, skips implementation-capability preflight, and is evidence-gated as project-read-only. Any candidate movement invalidates this mode and routes back through ordinary recovery instead of silently becoming another source-writing turn.
+
 Typed evidence includes governing authority, owner decisions, accepted Analyst/dependency findings, current escalation packets, current Review findings, prior worker claims, recovery evidence, and proposals under review as applicable.
 
 Phase Planner, Phase Surveyor and Phase Auditor receive the frozen authoritative plan directly as typed governing authority. Ordinary Grunts do not receive the full plan unless their task explicitly requires it.

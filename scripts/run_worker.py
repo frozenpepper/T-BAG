@@ -383,7 +383,9 @@ def worker_command(args: argparse.Namespace,p:dict[str,Path],env:dict[str,str])-
         # more broadly than optional `auto` mode while remaining non-interactive. The
         # assigned project view itself enforces read-only Analyst roles at filesystem
         # level; mutating roles already execute in isolated T-BAG worktrees.
-        cmd=["claude","-p","--output-format","stream-json","--verbose","--model",args.model,"--permission-mode","acceptEdits","--allowedTools","Bash,Read,Edit,Write,Glob,Grep","--add-dir",str(p["event_dir"])]
+        allowed_tools="Bash,Read,Glob,Grep" if args.force_read_only else "Bash,Read,Edit,Write,Glob,Grep"
+        permission_mode="default" if args.force_read_only else "acceptEdits"
+        cmd=["claude","-p","--output-format","stream-json","--verbose","--model",args.model,"--permission-mode",permission_mode,"--allowedTools",allowed_tools,"--add-dir",str(p["event_dir"])]
         if effort: cmd += ["--effort",effort]
         if args.resume_session: cmd += ["--resume",args.resume_session]
         cmd.append(prompt)
