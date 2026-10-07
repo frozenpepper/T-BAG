@@ -56,7 +56,7 @@ function persistTransport(runRoot) {
   try {
     const parents = [...runHeartbeats.values()]
       .filter((item) => item.run_root === runRoot)
-      .map((item) => ({ session_id: item.sessionID, run_root: item.run_root, last_queued_at_ms: item.lastQueuedAt, last_completion_probe_at_ms: item.lastCompletionProbeAt, last_health_wake_at_ms: item.lastHealthWakeAt, heartbeat_state: item.heartbeatState }))
+      .map((item) => ({ session_id: item.sessionID, run_root: item.run_root, last_queued_at_ms: item.lastQueuedAt, last_completion_probe_at_ms: item.lastCompletionProbeAt, last_health_wake_at_ms: item.lastHealthWakeAt, heartbeat_state: item.heartbeatState, last_wake_delivered_at_ms: item.lastWakeDeliveredAt || 0, last_wake_kind: item.lastWakeKind || null, wake_delivery_count: item.wakeDeliveryCount || 0, last_wake_error_at_ms: item.lastWakeErrorAt || 0, last_wake_error: item.lastWakeError || null }))
     const observers = [...follows.values()]
       .filter((item) => item.args?.run_root === runRoot)
       .map((item) => ({
@@ -162,11 +162,36 @@ async function logError(client, message, extra = {}) {
   } catch (_) {}
 }
 
+function recordWakeOutcome(sessionID, kind, error = null) {
+  const stamp = Date.now()
+  const touched = new Set()
+  for (const item of runHeartbeats.values()) {
+    if (item.sessionID !== sessionID) continue
+    if (error) {
+      item.lastWakeErrorAt = stamp
+      item.lastWakeError = String(error?.stack || error)
+    } else {
+      item.lastWakeDeliveredAt = stamp
+      item.lastWakeKind = kind
+      item.wakeDeliveryCount = (item.wakeDeliveryCount || 0) + 1
+      item.lastWakeError = null
+    }
+    touched.add(item.run_root)
+  }
+  for (const runRoot of touched) persistTransport(runRoot)
+}
+
 async function wakeParent(client, sessionID, kind) {
-  await client.session.prompt({
-    path: { id: sessionID },
-    body: { parts: [{ type: "text", text: wakeText(kind) }] },
-  })
+  try {
+    await client.session.prompt({
+      path: { id: sessionID },
+      body: { parts: [{ type: "text", text: wakeText(kind) }] },
+    })
+    recordWakeOutcome(sessionID, kind)
+  } catch (error) {
+    recordWakeOutcome(sessionID, kind, error)
+    throw error
+  }
 }
 
 const { flushPendingWake, queueWake } = createWakeQueue({

@@ -150,6 +150,11 @@ export function createHeartbeatRegistry({
       lastCompletionProbeAt: activityEvidence ? 0 : (prior?.lastCompletionProbeAt || 0),
       lastHealthWakeAt: prior?.lastHealthWakeAt || stamp,
       heartbeatState: activityEvidence ? "running" : (prior?.heartbeatState === "idle-recovery" ? "idle-recovery" : "running"),
+      lastWakeDeliveredAt: prior?.lastWakeDeliveredAt || 0,
+      lastWakeKind: prior?.lastWakeKind || null,
+      wakeDeliveryCount: prior?.wakeDeliveryCount || 0,
+      lastWakeErrorAt: prior?.lastWakeErrorAt || 0,
+      lastWakeError: prior?.lastWakeError || null,
     })
     persistTransport(args.run_root)
     return true
