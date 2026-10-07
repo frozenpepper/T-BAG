@@ -97,20 +97,11 @@ def _tracked_modes(root:Path)->dict[str,str]:
 
 
 def _submodule_manifest(path:Path)->dict[str,Any]:
-    head=subprocess.run(["git","rev-parse","HEAD"],cwd=path,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
-    diff=subprocess.run(["git","diff","--binary","--no-ext-diff","HEAD","--","."],cwd=path,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
-    others=subprocess.run(["git","ls-files","-z","--others","--exclude-standard"],cwd=path,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
-    untracked=[]
-    if others.returncode==0:
-        for raw in others.stdout.split(b"\0"):
-            if not raw: continue
-            rel=raw.decode("utf-8",errors="surrogateescape"); candidate=path/rel
-            if candidate.is_file() or candidate.is_symlink():
-                row=path_digest(candidate); row["relative"]=rel; row.pop("path",None); untracked.append(row)
+    nested=candidate_fingerprint(path)
     return {
-        "head":head.stdout.strip() if head.returncode==0 else None,
-        "diff_sha256":sha(diff.stdout) if diff.returncode==0 else None,
-        "untracked":untracked,
+        "tree_sha256":nested["sha256"],
+        "entry_count":nested["entry_count"],
+        "head_observed":nested["head_observed"],
     }
 
 
