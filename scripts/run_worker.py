@@ -462,6 +462,11 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     p["log"].parent.mkdir(parents=True,exist_ok=True); started=None
     try: env,caches=worker_environment(os.environ.copy(),p)
     except (OSError,ValueError) as exc: return terminal_error(args,p,str(exc),2,reserved_at)
+    env.update({
+        "TBAG_RUN_ROOT":str(p["run_root"]),"TBAG_PROJECT_VIEW":str(p["project_root"]),
+        "TBAG_ATTEMPT_DIR":str(p["event_dir"]),"TBAG_WORKER_DRIVER":args.driver,
+        "TBAG_WORKER_MODEL":args.model,"TBAG_WORKER_ROLE":args.role,
+    })
     try: cmd,env,title,launch_cwd=worker_command(args,p,env)
     except FileNotFoundError as exc: return terminal_error(args,p,str(exc),127,reserved_at)
     except (OSError,ValueError) as exc: return terminal_error(args,p,str(exc),2,reserved_at)

@@ -31,6 +31,12 @@ Return exact first-line **`ESCALATE CAPABILITY`** only when the task is still co
 
 Do the full work your role owns, but do not turn task-local evidence into an unsolicited audit of unrelated work. If you discover a separate material obligation, record it precisely for planning/escalation.
 
+## Expensive verification evidence
+
+Do not repeatedly pay for the same broad deterministic verification on an unchanged candidate. When a command is materially expensive, run it through the launcher-supplied **candidate-bound evidence helper** with `run --reuse --label <short-name> -- <exact argv...>`. The helper reuses only an exact match of candidate tree, dependency/configuration and installed-environment metadata, runtime/executable identity, optional `--bind` inputs, and exact argv; otherwise it executes and records fresh evidence. Reused evidence is **evidence, never PASS**.
+
+A fresh Reviewer should inspect applicable shared evidence instead of mechanically rerunning every broad suite on identical inputs, but must independently exercise the decisive risky behavior/sensitivity needed to justify its own verdict. Use `--fresh` when independent reproduction of that exact command is itself material to acceptance. Any relevant source/config/dependency/runtime/command change invalidates reuse mechanically.
+
 ## Report discipline
 
 Create the attempt report immediately and keep it useful as work progresses. The launcher marker is continuity metadata, **not a process-control switch**: overwriting the report or writing a verdict never terminates a live worker. Remove the marker only after all assigned work/tooling is finished and the final self-contained report is ready, then let the worker process exit normally.

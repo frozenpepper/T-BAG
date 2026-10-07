@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SCRIPTS=ROOT/'scripts'
 sys.path.insert(0,str(SCRIPTS))
-import dsd_task, dsd_attempt, report_surface, run_worker, install_harness_adapter
+import dsd_task, dsd_attempt, report_surface, run_worker, install_harness_adapter, candidate_evidence
 from _rules_snapshot import verify_snapshot
 
 
@@ -574,6 +574,26 @@ class ComponentsTests(unittest.TestCase):
         with mock.patch.object(install_harness_adapter,'opencode_project_adapter_drift',return_value={'reason':'project-opencode-adapter-stale'}):
             with self.assertRaisesRegex(ValueError,'HARNESS_DRIFT'):
                 dsd_attempt._command_launch(args)
+
+    def test_candidate_evidence_reuses_only_exact_bound_candidate_and_command(self):
+        project=self.root/'candidate-project'; project.mkdir()
+        subprocess.run(['git','init','-q',str(project)],check=True)
+        subprocess.run(['git','-C',str(project),'config','user.email','tbag@example.invalid'],check=True)
+        subprocess.run(['git','-C',str(project),'config','user.name','T-BAG Test'],check=True)
+        (project/'file.txt').write_text('v1\n')
+        subprocess.run(['git','-C',str(project),'add','file.txt'],check=True)
+        subprocess.run(['git','-C',str(project),'commit','-qm','base'],check=True)
+        run=project/'TBag'/'runs'/'r'; run.mkdir(parents=True)
+        (run/'run.json').write_text(json.dumps({'project_root':str(project)})+'\n')
+        counter=project/'TBag'/'counter.txt'
+        command=[sys.executable,'-c',f"from pathlib import Path; p=Path({str(counter)!r}); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')"]
+        args=SimpleNamespace(run_root=str(run),project_root=str(project),label='suite',bind=[],reuse=True,fresh=False,argv=command)
+        self.assertEqual(candidate_evidence.command_run(args),0)
+        self.assertEqual(candidate_evidence.command_run(args),0)
+        self.assertEqual(counter.read_text(),'1')
+        (project/'file.txt').write_text('v2\n')
+        self.assertEqual(candidate_evidence.command_run(args),0)
+        self.assertEqual(counter.read_text(),'2')
 
     def test_report_only_source_attempt_requires_zero_delta_terminal_evidence(self):
         event=self.root/'report-only-source'; event.mkdir()

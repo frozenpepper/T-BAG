@@ -123,7 +123,7 @@ def main() -> int:
         lines += ["Stable fallback references — already supplied in this resumed session; reread only if exact context was lost:", *[f"- {p}" for p in fallback]]
     for label, paths in groups:
         lines += [f"{label}:", *[f"- {p}" for p in paths]]
-    lines += [f"Attempt directory: {attempt_dir}", "All attempt-output paths below are relative to that directory, never the project cwd/view.", f"Scratch/temp directory: {attempt_dir/'scratch'} (TMPDIR/TMP/TEMP point here). Never place T-BAG evidence or work products in system /tmp or outside the project-owned run tree."]
+    lines += [f"Attempt directory: {attempt_dir}", "All attempt-output paths below are relative to that directory, never the project cwd/view.", f"Scratch/temp directory: {attempt_dir/'scratch'} (TMPDIR/TMP/TEMP point here). Never place T-BAG evidence or work products in system /tmp or outside the project-owned run tree.", f"Candidate-bound expensive-verification helper: {Path(__file__).resolve().parent/'candidate_evidence.py'}"]
     if args.role == "goal-planner":
         lines += [
             "Attempt outputs allowed beside the report:",
