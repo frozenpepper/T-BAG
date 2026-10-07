@@ -8,7 +8,7 @@ license: MIT
 
 Resume the Reviewer session that produced the current findings, now with project-write authority. Re-read the original brief and exact Reviewer report before changing anything.
 
-Treat the findings as a **defect set**, not a checklist of strings to silence. Reproduce/confirm each material finding when practical, repair the underlying in-direction cause, and check the neighboring path for the same failure mechanism. If a finding rests on a false premise, conflicts with the frozen brief, or actually requires new architecture/authority, preserve the evidence and `ESCALATE` instead of forcing a bad patch.
+Treat the findings as a **defect set**, not a checklist of strings to silence. Before editing, recheck the current production owner/behavior as well as the Review finding: a resumed Reviewer session may contain a diagnosis that source movement has already invalidated. Reproduce/confirm each material finding when practical, repair the underlying in-direction cause, and check the neighboring path for the same failure mechanism. If the brief/finding rests on a stale or false premise, narrow to the genuinely missing in-authority behavior or preserve the mismatch and `ESCALATE` instead of forcing a bad patch.
 
 Use `QUALITY.md` on the resulting whole diff, not just the edited lines. Rerun the original task acceptance plus targeted regressions that exercise the repaired mechanism and plausible collateral effects.
 

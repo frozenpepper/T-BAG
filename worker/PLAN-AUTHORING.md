@@ -43,6 +43,15 @@ Use only the sections the task needs. Prefer:
 ## Objective
 ...
 
+## Current owners
+Current production owner(s)/path or component, when known from evidence.
+
+## Existing behavior
+What current code already does that the worker must preserve/reuse.
+
+## Missing behavior
+The exact gap this task still owns.
+
 ## Context
 Task-specific facts not cheap to infer.
 
@@ -75,7 +84,7 @@ Mechanical sections are strict:
 
 ## Planning discipline
 
-Briefs are **minimum-sufficient**: task-specific authority, consequential decisions, interactions and acceptance; no copied doctrine or full dependency reports. Leave routine local engineering choices to the worker rather than specifying implementation trivia. If a consequential decision is genuinely unknowable until implementation evidence appears, let the worker escalate it instead of inventing a speculative rule now.
+Briefs are **minimum-sufficient**: task-specific authority, consequential decisions, interactions and acceptance; no copied doctrine or full dependency reports. For implementation work, record the best-supported **current owner, existing behavior and missing behavior** when known so a worker can falsify a stale premise cheaply. These are evidence-backed planning claims, not permission to freeze guessed file ownership; the worker rechecks them in its assigned current view before editing. Leave routine local engineering choices to the worker rather than specifying implementation trivia. If a consequential decision is genuinely unknowable until implementation evidence appears, let the worker escalate it instead of inventing a speculative rule now.
 
 Apply a **one focused worker-session fit** test: one coherent responsibility, production path and proof. Split independent acceptance/ownership clusters; keep genuinely atomic cross-cutting work whole. No file/token/time quotas.
 
