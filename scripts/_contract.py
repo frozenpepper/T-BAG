@@ -205,6 +205,25 @@ def declared_worker_skill_tags(text: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def required_execution_capabilities(text: str) -> list[str]:
+    """Explicit launch-time capabilities required by this task's acceptance path."""
+    values=_bullet_values(text,"Required execution capabilities")
+    out=[]
+    for value in values:
+        if value.startswith("exec:"):
+            name=value[5:].strip()
+            if not re.fullmatch(r"[A-Za-z0-9._+-]{1,80}",name):
+                raise ValueError(f"invalid executable capability: {value}")
+        elif value.startswith("node-module:"):
+            name=value[len("node-module:"):].strip()
+            if not name or any(ch.isspace() for ch in name) or len(name)>160:
+                raise ValueError(f"invalid Node module capability: {value}")
+        else:
+            raise ValueError("Required execution capabilities entries must use exec:<name> or node-module:<package>")
+        out.append(value)
+    return list(dict.fromkeys(out))
+
+
 def generated_output_mappings(text: str) -> list[dict[str, str]]:
     """Return exact source-prefix => generated-prefix derivations.
 

@@ -107,6 +107,24 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual((wt/"a.txt").read_text(),"task-delta\n")
         self.assertFalse((wt/"b.txt").exists())
 
+    def test_execution_environment_preflight_catches_disappeared_fixture_before_attempt(self):
+        self.register_impl('T-ENV')
+        view=self.root/'env-view'; view.mkdir()
+        task=dsd_task.load_task(self.run,'P1','T-ENV')
+        with self.assertRaisesRegex(ValueError,'fixture.*disappeared'):
+            dsd_attempt.execution_environment_preflight(self.run,view,task,{"fixture_mirrors":["node_modules"]},'implementer')
+        self.assertEqual(dsd_task.load_task(self.run,'P1','T-ENV').get('attempts'),[])
+
+    def test_execution_environment_preflight_checks_declared_executable_without_source_attempt(self):
+        self.register_impl('T-CAP')
+        task=dsd_task.load_task(self.run,'P1','T-CAP')
+        brief=Path(task['brief']); brief.chmod(0o644)
+        brief.write_text(brief.read_text()+"\n## Required execution capabilities\n- exec:tbag-definitely-missing-executable\n")
+        view=self.root/'cap-view'; view.mkdir()
+        with self.assertRaisesRegex(ValueError,'required executable is unavailable'):
+            dsd_attempt.execution_environment_preflight(self.run,view,task,{"fixture_mirrors":[]},'implementer')
+        self.assertEqual(dsd_task.load_task(self.run,'P1','T-CAP').get('attempts'),[])
+
     def test_follow_is_per_attempt_observation_only(self):
         self.register_impl('T-FOLLOW')
         event=dsd_task.task_root(self.run,'P1','T-FOLLOW')/'attempts'/'implementer-1'; event.mkdir(parents=True)

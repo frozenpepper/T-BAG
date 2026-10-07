@@ -20,6 +20,7 @@ import dsd_task
 import dsd_workspace
 import install_harness_adapter
 import report_surface as report_surface_helper
+from _contract import required_execution_capabilities
 from _roles import DEFAULT_TIER, ROLE_NAMES
 from _rules_snapshot import rules_revisions, verify_snapshot
 
@@ -486,6 +487,59 @@ def copy_context_snapshot(source_event: Path, dest_root: Path) -> None:
 
 
 
+def _writable_cache_probe(path:Path)->None:
+    path.mkdir(parents=True,exist_ok=True)
+    probe=path/f".tbag-preflight-{os.getpid()}"
+    try:
+        probe.write_text("ok\n",encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise ValueError(f"cache is not writable: {path}: {exc}") from exc
+
+
+def execution_environment_preflight(run:Path, project_view:Path, task:dict[str,Any], workspace:dict[str,Any], role:str)->dict[str,Any]:
+    """Validate execution capability in the actual post-refresh worker view."""
+    view=project_view.resolve()
+    brief=Path(str(task.get("brief") or ""))
+    text=brief.read_text(encoding="utf-8",errors="replace") if brief.is_file() else ""
+    capabilities=required_execution_capabilities(text)
+    facts={"project_view":str(view),"capabilities":capabilities}
+
+    missing=[]
+    for rel in workspace.get("fixture_mirrors",[]) if isinstance(workspace.get("fixture_mirrors"),list) else []:
+        target=view/str(rel)
+        if not target.exists() and not target.is_symlink(): missing.append(str(rel))
+    if missing:
+        raise ValueError("expected worktree fixture(s) disappeared after workspace refresh: "+", ".join(missing))
+
+    technical_role=role in {"implementer","fixer","reviewer","verification","evidence-clerk","phase-auditor"}
+    node_needed=any(x.startswith("node-module:") or x=="exec:node" for x in capabilities) or (technical_role and (view/"package.json").is_file())
+    node=shutil.which("node") if node_needed else None
+    if node_needed:
+        if not node: raise ValueError("Node project/capability requires executable 'node', but it is unavailable")
+        cp=subprocess.run([node,"-p","JSON.stringify({version:process.version,modules:process.versions.modules})"],cwd=view,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+        if cp.returncode!=0: raise ValueError("Node runtime probe failed: "+(cp.stderr or cp.stdout).strip()[:600])
+        try: facts["node"]=json.loads(cp.stdout)
+        except json.JSONDecodeError: facts["node"]={"raw":cp.stdout.strip()[:200]}
+
+    for cap in capabilities:
+        if cap.startswith("exec:"):
+            name=cap[5:]
+            if not shutil.which(name): raise ValueError(f"required executable is unavailable: {name}")
+        elif cap.startswith("node-module:"):
+            package=cap[len("node-module:"):]
+            cp=subprocess.run([node or "node","-e","require.resolve(process.argv[1],{paths:[process.cwd()]})",package],cwd=view,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+            if cp.returncode!=0:
+                raise ValueError(f"required local Node module is not resolvable in assigned worker view: {package}: {(cp.stderr or cp.stdout).strip()[:500]}")
+
+    info=dsd_task.load_run(run); project_root=Path(str(info["project_root"])).resolve()
+    cache_root=project_root/"TBag"/"cache"
+    for cache in (cache_root/"npm-cache",cache_root/"node-compile-cache"):
+        _writable_cache_probe(cache)
+    facts["cache_root"]=str(cache_root)
+    return facts
+
+
 def launch_blocker(run:Path, phase:str, tid:str, role:str, *, continuing:bool=False)->str|None:
     """Return the same cheap deterministic blocker used before a real launch.
 
@@ -710,6 +764,24 @@ def _command_launch_foreground(args:argparse.Namespace)->dict[str,Any]:
                     "workspace_primary_head":refresh.get("workspace_primary_head"),
                     "current_primary_head":refresh.get("current_primary_head"),
                 }
+    # Environment failures are not source attempts. Validate the actual refreshed
+    # view before reserving a global worker slot or creating attempt evidence.
+    task=dsd_task.load_task(run,phase,tid)
+    role=getattr(args,"role",None) or str(task.get("role") or "")
+    ws=dsd_workspace.prepare_launch_workspace(run,phase,tid,role)
+    try:
+        execution_environment_preflight(run,Path(str(ws["worktree"])),task,ws,role)
+    except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError) as exc:
+        dsd_task.block_task_for_control_safety(
+            run,phase,tid,reason="execution-environment-preflight-failed",
+            detail={
+                "prior_status":str(task.get("status") or "planned"),
+                "error":str(exc)[:1200],
+                "next":"Repair/provision the execution environment or choose an already-authorized capable runtime, then reopen the control block. Do not route this through source repair.",
+            },
+        )
+        raise ValueError(f"EXECUTION_ENVIRONMENT: {exc}") from exc
+
     with dsd_task.file_lock(run/".launch.lock"):
         info=dsd_task.load_run(run)
         limit=int(info.get("max_workers") or 1)
