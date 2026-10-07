@@ -1670,7 +1670,11 @@ def phase_gate_dossier_text(run: Path, phase: str, gate_task_id: str | None = No
 
 
 def _phase_task_success(run: Path, phase: str, task: dict[str, Any]) -> bool:
-    if open_review_findings(task): return False
+    # Follow-up visibility is not itself a phase barrier. Only obligations explicitly
+    # scoped to the phase (and not already satisfied by their named owner) prevent
+    # phase completion; dependency-only/nonblocking obligations keep their narrower scope.
+    if any(finding_blocks(run,finding,scope="phase") for finding in open_review_findings(task)):
+        return False
     # Reusable Plan/Context Reviewer tasks remain active by design after their latest
     # fresh verdict is recorded. They are control conduits, not unfinished phase work.
     if _quiescent_reusable_review_conduit(task): return True

@@ -1348,7 +1348,9 @@ class TaskControlTests(unittest.TestCase):
         source=dsd_task.load_task(self.run,"P1","T-SRC-OWNED"); finding=dsd_task.open_review_findings(source)[0]
         self.assertEqual(finding["owner_task_id"],"T-OWNER"); self.assertEqual(finding["owner_phase_id"],"P1")
         self.assertEqual(finding["blocking"],"none"); self.assertFalse(dsd_task.finding_needs_triage(finding))
-        self.assertIsNone(dsd_task._reconcile_action(self.run,"P1",{**source,"status":"integrated","requires_integration":False}))
+        completed_view={**source,"status":"integrated","requires_integration":False}
+        self.assertIsNone(dsd_task._reconcile_action(self.run,"P1",completed_view))
+        self.assertTrue(dsd_task._phase_task_success(self.run,"P1",completed_view))
         indep=dsd_task.load_task(self.run,"P1","T-INDEP"); ok,missing=dsd_task.readiness(self.run,"P1",indep)
         self.assertTrue(ok,missing); self.assertNotIn("review-followup-triage",missing)
 
