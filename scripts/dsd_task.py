@@ -273,12 +273,19 @@ def _find_task_owner(run: Path, task_id: str, phase_hint: str | None = None) -> 
     return matches[0] if matches else None
 
 def _owner_obligation_satisfied(run: Path, finding: dict[str,Any]) -> bool:
+    """Check the named owner's own result without recursively traversing its dependencies."""
     owner=str(finding.get("owner_task_id") or "")
     if not owner: return False
     resolved=_find_task_owner(run,owner,str(finding.get("owner_phase_id") or "") or None)
     if resolved is None: return False
     owner_phase,owner_task=resolved
-    return dependency_satisfied(run,owner_phase,str(owner_task.get("task_id") or owner))
+    status=str(owner_task.get("status") or "")
+    if owner_task.get("requires_integration"):
+        return status=="integrated" and integration_delivered(run,owner_phase,owner_task)
+    if status not in {"accepted","integrated"}: return False
+    if owner_task.get("kind")=="verification" or owner_task.get("role")=="phase-auditor":
+        return accepted_outcome(owner_task)=="pass"
+    return True
 
 def finding_needs_triage(finding: dict[str,Any]) -> bool:
     return str(finding.get("status") or "open")=="open" and not str(finding.get("owner_task_id") or "")

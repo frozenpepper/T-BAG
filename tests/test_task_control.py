@@ -1352,6 +1352,24 @@ class TaskControlTests(unittest.TestCase):
         indep=dsd_task.load_task(self.run,"P1","T-INDEP"); ok,missing=dsd_task.readiness(self.run,"P1",indep)
         self.assertTrue(ok,missing); self.assertNotIn("review-followup-triage",missing)
 
+    def test_owned_blocking_followup_does_not_recurse_through_owner_dependency(self):
+        self.write_plan([
+            {"task_id":"T-SRC-CYCLE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"T-DOWN-OWNER","kind":"implementation","role":"implementer","tier":"grunt","dependencies":["T-SRC-CYCLE"]},
+        ])
+        payload=json.dumps({
+            "id":"downstream-cutover","text":"Downstream owner must complete cutover before this obligation closes.",
+            "ownerTaskId":"T-DOWN-OWNER","blocking":"dependency","blockingReason":"the source contract is not fully consumable until downstream cutover lands",
+        },separators=(",",":"))
+        report=self.gated_review_report("T-SRC-CYCLE",text=f"PASS\n\n## Follow-up obligations\n- {payload}\n")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-SRC-CYCLE"; a.report=report; a.outcome="pass"
+        dsd_task.command_review(a)
+        source=dsd_task.load_task(self.run,"P1","T-SRC-CYCLE"); finding=dsd_task.open_review_findings(source)[0]
+        self.assertTrue(dsd_task.finding_blocks(self.run,finding,scope="dependency"))
+        # The check must inspect the owner result directly, not recurse owner -> source -> owner.
+        self.assertFalse(dsd_task._owner_obligation_satisfied(self.run,finding))
+
     def test_structured_followup_identity_deduplicates_across_fresh_reviews(self):
         self.write_plan([{"task_id":"T-DEDUPE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
         payload=json.dumps({"id":"stable-gap","text":"One durable gap.","ownerTaskId":None,"blocking":"phase","blockingReason":"new phase work depends on its disposition"},separators=(",",":"))

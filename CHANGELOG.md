@@ -2,6 +2,8 @@
 
 ## RC71 — orchestrator authority + non-destructive worker completion
 - Follow-up obligations now support stable structured identity, existing owner-task binding and explicit `none|dependency|phase` blocking scope. Already-owned nonblocking work remains visible without creating duplicate Planner triage or freezing unrelated phase work; legacy bullets retain conservative behavior.
+- Owned blocking obligations inspect the named owner's own delivered/result state directly, avoiding dependency-recursion cycles when the owner is downstream of the reviewed source.
+
 
 
 - Re-established the authority hierarchy: Human intent/safety and observed evidence truth remain hard boundaries; orchestrator judgment sits above T-BAG process machinery. T-BAG-internal deadlocks, stale state, attempt budgets and cycle guards may be diagnosed, repaired or auditably overridden without manufacturing Human permission.
