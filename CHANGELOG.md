@@ -1,6 +1,8 @@
 # T-BAG changelog
 
 ## RC71 — orchestrator authority + non-destructive worker completion
+- Follow-up obligations now support stable structured identity, existing owner-task binding and explicit `none|dependency|phase` blocking scope. Already-owned nonblocking work remains visible without creating duplicate Planner triage or freezing unrelated phase work; legacy bullets retain conservative behavior.
+
 
 - Re-established the authority hierarchy: Human intent/safety and observed evidence truth remain hard boundaries; orchestrator judgment sits above T-BAG process machinery. T-BAG-internal deadlocks, stale state, attempt budgets and cycle guards may be diagnosed, repaired or auditably overridden without manufacturing Human permission.
 - Separated process guards from authority escalation. Internal stops use dedicated `last_control_block` / `control_block_history`, classify as `control`, and reconcile to `review-control-block`; genuine Human questions fail closed unless a real Human-targeted escalation exists. Legacy control-plane records remain readable, while malformed bare blocks route to orchestrator repair rather than Human wait.

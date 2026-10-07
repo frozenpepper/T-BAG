@@ -1331,6 +1331,45 @@ class TaskControlTests(unittest.TestCase):
         triage=dsd_task.load_task(self.run,"P1",advanced["next_action"]["task_id"])
         self.assertEqual(triage["role"],"planner"); self.assertEqual(triage["followup_finding_ids"],[finding_id])
 
+    def test_structured_owned_followup_preserves_obligation_without_planner_or_phase_barrier(self):
+        self.write_plan([
+            {"task_id":"T-SRC-OWNED","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"T-OWNER","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+            {"task_id":"T-INDEP","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},
+        ])
+        payload=json.dumps({
+            "id":"cutover-wiring","text":"Production cutover wiring is already owned by T-OWNER.",
+            "ownerTaskId":"T-OWNER","blocking":"none","blockingReason":"",
+        },separators=(",",":"))
+        report=self.gated_review_report("T-SRC-OWNED",text=f"PASS\n\n## Follow-up obligations\n- {payload}\n")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-SRC-OWNED"; a.report=report; a.outcome="pass"
+        out=dsd_task.command_review(a); self.assertEqual(len(out["followup_findings"]),1)
+        source=dsd_task.load_task(self.run,"P1","T-SRC-OWNED"); finding=dsd_task.open_review_findings(source)[0]
+        self.assertEqual(finding["owner_task_id"],"T-OWNER"); self.assertEqual(finding["owner_phase_id"],"P1")
+        self.assertEqual(finding["blocking"],"none"); self.assertFalse(dsd_task.finding_needs_triage(finding))
+        self.assertIsNone(dsd_task._reconcile_action(self.run,"P1",{**source,"status":"integrated","requires_integration":False}))
+        indep=dsd_task.load_task(self.run,"P1","T-INDEP"); ok,missing=dsd_task.readiness(self.run,"P1",indep)
+        self.assertTrue(ok,missing); self.assertNotIn("review-followup-triage",missing)
+
+    def test_structured_followup_identity_deduplicates_across_fresh_reviews(self):
+        self.write_plan([{"task_id":"T-DEDUPE","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]}])
+        payload=json.dumps({"id":"stable-gap","text":"One durable gap.","ownerTaskId":None,"blocking":"phase","blockingReason":"new phase work depends on its disposition"},separators=(",",":"))
+        report1=self.gated_review_report("T-DEDUPE",text=f"FAIL\n\n## Follow-up obligations\n- {payload}\n")
+        class A: pass
+        a=A(); a.run_root=self.run; a.phase_id="P1"; a.task_id="T-DEDUPE"; a.report=report1; a.outcome="fail"
+        first=dsd_task.command_review(a)["followup_findings"][0]
+        task=dsd_task.load_task(self.run,"P1","T-DEDUPE")
+        # Simulate the Fixer -> fresh Reviewer lifecycle without changing the finding.
+        task["status"]="awaiting-review"; dsd_task.write_json(dsd_task.task_file(self.run,"P1","T-DEDUPE"),task)
+        report2=self.gated_review_report("T-DEDUPE",text=f"FAIL\n\n## Follow-up obligations\n- {payload}\n")
+        a.report=report2
+        second=dsd_task.command_review(a)["followup_findings"][0]
+        self.assertEqual(first,second)
+        task=dsd_task.load_task(self.run,"P1","T-DEDUPE")
+        findings=dsd_task.open_review_findings(task)
+        self.assertEqual(len(findings),1); self.assertEqual(findings[0]["seen_in_review_rounds"],[1,2])
+
     def test_followup_triage_can_run_alongside_source_fixer_without_releasing_other_phase_work(self):
         self.write_plan([
             {"task_id":"T-FAIL-SRC","kind":"implementation","role":"implementer","tier":"grunt","dependencies":[]},

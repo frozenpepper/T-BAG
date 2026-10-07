@@ -171,38 +171,79 @@ def declared_report_outcome(report: Path, role: str, *, required: bool = False) 
 
 
 FOLLOWUP_HEADING = "## Follow-up obligations"
+FOLLOWUP_BLOCKING = {"none","dependency","phase"}
 
-def review_followup_items(report: Path) -> list[str]:
-    """Parse the Reviewer's explicit material carry-forward section.
+def _legacy_followup(text: str) -> dict[str, Any]:
+    digest=hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return {
+        "obligation_id":f"legacy-{digest}","text":text,
+        "owner_task_id":None,"owner_phase_id":None,
+        "blocking":"phase","blocking_reason":"legacy unowned Reviewer follow-up",
+        "legacy":True,
+    }
 
-    This is deliberately structural, not semantic classification: the Reviewer decides
-    whether something is a material out-of-scope obligation. The kernel only preserves
-    exact bullet text once the dedicated heading is used.
+def _structured_followup(raw: str) -> dict[str, Any]:
+    try: value=json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{FOLLOWUP_HEADING} JSON bullet is invalid: {exc.msg}") from exc
+    if not isinstance(value,dict): raise ValueError(f"{FOLLOWUP_HEADING} JSON bullet must be an object")
+    oid=str(value.get("id") or "").strip()
+    text=str(value.get("text") or "").strip()
+    if not oid or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}",oid):
+        raise ValueError("follow-up id must be 1-80 simple characters: letters, digits, dot, underscore or hyphen")
+    if not text: raise ValueError("follow-up text is required")
+    blocking=str(value.get("blocking") or "").strip().lower()
+    if blocking not in FOLLOWUP_BLOCKING:
+        raise ValueError(f"follow-up blocking must be one of {sorted(FOLLOWUP_BLOCKING)}")
+    reason=str(value.get("blockingReason") or "").strip()
+    if blocking!="none" and not reason:
+        raise ValueError("blocking follow-up requires blockingReason")
+    owner_raw=value.get("ownerTaskId")
+    owner=str(owner_raw).strip() if owner_raw not in {None,""} else None
+    owner_phase_raw=value.get("ownerPhaseId")
+    owner_phase=str(owner_phase_raw).strip() if owner_phase_raw not in {None,""} else None
+    if owner_phase and not owner: raise ValueError("ownerPhaseId requires ownerTaskId")
+    return {
+        "obligation_id":oid,"text":text,
+        "owner_task_id":slug(owner) if owner else None,
+        "owner_phase_id":slug(owner_phase) if owner_phase else None,
+        "blocking":blocking,"blocking_reason":reason or None,
+        "legacy":False,
+    }
+
+def review_followup_items(report: Path) -> list[dict[str, Any]]:
+    """Parse explicit Reviewer carry-forward obligations.
+
+    Preferred bullets are one-line JSON objects with stable identity, ownership and
+    blocking scope. Legacy prose bullets remain readable and conservatively retain the
+    historical phase-blocking/unowned behavior.
     """
     if not report.is_file(): return []
     lines=report.read_text(encoding="utf-8",errors="replace").splitlines()
     starts=[i for i,line in enumerate(lines) if line.strip()==FOLLOWUP_HEADING]
     if not starts: return []
     if len(starts)>1: raise ValueError(f"Reviewer report contains multiple {FOLLOWUP_HEADING!r} sections")
-    items=[]
+    items: list[dict[str,Any]]=[]
+    legacy_index: int | None=None
     for raw in lines[starts[0]+1:]:
         stripped=raw.strip()
         if stripped.startswith("## "): break
         if not stripped: continue
-        # Harness metadata and common trailing report prose are outside the dedicated
-        # obligations section even when a worker forgot to add another Markdown H2.
         if stripped.startswith(("Attempt:","Baseline:","Next technical step:")): break
         if stripped in {"None","None.","- None","- None."} and not items: return []
         if stripped.startswith("- ") and stripped[2:].strip():
             item=stripped[2:].strip()
-            # "None" is the structural null marker even when the Reviewer adds an
-            # explanatory sentence. Do not turn "None. T23 owns this" into work.
             if not items and re.match(r"^None(?:[.!?:;]|\s*[—–-])(?:\s|$)",item,flags=re.IGNORECASE): return []
-            items.append(item); continue
-        # Markdown-wrapped bullet continuations are structural when indented.
-        if items and (raw.startswith(" ") or raw.startswith("\t")):
-            items[-1]+=" "+stripped; continue
-        raise ValueError(f"{FOLLOWUP_HEADING} must contain only single-line '- ...' bullets; indent wrapped continuation lines")
+            if item.startswith("{"):
+                items.append(_structured_followup(item)); legacy_index=None
+            else:
+                items.append(_legacy_followup(item)); legacy_index=len(items)-1
+            continue
+        if legacy_index is not None and (raw.startswith(" ") or raw.startswith("\t")):
+            combined=str(items[legacy_index]["text"])+" "+stripped
+            items[legacy_index]=_legacy_followup(combined)
+            continue
+        raise ValueError(f"{FOLLOWUP_HEADING} must contain '- ...' bullets; structured bullets are one-line JSON objects")
     return items
 
 def iter_review_findings(task: dict[str, Any]):
@@ -217,12 +258,47 @@ def open_review_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
 def all_review_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
     return [finding for _,finding in iter_review_findings(task)]
 
+def _find_task_owner(run: Path, task_id: str, phase_hint: str | None = None) -> tuple[str,dict[str,Any]] | None:
+    tid=slug(task_id)
+    if phase_hint:
+        path=task_file(run,slug(phase_hint),tid)
+        return (slug(phase_hint),load_json(path)) if path.is_file() else None
+    matches=[]
+    phases=run/"phases"
+    for path in phases.glob(f"*/tasks/{tid}/task.json") if phases.is_dir() else []:
+        try: matches.append((path.parents[2].name,load_json(path)))
+        except (OSError,ValueError,json.JSONDecodeError): continue
+    if len(matches)>1:
+        raise ValueError(f"follow-up ownerTaskId {tid!r} is ambiguous across phases; include ownerPhaseId")
+    return matches[0] if matches else None
+
+def _owner_obligation_satisfied(run: Path, finding: dict[str,Any]) -> bool:
+    owner=str(finding.get("owner_task_id") or "")
+    if not owner: return False
+    resolved=_find_task_owner(run,owner,str(finding.get("owner_phase_id") or "") or None)
+    if resolved is None: return False
+    owner_phase,owner_task=resolved
+    return dependency_satisfied(run,owner_phase,str(owner_task.get("task_id") or owner))
+
+def finding_needs_triage(finding: dict[str,Any]) -> bool:
+    return str(finding.get("status") or "open")=="open" and not str(finding.get("owner_task_id") or "")
+
+def finding_blocks(run: Path, finding: dict[str,Any], *, scope: str) -> bool:
+    if str(finding.get("status") or "open")!="open": return False
+    blocking=str(finding.get("blocking") or "phase")
+    if scope=="dependency" and blocking not in {"dependency","phase"}: return False
+    if scope=="phase" and blocking!="phase": return False
+    if finding.get("owner_task_id") and _owner_obligation_satisfied(run,finding): return False
+    return True
+
 def phase_open_review_findings(run: Path, phase: str) -> list[dict[str, Any]]:
+    """Return only unresolved follow-ups that actually block new work in this phase."""
     out=[]; tasks_dir=phase_root(run,phase)/"tasks"
     for state_path in sorted(tasks_dir.glob("*/task.json")) if tasks_dir.is_dir() else []:
         task=load_json(state_path)
         for finding in open_review_findings(task):
-            out.append({"source_task":task.get("task_id"),**finding})
+            if finding_blocks(run,finding,scope="phase"):
+                out.append({"source_task":task.get("task_id"),**finding})
     return out
 
 def _finding_refs(task: dict[str, Any], ids: list[str]) -> list[dict[str, Any]]:
@@ -350,11 +426,10 @@ def dependency_satisfied(
         return False
     seen.add(tid)
     dep = load_task(run, phase, tid)
-    # A fresh Review may PASS the source task while discovering a separate material
-    # obligation that can invalidate already-frozen downstream work. Until an Analyst
-    # has explicitly reconciled those follow-ups with the plan, this dependency is not
-    # safe to treat as discharged.
-    if open_review_findings(dep):
+    # Only explicitly dependency/phase-blocking follow-ups hold this source
+    # dependency. Nonblocking or already-owned-and-satisfied obligations remain
+    # visible evidence without fabricating a new dependency edge.
+    if any(finding_blocks(run,finding,scope="dependency") for finding in open_review_findings(dep)):
         return False
     if dep.get("status") == "superseded":
         raw = dep.get("superseded_by")
@@ -1563,7 +1638,10 @@ def phase_gate_dossier_text(run: Path, phase: str, gate_task_id: str | None = No
             state=str(finding.get("status") or "open")
             resolution=str(finding.get("resolution") or "")
             suffix=f"; resolution={resolution}" if resolution else ""
-            row += f"\n  - Review follow-up `{finding.get('finding_id')}` ({state}{suffix}): {str(finding.get('text') or '')[:500]}"
+            owner=str(finding.get("owner_task_id") or "")
+            blocking=str(finding.get("blocking") or "phase")
+            ownership=f"; owner={finding.get('owner_phase_id')+'/'+owner if finding.get('owner_phase_id') and owner else owner}" if owner else ""
+            row += f"\n  - Review follow-up `{finding.get('finding_id')}` ({state}; blocking={blocking}{ownership}{suffix}): {str(finding.get('text') or '')[:500]}"
         rows.append(row)
     plan=owner_plan_dir(run)/"PLAN.md"
     prior=sorted(owner_plan_dir(run).glob(f"PHASE-{phase}-GATE-*.md")) if owner_plan_dir(run).is_dir() else []
@@ -1885,8 +1963,8 @@ def command_prepare_followup_triage(args: argparse.Namespace) -> dict[str, Any]:
     with file_lock(lock):
         source_path=task_file(run,phase,source_id)
         with file_lock(source_path.with_suffix(".lock")):
-            source=load_json(source_path); findings=open_review_findings(source)
-            if not findings: raise ValueError("source task has no unresolved Review follow-up obligations")
+            source=load_json(source_path); findings=[x for x in open_review_findings(source) if finding_needs_triage(x)]
+            if not findings: raise ValueError("source task has no unowned Review follow-up obligations requiring Analyst triage")
             if task_has_live_attempt(source):
                 raise ValueError("Review follow-up triage waits only for the current source attempt to finish; it does not wait for source integration")
             existing=_followup_triage_task_for(source,findings)
@@ -2009,8 +2087,9 @@ def _reconcile_action(run: Path, phase: str, task: dict[str, Any]) -> dict[str, 
     # Explicit durable obligations outrank task terminality; task status then
     # outranks chronological attempt residue. This is the actionability order.
     findings=open_review_findings(task)
-    if any(not str(f.get("triage_task_id") or "") for f in findings):
-        return {**base,"action":"prepare-followup-triage","finding_count":len(findings)}
+    triage=[f for f in findings if finding_needs_triage(f) and not str(f.get("triage_task_id") or "")]
+    if triage:
+        return {**base,"action":"prepare-followup-triage","finding_count":len(triage)}
     if status in {"integrated","superseded","parked"}: return None
     if status=="cancelled": return None
     if status=="accepted":
@@ -2290,9 +2369,14 @@ def command_owner_status(args: argparse.Namespace) -> dict[str, Any]:
             if _quiescent_reusable_review_conduit(task):
                 continue
             for finding in open_review_findings(task):
-                item={"phase":phase,"source_task":task.get("task_id"),"finding_id":finding.get("finding_id"),"triage_task":finding.get("triage_task_id")}
+                item={
+                    "phase":phase,"source_task":task.get("task_id"),"finding_id":finding.get("finding_id"),
+                    "obligation_id":finding.get("obligation_id"),"triage_task":finding.get("triage_task_id"),
+                    "owner_task_id":finding.get("owner_task_id"),"owner_phase_id":finding.get("owner_phase_id"),
+                    "blocking":finding.get("blocking") or "phase",
+                }
                 item["finding"]=str(finding.get("text") or "")[:420 if details else 180]
-                open_followups.append(item)
+                open_followups.append({k:v for k,v in item.items() if v not in (None,"")})
             if task.get("role")=="phase-auditor" and status=="accepted": continue
             live_now=task_has_live_attempt(task); tid=str(task.get("task_id") or "")
             burn=task.get("burn") if isinstance(task.get("burn"),dict) else {}
@@ -3184,22 +3268,51 @@ def command_review(args: argparse.Namespace) -> dict[str, Any]:
         if task.get("status")!="awaiting-review": raise ValueError(f"review outcome requires task status awaiting-review; current status is {task.get('status')!r}")
         rounds=int(task.get("review_rounds") or 0)+1; task["review_rounds"]=rounds
         followups=review_followup_items(report)
-        stamp=now()
-        findings=[{
-            "finding_id":f"F-{tid}-R{rounds:02d}-{index:02d}",
-            "text":text,
-            "status":"open",
-            "created_at":stamp,
-        } for index,text in enumerate(followups,1)]
+        stamp=now(); findings=[]; finding_refs=[]
+        prior_by_obligation={
+            str(finding.get("obligation_id") or ""):finding
+            for _,finding in iter_review_findings(task)
+            if str(finding.get("obligation_id") or "")
+        }
+        for item in followups:
+            owner_id=str(item.get("owner_task_id") or "")
+            if owner_id:
+                owner=_find_task_owner(run,owner_id,str(item.get("owner_phase_id") or "") or None)
+                if owner is None:
+                    raise ValueError(f"follow-up {item['obligation_id']!r} names missing ownerTaskId {owner_id!r}")
+                owner_phase,owner_task=owner
+                if owner_phase==phase and str(owner_task.get("task_id") or "")==tid:
+                    raise ValueError(f"follow-up {item['obligation_id']!r} cannot assign ownership back to its source task")
+                item["owner_phase_id"]=owner_phase
+            existing=prior_by_obligation.get(str(item["obligation_id"]))
+            if existing is not None:
+                existing["last_seen_at"]=stamp
+                existing.setdefault("seen_in_review_rounds",[]).append(rounds)
+                # A later fresh Reviewer may improve routing metadata for the same
+                # stable obligation without minting duplicate planning work.
+                for key in ("text","owner_task_id","owner_phase_id","blocking","blocking_reason","legacy"):
+                    existing[key]=item.get(key)
+                finding_refs.append(str(existing.get("finding_id") or ""))
+                continue
+            digest=hashlib.sha256(str(item["obligation_id"]).encode("utf-8")).hexdigest()[:12]
+            finding={
+                "finding_id":f"F-{tid}-{digest}",
+                **item,
+                "status":"open","created_at":stamp,"last_seen_at":stamp,
+                "seen_in_review_rounds":[rounds],
+            }
+            findings.append(finding); prior_by_obligation[str(item["obligation_id"])]=finding
+            finding_refs.append(finding["finding_id"])
         recorded={"outcome":outcome,"report":str(report),"recorded_at":stamp,"round":rounds,"attempt":attempt_path,"checkpoint_ref":attempt.get("checkpoint_ref")}
         if findings: recorded["findings"]=findings
+        if finding_refs: recorded["finding_refs"]=finding_refs
         history.append(recorded); task["last_review"]=recorded
         if outcome=="pass": task["status"]="review-passed"
         elif outcome=="fail": task["status"]="needs-fix"
         else: record_escalation(run,task,attempt,report,source="review")
         task["updated_at"]=now(); write_json(path,task)
     result={"task_id":tid,"outcome":outcome,"review_rounds":rounds,"status":task["status"]}
-    if findings: result["followup_findings"]=[x["finding_id"] for x in findings]
+    if finding_refs: result["followup_findings"]=finding_refs
     if outcome=="escalate": result["escalation_target"]=(task.get("last_escalation") or {}).get("target")
     return result
 
