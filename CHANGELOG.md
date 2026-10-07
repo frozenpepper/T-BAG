@@ -14,6 +14,8 @@
 - Report-only continuation no longer depends on a surviving host session: zero-delta interrupted attempts can finish reporting cold without source authority. Interrupted fresh Reviewers may resume their same session only in this report-only mode; cold report-only sessions receive full stable context.
 - Phase exit now respects follow-up blocking scope: merely-visible or dependency-only obligations no longer become an accidental global phase barrier; only unresolved `phase` obligations hold phase completion.
 - Candidate evidence now writes a tiny attempt-local index automatically supplied to the next fresh Reviewer, so reuse does not depend on worker prose. Reuse keys also include Git submodule state and high-impact runtime environment; ignored/generated/external verification inputs must be explicitly `--bind`-bound.
+- Fixed RC71.42 launch ordering: pre-resume lifecycle checks now use the explicit `launch_continuation` decision instead of referencing `continuing` before session resolution.
+
 
 
 

@@ -640,10 +640,11 @@ def _command_launch(args:argparse.Namespace)->dict[str,Any]:
     # the candidate and remains bound to that attempt's frozen checkpoint/evidence.
     if role in {"reviewer","plan-reviewer","context-reviewer","phase-auditor"} and requested_continuation and not report_only:
         raise ValueError(f"{role} must always start in a fresh session; independent review may not resume prior worker/reviewer context")
-    blocker=launch_blocker(run,phase,tid,role,continuing=requested_continuation or report_only)
+    launch_continuation=requested_continuation or report_only
+    blocker=launch_blocker(run,phase,tid,role,continuing=launch_continuation)
     if blocker: raise ValueError(blocker)
     if role=="implementer":
-        if status=="awaiting-review" and not continuing:
+        if status=="awaiting-review" and not launch_continuation:
             raise ValueError("implementation turn is awaiting Review; use --resume-last only when the same task is genuinely unfinished, otherwise launch the Reviewer")
         if status in {"needs-analysis","needs-fix","review-passed","accepted","superseded","integrated","cancelled","parked","recovery-required","blocked"}:
             raise ValueError(f"task is not implementation-runnable: {status}")

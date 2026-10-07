@@ -600,6 +600,13 @@ class ComponentsTests(unittest.TestCase):
             self.assertEqual(candidate_evidence.command_run(args),0)
         self.assertEqual(counter.read_text(),'2')
 
+    def test_launch_decision_uses_pre_resolve_continuation_flag_without_unbound_local(self):
+        source=(SCRIPTS/'dsd_attempt.py').read_text()
+        segment=source[source.index('requested_continuation='):source.index('if report_only and report_only_attempt is not None:')]
+        self.assertIn('launch_continuation=requested_continuation or report_only',segment)
+        self.assertIn('and not launch_continuation',segment)
+        self.assertNotIn('and not continuing',segment)
+
     def test_report_only_source_attempt_requires_zero_delta_terminal_evidence(self):
         event=self.root/'report-only-source'; event.mkdir()
         scope=event/'scope-diff.json'; scope.write_text(json.dumps({'changed_count':0,'changed_paths':[]})+'\n')
