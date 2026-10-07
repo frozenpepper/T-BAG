@@ -628,6 +628,20 @@ class ContextCompositionTests(unittest.TestCase):
         self.assertEqual(cp.returncode, 0, cp.stderr)
         self.assertNotIn(str(catalog.resolve()), worker_out.read_text())
 
+    def test_source_and_review_prompts_require_current_code_premise_check(self):
+        rules=self.prepare()
+        for role in ("implementer","fixer","reviewer"):
+            with self.subTest(role=role):
+                cp,out=self.render(rules,"# Task T1\n\n## Objective\nDo bounded work.\n",role=role)
+                self.assertEqual(cp.returncode,0,cp.stderr)
+                text=out.read_text()
+                self.assertIn("CURRENT-CODE PREMISE CHECK",text)
+                self.assertIn("actual production owner(s)",text)
+                self.assertIn("behavior genuinely still missing",text)
+        cp,out=self.render(rules,"# Task T1\n\n## Objective\nVerify evidence.\n",role="verification")
+        self.assertEqual(cp.returncode,0,cp.stderr)
+        self.assertNotIn("CURRENT-CODE PREMISE CHECK",out.read_text())
+
     def test_rendered_prompt_composes_shared_quality_instead_of_repeating_it(self):
         rules = self.prepare()
         info=verify_snapshot(rules); quality=str((Path(info["protocol_dir"])/"QUALITY.md").resolve())

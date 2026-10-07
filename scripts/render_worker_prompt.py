@@ -105,6 +105,13 @@ def main() -> int:
         project_root=args.project_root.resolve()
         if not project_root.is_dir(): raise SystemExit(f"ERROR: assigned project view missing: {project_root}")
         lines += [f"Assigned project view: {project_root}", "Project reads/tools must target only that assigned view; it may differ from the process cwd used to protect read-only tasks."]
+    if args.role in {"implementer","fixer","reviewer"}:
+        lines += [
+            "CURRENT-CODE PREMISE CHECK:",
+            "- Before editing (Implementer/Fixer) or judging (Reviewer), verify in the assigned project view: the actual production owner(s), current existing behavior, the behavior genuinely still missing relative to the frozen brief, and the acceptance predicates that distinguish success.",
+            "- If the brief's premise is stale because the production behavior already exists, do not recreate or relocate it merely to match the brief. Narrow to genuinely missing in-authority work such as regression/proof when that still satisfies the frozen acceptance; otherwise preserve the mismatch and escalate/replan.",
+            "- Record the materially relevant premise correction in the report so later repair/review turns do not repeat the stale theory.",
+        ]
     lines += ["Read now, in order:"]
     lines += [f"{i}. {p}" for i, p in enumerate(reads, 1)]
     if fallback:
