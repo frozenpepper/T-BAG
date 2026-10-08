@@ -1258,7 +1258,7 @@ class ComponentsTests(unittest.TestCase):
         calls=[]; sleeps=[]
         class Proc:
             def __init__(self,pid,rc): self.pid=pid; self.rc=rc
-            def wait(self): return self.rc
+            def wait(self,timeout=None): return self.rc
         def fake_popen(cmd,**kwargs):
             calls.append((list(cmd),kwargs['env']['OPENCODE_DB'],kwargs['cwd']))
             if len(calls)==1:
@@ -1291,7 +1291,7 @@ class ComponentsTests(unittest.TestCase):
         calls=[]; sleeps=[]
         class Proc:
             def __init__(self,pid,rc): self.pid=pid; self.rc=rc
-            def wait(self): return self.rc
+            def wait(self,timeout=None): return self.rc
         def fake_popen(cmd,**kwargs):
             calls.append(list(cmd))
             if len(calls)==1:
