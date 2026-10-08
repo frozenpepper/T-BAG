@@ -76,6 +76,12 @@ def files_fingerprint(root:Path,patterns:tuple[str,...],extra:list[Path]|None=No
         if key in seen: continue
         seen.add(key)
         row=path_digest(path)
+        if path.is_symlink():
+            if not path.is_file():
+                raise ValueError(f"bound verification input symlink is not a regular file: {path}")
+            # Link text alone does not track mutations of an external ignored input.
+            # Include the bytes actually read when the command follows the link.
+            row["linked_content_sha256"]=hash_file(path)
         try:
             # Candidate/cache identity must be independent of the task's worktree
             # mount path. Otherwise identical Reviewer/Implementer views cannot share

@@ -672,6 +672,17 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(candidate_evidence.command_run(args),0)
         self.assertEqual(counter.read_text(),'2')
 
+    def test_bound_symlink_fingerprint_changes_with_external_target_bytes(self):
+        project=self.root/'symlink-view'; project.mkdir()
+        target=self.root/'outside-candidate.txt'; target.write_text('old bytes')
+        (project/'bound.txt').symlink_to(target)
+        before=candidate_evidence.files_fingerprint(project,(),[Path('bound.txt')])
+        target.write_text('new bytes')
+        after=candidate_evidence.files_fingerprint(project,(),[Path('bound.txt')])
+        self.assertNotEqual(before['sha256'],after['sha256'])
+        self.assertEqual(before['files'][0]['relative'],'bound.txt')
+        self.assertEqual(after['files'][0]['relative'],'bound.txt')
+
     def test_candidate_fingerprint_is_content_stable_across_checkpoint_commit(self):
         project=self.root/'candidate-tree'; project.mkdir()
         subprocess.run(['git','init','-q',str(project)],check=True)
