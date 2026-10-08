@@ -18,6 +18,8 @@
 - Fixed candidate-evidence identity across T-BAG checkpoints: the reuse key now hashes the canonical current path/content/mode tree (with submodule content state) rather than incidental `HEAD + diff`, so identical bytes remain reusable after checkpoint commits.
 - Nested submodules now use the same canonical current-tree identity, avoiding a second `HEAD + diff` representation mismatch inside submodule candidates.
 - Corrected the Reviewer follow-up examples to valid JSON and replaced dense Implementer/Fixer premise-check prose with four concrete actions for smaller worker models; made the parent tick dispatch explicit without duplicating the same policy deeper in SKILL.md.
+- Clarified that project-authored scratch must remain project-local, while ordinary OS-managed temporary files from tests/tools do not require Human permission; preserves disk hygiene without making normal execution impossible.
+
 
 
 

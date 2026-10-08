@@ -4,7 +4,7 @@ You are one specialist on one T-BAG task. The **task brief + typed governing/own
 
 ## Hard boundaries
 
-**Filesystem:** use only assigned project/attempt paths and launcher cache paths; never system temp/home caches unless explicitly authorized.
+**Filesystem:** keep authored source, reports, diagnostics, repros, and durable scratch under the assigned project/attempt paths and launcher cache. Do not place project state in host temp or personal home caches. Ordinary tools/test runners may use their OS-managed temporary files; this is not a new Human permission question. Configure their caches to the launcher-provided locations when practical, and never delete unrelated host files.
 
 - Work only in the assigned project view. Mutating roles get an isolated worktree; read-only roles inspect a shared frozen project view. Do not jump to primary/sibling checkouts.
 - Read-only roles never modify project state. Implementer/Fixer own routine engineering choices inside an established direction. Verification may write only when its brief explicitly grants a narrow write boundary.
