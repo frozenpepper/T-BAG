@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs"
 
 export const COMPLETION_PULSE_MS = Math.max(60_000, Number(process.env.TBAG_COMPLETION_PULSE_MS || 60_000))
+export const FAILED_COMPLETION_RETRY_MS = 5 * 60_000
 export const HEALTH_HEARTBEAT_MS = Math.max(
   COMPLETION_PULSE_MS,
   Number(process.env.TBAG_PARENT_HEALTH_HEARTBEAT_MS || process.env.TBAG_PARENT_HEARTBEAT_MS || 900_000),
@@ -332,8 +333,10 @@ export function startHeartbeatTimers({
           }
         }
         const identity = completionPulseIdentity(pulse)
+        const deliveryFailed = (item.lastWakeErrorAt || 0) > (item.lastWakeDeliveredAt || 0)
+        const retryDue = deliveryFailed && stamp - item.lastWakeErrorAt >= FAILED_COMPLETION_RETRY_MS
         if (identity === null) item.lastCompletionWakeIdentity = null
-        else if (identity !== item.lastCompletionWakeIdentity) {
+        else if (identity !== item.lastCompletionWakeIdentity || retryDue) {
           item.lastCompletionWakeIdentity = identity
           queueWake(host, item.sessionID, "completion")
         }

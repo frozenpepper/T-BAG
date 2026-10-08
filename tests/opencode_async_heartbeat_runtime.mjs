@@ -70,6 +70,22 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(wakeCalls.length, 1, "unchanged stopped attempt must not re-wake the parent")
 
+  item.lastWakeErrorAt = Date.now() - core.FAILED_COMPLETION_RETRY_MS - 1
+  item.lastWakeDeliveredAt = 0
+  completion.fn()
+  await Promise.resolve()
+  resolvers.shift()({ heartbeat_state: "running", wake_parent: true })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(wakeCalls.length, 2, "confirmed wake delivery failures may retry after backoff")
+
+  item.lastWakeErrorAt = Date.now()
+  completion.fn()
+  await Promise.resolve()
+  resolvers.shift()({ heartbeat_state: "running", wake_parent: true })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(wakeCalls.length, 2, "a recent failed wake must not retry on every pulse")
+  item.lastWakeDeliveredAt = Date.now()
+
   completion.fn()
   await Promise.resolve()
   resolvers.shift()({
@@ -77,13 +93,13 @@ try {
     stopped_attempts: [{ phase_id: "P", task_id: "T2", event_dir: "/new-event", terminal_present: true }],
   })
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(wakeCalls.length, 2, "a different stopped attempt is a new completion")
+  assert.equal(wakeCalls.length, 3, "a different stopped attempt is a new completion")
 
   completion.fn()
   await Promise.resolve()
   resolvers.shift()({ heartbeat_state: "running", wake_parent: false })
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(wakeCalls.length, 2)
+  assert.equal(wakeCalls.length, 3)
 
   completion.fn()
   await Promise.resolve()
@@ -92,7 +108,7 @@ try {
     stopped_attempts: [{ phase_id: "P", task_id: "T2", event_dir: "/new-event", terminal_present: true }],
   })
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(wakeCalls.length, 3, "a cleared stopped condition may wake on recurrence")
+  assert.equal(wakeCalls.length, 4, "a cleared stopped condition may wake on recurrence")
 
   completion.fn()
   await Promise.resolve()
@@ -100,8 +116,8 @@ try {
   runHeartbeats.set(key, replacement)
   resolvers.shift()({ heartbeat_state: "running", wake_parent: true })
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(wakeCalls.length, 3, "old in-flight pulse must not wake after heartbeat re-enrollment")
-  assert.equal(persistCalls, 5, "stale pulse must not persist over the replacement")
+  assert.equal(wakeCalls.length, 4, "old in-flight pulse must not wake after heartbeat re-enrollment")
+  assert.equal(persistCalls, 7, "stale pulse must not persist over the replacement")
 
   handle.stop()
 } finally {
