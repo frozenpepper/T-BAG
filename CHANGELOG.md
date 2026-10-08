@@ -1,50 +1,18 @@
 # T-BAG changelog
 
-## RC71 — orchestrator authority + non-destructive worker completion
-- Follow-up obligations now support stable structured identity, existing owner-task binding and explicit `none|dependency|phase` blocking scope. Already-owned nonblocking work remains visible without creating duplicate Planner triage or freezing unrelated phase work; legacy bullets retain conservative behavior.
-- Owned blocking obligations inspect the named owner's own delivered/result state directly, avoiding dependency-recursion cycles when the owner is downstream of the reviewed source.
-- Repair loops now stop for orchestrator causal diagnosis after two failed Reviews or three completed source-writing turns without acceptance. Pending fresh Review is allowed first; reopening records what changed and rejects verbatim reuse of the previous diagnosis.
-- Implementation planning and worker prompts now make stale-premise detection explicit: Planner briefs capture current owner/existing/missing behavior when known, while Implementer/Fixer/Reviewer verify actual current code before editing or judging and narrow/escalate instead of recreating already-existing mechanisms.
-- Worker launch now performs attempt-free execution preflight in the actual post-refresh view for expected fixtures, task-required executables/local Node modules, Node runtime/ABI when relevant, and technical-role cache writability. Failures become orchestrator-owned environment control blocks; successful facts are retained on the attempt for evidence/diagnostics.
-- OpenCode transport now persists actual parent-wake delivery/failure per session; tick/status distinguish `armed-unproven|proven|failed|unavailable` and name the explicit fallback instead of treating heartbeat enrollment or resume hooks as wake proof.
-- Owner status now reports delivered outcomes separately from mechanical orchestration cost: attempts, source-writing turns, failed Reviews, causal diagnoses, repeated follow-up observations, environment-preflight failures and worker wall time. Exact test-command time is not guessed from worker duration.
-- Repair-loop diagnosis and orchestration-cost counters now count scope-proven source movement rather than every completed Implementer/Fixer process; zero-delta report/transport turns no longer manufacture repair churn, while legacy attempts without scope evidence remain conservative.
-- Added zero-delta report-only continuation: resumable `report-resume` attempts reuse the prior candidate checkpoint/evidence, skip implementation capability setup, and are evidence-gated read-only; any candidate movement invalidates the shortcut.
-- Added candidate-bound expensive-verification evidence reuse. The helper keys exact argv to source tree, dependency/configuration and installed-environment metadata, runtime/executable identity and optional bound inputs; identical broad checks may be reused, but fresh Review still owns acceptance and independently reproduces decisive risky behavior.
-- Report-only continuation no longer depends on a surviving host session: zero-delta interrupted attempts can finish reporting cold without source authority. Interrupted fresh Reviewers may resume their same session only in this report-only mode; cold report-only sessions receive full stable context.
-- Phase exit now respects follow-up blocking scope: merely-visible or dependency-only obligations no longer become an accidental global phase barrier; only unresolved `phase` obligations hold phase completion.
-- Candidate evidence now writes a tiny attempt-local index automatically supplied to the next fresh Reviewer, so reuse does not depend on worker prose. Reuse keys also include Git submodule state and high-impact runtime environment; ignored/generated/external verification inputs must be explicitly `--bind`-bound.
-- Fixed RC71.42 launch ordering: pre-resume lifecycle checks now use the explicit `launch_continuation` decision instead of referencing `continuing` before session resolution.
-- Fixed candidate-evidence identity across T-BAG checkpoints: the reuse key now hashes the canonical current path/content/mode tree (with submodule content state) rather than incidental `HEAD + diff`, so identical bytes remain reusable after checkpoint commits.
-- Nested submodules now use the same canonical current-tree identity, avoiding a second `HEAD + diff` representation mismatch inside submodule candidates.
-- Corrected the Reviewer follow-up examples to valid JSON and replaced dense Implementer/Fixer premise-check prose with four concrete actions for smaller worker models; made the parent tick dispatch explicit without duplicating the same policy deeper in SKILL.md.
-- Clarified that project-authored scratch must remain project-local, while ordinary OS-managed temporary files from tests/tools do not require Human permission; preserves disk hygiene without making normal execution impossible.
+## RC71 — orchestrator authority, resilient completion and economical verification
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-- Re-established the authority hierarchy: Human intent/safety and observed evidence truth remain hard boundaries; orchestrator judgment sits above T-BAG process machinery. T-BAG-internal deadlocks, stale state, attempt budgets and cycle guards may be diagnosed, repaired or auditably overridden without manufacturing Human permission.
-- Separated process guards from authority escalation. Internal stops use dedicated `last_control_block` / `control_block_history`, classify as `control`, and reconcile to `review-control-block`; genuine Human questions fail closed unless a real Human-targeted escalation exists. Legacy control-plane records remain readable, while malformed bare blocks route to orchestrator repair rather than Human wait.
-- Made parent turns executable and quiet: `continue` acts, `yield` ends, `intervene` diagnoses/repairs in the same turn, and `ask-owner` is reserved for genuine owner authority/input. Tick now emits `owner_communication: question|notice|none`; `none` suppresses routine status narration. Compact actions retain their recovery command/instruction.
-- Removed the duplicate undocumented `idle-check` control plane. `parent_tick` is the single owner of turn-ending, supervision and owner-communication semantics; `active-idle` explicitly forbids status-only turns.
-- Removed the 30-second report-completion kill path. A live worker is never terminated merely because `report.md` looks complete; report text is evidence and process/transport completion remains authoritative. Active tasks with no live worker now expose explicit relaunch routing.
-- Reduced parent archaeology and replay friction: exact repeated Analyst plan registration is idempotent; compact task/owner/status surfaces expose current control reasons and control-vs-Human classification; incomplete tick packets are marked degraded rather than presenting missing routing fields as normal.
-- Tightened worker-context economy without narrowing orchestrator authority: review prompts foreground frozen task/acceptance authority before prior-worker evidence, while resumed workers avoid forced rereads of stable contracts and retain them only as compaction fallbacks.
-- Added regressions around non-retirement of live workers, plan-registration replay, active/no-live recovery, control-vs-Human routing, quiet owner communication, legacy block compatibility, and shared status delivery context.
+- **Orchestrator judgment over ceremony.** Human intent, safety and source/evidence truth remain hard boundaries; T-BAG process defaults are lower-priority optimization. Internal attempt/cycle/repair-loop guards return to the orchestrator for recorded causal diagnosis or audited override instead of manufacturing Human permission.
+- **Non-destructive supervision.** Removed report-content-triggered SIGTERM. A report is evidence, not a process-control signal; active/no-live tasks recover explicitly, while completed, interrupted and zero-delta report-only attempts preserve their original source state and the fresh Review boundary.
+- **Clean authority and state.** Internal `last_control_block` records are distinct from genuine Human `last_escalation`; legacy/unclassified blocks route to orchestrator repair. Human questions fail closed for internal process guards. Red predicates and primary-branch delivery proof are never relabelled green.
+- **Unambiguous low-token parent control.** `parent_tick` owns turn handling and quiet communication (`continue|yield|intervene|ask-owner`, `question|notice|none`). The duplicate `idle-check` API was removed. Compact actions carry enough recovery details to avoid repeated repository archaeology.
+- **Precise follow-up ownership.** Review obligations have stable IDs, known owner task/phase and `none|dependency|phase` blocking scope; already-owned nonblocking obligations do not create duplicate Planner work or freeze unrelated tasks. Legacy plain-text bullets remain conservative; phase exit respects the same scope.
+- **Early diagnosis and current-code truth.** Two failed Review/Fix cycles or three source-writing turns without acceptance trigger an orchestrator causal check rather than blind retries. Planner briefs and worker roles verify current production ownership, existing versus missing behavior, and observable acceptance before implementing obsolete plans.
+- **Actual execution capability.** Launch checks required tools/Node ABI, declared fixtures and cache writability after workspace refresh and before spending an attempt. Missing environment capability routes to environment recovery, not source patching. Ordinary OS-managed test temp is permitted; authored durable artifacts remain project-local.
+- **Reusable but independent verification.** Candidate evidence keys canonical source tree/submodules, dependency/configuration/installed inputs, declared external inputs, executable/runtime and exact command. Paths are normalized across worktrees; cache records must contain valid bound result evidence and cannot mistake a new checkpoint HEAD for new source content. Reused broad results never substitute for fresh Reviewer acceptance and decisive risky-path reproduction.
+- **Context proportional to role.** Fresh Reviewer starts from frozen acceptance, Fixer reuses the finding Reviewer session, and resumed workers avoid ritual rereads of unchanged shared context. Small-model instructions use executable checks and valid JSON follow-up examples instead of placeholder-shaped pseudo-contracts.
+- **Host wake is observable, not assumed.** OpenCode persists delivered-wake/failure evidence and offers explicit fallback when an observer/heartbeat is armed but unproven. Lifecycle/status tests cover routing; actual host resumption still requires live acceptance.
+- **Outcome-oriented accounting.** Owner status separates Git-delivered results from attempts, repair churn, repeated findings, environment failures and measured worker time. Test-command durations come from actual candidate evidence, not extrapolated worker time.
 
 
 This release package keeps only recent architectural history. Detailed pre-RC22 development logs were intentionally removed from the shipped skill because they were non-authoritative, duplicated obsolete mechanics, and materially outweighed the active documentation. Older release artifacts remain the historical record.
