@@ -217,7 +217,13 @@ def valid_cached_result(record_path:Path, key:str, bound:dict[str,Any])->dict[st
     if not isinstance(record,dict) or record.get("format")!=FORMAT or record.get("key")!=key:
         return None
     for name,value in bound.items():
-        if record.get(name)!=value: return None
+        actual=record.get(name)
+        if name=="candidate":
+            # Snapshot commits can change without changing candidate bytes.
+            if not isinstance(actual,dict) or actual.get("sha256")!=value["sha256"]:
+                return None
+        elif actual!=value:
+            return None
     result=record.get("result")
     if not isinstance(result,dict) or type(result.get("exit_code")) is not int: return None
     for stream in ("stdout","stderr"):

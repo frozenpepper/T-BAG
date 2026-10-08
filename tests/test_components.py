@@ -649,6 +649,11 @@ class ComponentsTests(unittest.TestCase):
         self.assertEqual(candidate_evidence.files_fingerprint(project,candidate_evidence.DEPENDENCY_PATTERNS)['sha256'],
                          candidate_evidence.files_fingerprint(mirror,candidate_evidence.DEPENDENCY_PATTERNS)['sha256'])
         self.assertEqual(candidate_evidence.command_run(a),0)
+        # Fresh checkout checkpoint commit with the same content must not consume
+        # another expensive suite run in the second worker view.
+        git(mirror,'config','user.email','t@example.com'); git(mirror,'config','user.name','T')
+        git(mirror,'commit','--allow-empty','-qm','unrelated checkpoint')
+        self.assertNotEqual(git(project,'rev-parse','HEAD'),git(mirror,'rev-parse','HEAD'))
         self.assertEqual(candidate_evidence.command_run(b),0)
         self.assertEqual(counter.read_text(),'1')
 
