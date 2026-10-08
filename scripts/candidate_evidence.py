@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -267,45 +268,51 @@ def command_run(args:argparse.Namespace)->int:
     }
     key=sha(json.dumps(key_payload,sort_keys=True,separators=(",",":")).encode())
     record_path=cache/f"{key}.json"
-    if args.reuse and record_path.is_file():
-        result=valid_cached_result(record_path,key,{
-            "candidate":candidate,"dependencies":dependencies,
-            "installed_dependencies":installed,"configuration":configuration,
-            "runtime":runtime,"command":command,
-        })
-        if result is not None:
-            exit_code=result["exit_code"]
-            record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=True,result=result)
-            print(json.dumps({"reused":True,"key":key,"record":str(record_path),"exit_code":exit_code,"duration_seconds":result.get("duration_seconds")},sort_keys=True))
-            return exit_code
-
-    started=time.time()
-    with tempfile.NamedTemporaryFile(dir=cache,prefix=f".{key}.",suffix=".stdout",delete=False) as out, tempfile.NamedTemporaryFile(dir=cache,prefix=f".{key}.",suffix=".stderr",delete=False) as err:
-        out_path=Path(out.name); err_path=Path(err.name)
-        cp=subprocess.run(command,cwd=project,stdout=out,stderr=err,check=False)
-    duration=round(time.time()-started,3)
-    result={
-        "exit_code":cp.returncode,"duration_seconds":duration,
-        "stdout":{"bytes":out_path.stat().st_size,"sha256":hash_file(out_path),"tail":tail(out_path)},
-        "stderr":{"bytes":err_path.stat().st_size,"sha256":hash_file(err_path),"tail":tail(err_path)},
-    }
-    record={
-        "format":FORMAT,"key":key,"label":args.label,"recorded_at":time.time(),
-        "project_view":str(project),"run_root":str(run_root),"producer_attempt":os.environ.get("TBAG_ATTEMPT_DIR"),
-        "candidate":candidate,"dependencies":dependencies,"installed_dependencies":installed,
-        "configuration":configuration,"runtime":runtime,"command":command,"result":result,
-        "semantics":"Reusable execution evidence for this exact bound candidate/runtime/command; never an acceptance verdict.",
-    }
-    tmp=record_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(record,indent=2,sort_keys=True)+"\n",encoding="utf-8"); os.replace(tmp,record_path)
-    record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=False,result=result)
-    try:
-        sys.stdout.write(result["stdout"]["tail"])
-        if result["stderr"]["tail"]: sys.stderr.write(result["stderr"]["tail"])
-    finally:
-        out_path.unlink(missing_ok=True); err_path.unlink(missing_ok=True)
-    print(json.dumps({"reused":False,"key":key,"record":str(record_path),"exit_code":cp.returncode,"duration_seconds":duration},sort_keys=True))
-    return cp.returncode
+    # A fixed set of advisory locks bounds disk growth while serializing each
+    # candidate key across worker processes and Git worktrees. Check the cache
+    # again *after* acquiring the lock; otherwise parallel Reviewers execute the
+    # same expensive suite and race to publish its .json.tmp record.
+    with (cache/f".lock-{key[:2]}").open("a+b") as lock:
+        fcntl.flock(lock.fileno(),fcntl.LOCK_EX)
+        if args.reuse and record_path.is_file():
+            result=valid_cached_result(record_path,key,{
+                "candidate":candidate,"dependencies":dependencies,
+                "installed_dependencies":installed,"configuration":configuration,
+                "runtime":runtime,"command":command,
+            })
+            if result is not None:
+                exit_code=result["exit_code"]
+                record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=True,result=result)
+                print(json.dumps({"reused":True,"key":key,"record":str(record_path),"exit_code":exit_code,"duration_seconds":result.get("duration_seconds")},sort_keys=True))
+                return exit_code
+    
+        started=time.time()
+        with tempfile.NamedTemporaryFile(dir=cache,prefix=f".{key}.",suffix=".stdout",delete=False) as out, tempfile.NamedTemporaryFile(dir=cache,prefix=f".{key}.",suffix=".stderr",delete=False) as err:
+            out_path=Path(out.name); err_path=Path(err.name)
+            cp=subprocess.run(command,cwd=project,stdout=out,stderr=err,check=False)
+        duration=round(time.time()-started,3)
+        result={
+            "exit_code":cp.returncode,"duration_seconds":duration,
+            "stdout":{"bytes":out_path.stat().st_size,"sha256":hash_file(out_path),"tail":tail(out_path)},
+            "stderr":{"bytes":err_path.stat().st_size,"sha256":hash_file(err_path),"tail":tail(err_path)},
+        }
+        record={
+            "format":FORMAT,"key":key,"label":args.label,"recorded_at":time.time(),
+            "project_view":str(project),"run_root":str(run_root),"producer_attempt":os.environ.get("TBAG_ATTEMPT_DIR"),
+            "candidate":candidate,"dependencies":dependencies,"installed_dependencies":installed,
+            "configuration":configuration,"runtime":runtime,"command":command,"result":result,
+            "semantics":"Reusable execution evidence for this exact bound candidate/runtime/command; never an acceptance verdict.",
+        }
+        tmp=record_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(record,indent=2,sort_keys=True)+"\n",encoding="utf-8"); os.replace(tmp,record_path)
+        record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=False,result=result)
+        try:
+            sys.stdout.write(result["stdout"]["tail"])
+            if result["stderr"]["tail"]: sys.stderr.write(result["stderr"]["tail"])
+        finally:
+            out_path.unlink(missing_ok=True); err_path.unlink(missing_ok=True)
+        print(json.dumps({"reused":False,"key":key,"record":str(record_path),"exit_code":cp.returncode,"duration_seconds":duration},sort_keys=True))
+        return cp.returncode
 
 
 def parser()->argparse.ArgumentParser:

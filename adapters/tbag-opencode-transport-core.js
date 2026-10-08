@@ -93,6 +93,19 @@ export function wakeText(kind = "completion") {
   ].join("\n")
 }
 
+// Stable evidence identity: an unchanged stopped attempt is not a new event on
+// each 60-second pulse. Health heartbeats remain independent of this fast lane.
+export function completionPulseIdentity(pulse) {
+  if (pulse?.wake_parent !== true) return null
+  const attempts = (pulse.stopped_attempts || []).map((item) => JSON.stringify([
+    item.phase_id || "", item.task_id || "", item.event_dir || "", item.terminal_present === true,
+  ])).sort()
+  const preparations = (pulse.stopped_preparations || []).map((item) => JSON.stringify([
+    item.phase_id || "", item.task_id || "", item.preparation || "", item.preparation_pid || null,
+  ])).sort()
+  return JSON.stringify([pulse.run_id || "", attempts, preparations])
+}
+
 export function createHeartbeatRegistry({
   runHeartbeats,
   pendingWakeSessions,
@@ -148,6 +161,7 @@ export function createHeartbeatRegistry({
       run_root: args.run_root,
       lastQueuedAt: stamp,
       lastCompletionProbeAt: activityEvidence ? 0 : (prior?.lastCompletionProbeAt || 0),
+      lastCompletionWakeIdentity: activityEvidence ? null : (prior?.lastCompletionWakeIdentity || null),
       lastHealthWakeAt: prior?.lastHealthWakeAt || stamp,
       heartbeatState: activityEvidence ? "running" : (prior?.heartbeatState === "idle-recovery" ? "idle-recovery" : "running"),
       lastWakeDeliveredAt: prior?.lastWakeDeliveredAt || 0,
@@ -300,7 +314,7 @@ export function startHeartbeatTimers({
       }
       // The registration may have been removed or the run may have ended while
       // the asynchronous pulse was in flight.
-      if (!runHeartbeats.has(key)) return
+      if (runHeartbeats.get(key) !== item) return
       if (durableHeartbeatState(item.run_root) !== "running" || ["ended", "waiting", "paused"].includes(pulse?.heartbeat_state)) {
         removeRunHeartbeat(item.sessionID, item.run_root)
         return
@@ -317,7 +331,12 @@ export function startHeartbeatTimers({
             transportErrors.set(item.run_root, { at: new Date().toISOString(), error: `completion pulse recovery failed: ${String(error?.stack || error)}` })
           }
         }
-        if (pulse?.wake_parent === true) queueWake(host, item.sessionID, "completion")
+        const identity = completionPulseIdentity(pulse)
+        if (identity === null) item.lastCompletionWakeIdentity = null
+        else if (identity !== item.lastCompletionWakeIdentity) {
+          item.lastCompletionWakeIdentity = identity
+          queueWake(host, item.sessionID, "completion")
+        }
       }
       persistTransport(item.run_root)
     } finally {

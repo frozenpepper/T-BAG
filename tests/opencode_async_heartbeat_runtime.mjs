@@ -65,10 +65,43 @@ try {
 
   completion.fn()
   await Promise.resolve()
-  assert.equal(pulseCalls, 2, "a later timer may probe again after the first pulse settles")
+  assert.equal(pulseCalls, 2, "the probe still checks changed worker state")
+  resolvers.shift()({ heartbeat_state: "running", wake_parent: true })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(wakeCalls.length, 1, "unchanged stopped attempt must not re-wake the parent")
+
+  completion.fn()
+  await Promise.resolve()
+  resolvers.shift()({
+    heartbeat_state: "running", wake_parent: true,
+    stopped_attempts: [{ phase_id: "P", task_id: "T2", event_dir: "/new-event", terminal_present: true }],
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(wakeCalls.length, 2, "a different stopped attempt is a new completion")
+
+  completion.fn()
+  await Promise.resolve()
   resolvers.shift()({ heartbeat_state: "running", wake_parent: false })
   await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(persistCalls, 2)
+  assert.equal(wakeCalls.length, 2)
+
+  completion.fn()
+  await Promise.resolve()
+  resolvers.shift()({
+    heartbeat_state: "running", wake_parent: true,
+    stopped_attempts: [{ phase_id: "P", task_id: "T2", event_dir: "/new-event", terminal_present: true }],
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(wakeCalls.length, 3, "a cleared stopped condition may wake on recurrence")
+
+  completion.fn()
+  await Promise.resolve()
+  const replacement = { ...item, lastCompletionProbeAt: 0 }
+  runHeartbeats.set(key, replacement)
+  resolvers.shift()({ heartbeat_state: "running", wake_parent: true })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(wakeCalls.length, 3, "old in-flight pulse must not wake after heartbeat re-enrollment")
+  assert.equal(persistCalls, 5, "stale pulse must not persist over the replacement")
 
   handle.stop()
 } finally {

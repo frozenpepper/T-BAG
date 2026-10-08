@@ -600,6 +600,36 @@ class ComponentsTests(unittest.TestCase):
             self.assertEqual(candidate_evidence.command_run(args),0)
         self.assertEqual(counter.read_text(),'2')
 
+    def test_candidate_evidence_concurrent_reuse_executes_once(self):
+        # Two independent processes begin with an empty shared cache. The second
+        # must wait for the first publication, not execute the same expensive job.
+        project=self.root/'evidence-parallel'; project.mkdir()
+        git(project,'init','-q'); git(project,'config','user.email','t@example.com'); git(project,'config','user.name','T')
+        (project/'source.txt').write_text('candidate\n')
+        git(project,'add','.'); git(project,'commit','-qm','candidate')
+        run=project/'TBag'/'runs'/'R'; run.mkdir(parents=True)
+        (run/'run.json').write_text(json.dumps({'project_root':str(project)})+'\n')
+        counter=project/'TBag'/'executions.txt'
+        script=f"import time; from pathlib import Path; time.sleep(.4); Path({str(counter)!r}).open('a').write('executed\\n')"
+        argv=[
+            sys.executable,str(SCRIPTS/'candidate_evidence.py'),'run',
+            '--run-root',str(run),'--project-root',str(project),'--reuse',
+            '--',sys.executable,'-c',script,
+        ]
+        processes=[subprocess.Popen(argv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(2)]
+        try:
+            results=[process.communicate(timeout=30) for process in processes]
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill(); process.wait()
+        for process,(_stdout,stderr) in zip(processes,results):
+            self.assertEqual(process.returncode,0,stderr)
+        self.assertEqual(counter.read_text().splitlines(),['executed'])
+        records=[json.loads(stdout.splitlines()[-1]) for stdout,_ in results]
+        self.assertEqual(sorted(item['reused'] for item in records),[False,True])
+        self.assertEqual(records[0]['key'],records[1]['key'])
+
     def test_launch_decision_uses_pre_resolve_continuation_flag_without_unbound_local(self):
         source=(SCRIPTS/'dsd_attempt.py').read_text()
         segment=source[source.index('requested_continuation='):source.index('if report_only and report_only_attempt is not None:')]
