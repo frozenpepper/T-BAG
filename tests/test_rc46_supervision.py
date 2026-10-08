@@ -88,6 +88,33 @@ class ProcessSupervisionTests(unittest.TestCase):
             killpg.assert_not_called()
             proc.kill.assert_not_called()
 
+    @unittest.skipUnless(os.name == "posix", "process-group retirement is POSIX-only")
+    def test_real_stubborn_worker_is_reaped_with_bounded_escalation(self):
+        # Exercise the actual kernel process-group signal, not only mocks.
+        with tempfile.TemporaryDirectory() as td:
+            event=Path(td)
+            proc=subprocess.Popen(
+                [sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                marker=event/'retirement-request.json'
+                marker.write_text(json.dumps({
+                    'format':'tbag-attempt-retirement-v1',
+                    'worker_pid':proc.pid,'launcher_pid':os.getpid(),
+                }))
+                os.utime(marker,(time.time()-30,time.time()-30))
+                rc,escalated=run_worker.wait_worker(proc,event)
+                self.assertEqual(rc,-signal.SIGKILL)
+                self.assertTrue(escalated)
+                self.assertIsNotNone(proc.returncode)
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid,signal.SIGKILL)
+                    proc.wait()
+
     def test_retirement_without_request_waits_normally(self):
         with tempfile.TemporaryDirectory() as td:
             proc=mock.Mock(pid=12345)
