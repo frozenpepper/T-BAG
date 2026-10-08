@@ -112,10 +112,11 @@ def _tracked_modes(root:Path)->dict[str,str]:
 
 def _submodule_manifest(path:Path)->dict[str,Any]:
     nested=candidate_fingerprint(path)
+    # Only the canonical nested bytes belong to the parent cache key.
+    # A nested checkpoint commit can change HEAD without changing content.
     return {
         "tree_sha256":nested["sha256"],
         "entry_count":nested["entry_count"],
-        "head_observed":nested["head_observed"],
     }
 
 

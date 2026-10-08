@@ -24,7 +24,7 @@ jobs:
         run: python3 -m py_compile scripts/candidate_evidence.py scripts/run_worker.py tests/test_components.py tests/test_rc46_supervision.py
       - name: Candidate evidence and worker transport regressions
         run: |
-          python3 -m unittest discover -s tests -p 'test_components.py' -k candidate_evidence -k opencode_db_lock -k opencode_retry_does_not_reuse_an_old_lock_message -k opencode_async_heartbeat -v
+          python3 -m unittest discover -s tests -p 'test_components.py' -k candidate_evidence -k submodule_manifest -k opencode_db_lock -k opencode_retry_does_not_reuse_an_old_lock_message -k opencode_async_heartbeat -v
           python3 -m unittest discover -s tests -p 'test_rc46_supervision.py' -v
           node tests/opencode_async_heartbeat_runtime.mjs adapters/tbag-opencode-transport-core.js
 
