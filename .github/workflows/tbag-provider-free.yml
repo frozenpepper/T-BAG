@@ -9,7 +9,26 @@ permissions:
   contents: read
 
 jobs:
-  provider-free:
+  changed-paths:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Compile changed Python owners and tests
+        run: python3 -m py_compile scripts/candidate_evidence.py scripts/run_worker.py tests/test_components.py tests/test_rc46_supervision.py
+      - name: Candidate evidence and worker transport regressions
+        run: |
+          python3 -m unittest discover -s tests -p 'test_components.py' -k candidate_evidence -k opencode_db_lock -k opencode_retry_does_not_reuse_an_old_lock_message -k opencode_async_heartbeat -v
+          python3 -m unittest discover -s tests -p 'test_rc46_supervision.py' -v
+          node tests/opencode_async_heartbeat_runtime.mjs adapters/tbag-opencode-transport-core.js
+
+  full-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -20,7 +39,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Compile Python sources
+      - name: Compile all Python sources
         run: python3 -m compileall -q scripts tests
-      - name: Run provider-free test suite
+      - name: Run entire provider-free suite (existing failures remain visible)
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
