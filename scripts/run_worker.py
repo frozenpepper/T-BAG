@@ -7,6 +7,7 @@ import fcntl
 import json
 import math
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -22,6 +23,8 @@ from _rules_snapshot import verify_snapshot
 PLACEHOLDER = "DSD_WORKER_REPORT_PLACEHOLDER_V2_1"
 DEFAULT_LAUNCH_START_INTERVAL_SECONDS = 3.0
 OPENCODE_DB_LOCK_RETRY_DELAYS_SECONDS = (4.0, 8.0, 16.0)
+RETIRE_GRACE_SECONDS = 10.0
+RETIRE_POLL_SECONDS = 1.0
 
 
 def classify_report_text(text: str) -> str:
@@ -458,6 +461,42 @@ def terminal_error(args: argparse.Namespace,p:dict[str,Path],error:str,exit_code
     atomic_json(p["event_dir"]/"terminal.json",terminal); return exit_code
 
 
+
+def wait_worker(proc:subprocess.Popen[Any],event_dir:Path)->tuple[int,bool]:
+    """Reap the exact child; escalate only an authorized retirement for that PID.
+
+    The launcher keeps the live Popen handle, avoiding PID-reuse targeting. Never
+    signal the launcher's group or an unrelated worker when the session leader
+    is not itself the expected process-group leader.
+    """
+    marker=event_dir/"retirement-request.json"
+    while True:
+        try:
+            return proc.wait(timeout=RETIRE_POLL_SECONDS),False
+        except subprocess.TimeoutExpired:
+            try:
+                request=json.loads(marker.read_text(encoding="utf-8"))
+                age=time.time()-marker.stat().st_mtime
+            except (OSError,ValueError,json.JSONDecodeError):
+                continue
+            if (not isinstance(request,dict)
+                    or request.get("format")!="tbag-attempt-retirement-v1"
+                    or request.get("worker_pid")!=proc.pid
+                    or request.get("launcher_pid")!=os.getpid()
+                    or age<RETIRE_GRACE_SECONDS):
+                continue
+            if proc.poll() is not None:
+                return proc.wait(),False
+            try:
+                if hasattr(os,"killpg") and os.getpgid(proc.pid)==proc.pid:
+                    os.killpg(proc.pid,signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
+            return proc.wait(),True
+
+
 def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     p["log"].parent.mkdir(parents=True,exist_ok=True); started=None
     try: env,caches=worker_environment(os.environ.copy(),p)
@@ -494,7 +533,9 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
         if session_error: attempt["session_lookup_error"]=session_error
         else: attempt.pop("session_lookup_error",None)
         atomic_json(p["event_dir"]/"attempt.json",attempt)
-        rc=proc.wait()
+        rc,retirement_escalated=wait_worker(proc,p["event_dir"])
+        if (p["event_dir"]/"retirement-request.json").is_file():
+            break  # an intentional retirement must never trigger the DB-lock retry lane
         reason=retryable_opencode_db_lock(
             args,p,exit_code=rc,session_id=session_id,log_start=log_start,
             stderr_path=stderr_path,stderr_start=stderr_start,
@@ -537,6 +578,7 @@ def child(args: argparse.Namespace,p:dict[str,Path],reserved_at:str)->int:
     atomic_json(p["event_dir"]/"attempt.json",attempt)
     terminal={"format":"dsd-worker-terminal-v2.2","status":"process-exited","task_id":args.task_id,"role":args.role,"tier":args.tier,"driver":args.driver,"model":args.model,"attempt":args.attempt,"exit_code":rc,"worker_pid":proc.pid,"launcher_pid":os.getpid(),"session_id":session_id,"session_lookup_error":session_error,"reserved_at":reserved_at,"started_at":started,"ended_at":now(),"report":str(p["report"]),"report_state":report_state(p["report"]),"scope_diff":scope,"scope_error":scope_error}
     if process_retries: terminal["process_retries"]=process_retries
+    if retirement_escalated: terminal["retirement_escalated"]="SIGKILL"
     if stderr_path is not None: terminal["stderr_log"]=str(stderr_path)
     atomic_json(p["event_dir"]/"terminal.json",terminal); return rc
 

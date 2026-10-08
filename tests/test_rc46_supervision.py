@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import signal
 import sys
 import tempfile
@@ -12,6 +14,7 @@ SCRIPTS=Path(__file__).resolve().parents[1]/"scripts"
 sys.path.insert(0,str(SCRIPTS))
 
 import dsd_attempt
+import run_worker
 import dsd_task
 import parent_tick
 import tbag_status
@@ -47,6 +50,52 @@ class ProcessSupervisionTests(unittest.TestCase):
         self.assertLess(out["follow_elapsed_seconds"],1.0)
         sleep.assert_not_called()
 
+
+    def test_retirement_escalates_only_the_exact_live_worker_after_grace(self):
+        with tempfile.TemporaryDirectory() as td:
+            event=Path(td)
+            marker=event/'retirement-request.json'
+            marker.write_text(json.dumps({
+                'format':'tbag-attempt-retirement-v1',
+                'worker_pid':12345,'launcher_pid':os.getpid(),
+            }))
+            os.utime(marker,(time.time()-30,time.time()-30))
+            proc=mock.Mock(pid=12345)
+            proc.wait.side_effect=[subprocess.TimeoutExpired('worker',1.0),-9]
+            proc.poll.return_value=None
+            with mock.patch.object(run_worker.os,'getpgid',return_value=12345), \
+                 mock.patch.object(run_worker.os,'killpg') as killpg:
+                rc,escalated=run_worker.wait_worker(proc,event)
+            self.assertEqual(rc,-9)
+            self.assertTrue(escalated)
+            killpg.assert_called_once_with(12345,signal.SIGKILL)
+
+    def test_retirement_does_not_escalate_a_mismatched_process(self):
+        with tempfile.TemporaryDirectory() as td:
+            event=Path(td)
+            marker=event/'retirement-request.json'
+            marker.write_text(json.dumps({
+                'format':'tbag-attempt-retirement-v1',
+                'worker_pid':54321,'launcher_pid':os.getpid(),
+            }))
+            os.utime(marker,(time.time()-30,time.time()-30))
+            proc=mock.Mock(pid=12345)
+            proc.wait.side_effect=[subprocess.TimeoutExpired('worker',1.0),0]
+            with mock.patch.object(run_worker.os,'killpg') as killpg:
+                rc,escalated=run_worker.wait_worker(proc,event)
+            self.assertEqual(rc,0)
+            self.assertFalse(escalated)
+            killpg.assert_not_called()
+            proc.kill.assert_not_called()
+
+    def test_retirement_without_request_waits_normally(self):
+        with tempfile.TemporaryDirectory() as td:
+            proc=mock.Mock(pid=12345)
+            proc.wait.return_value=0
+            with mock.patch.object(run_worker.os,'killpg') as killpg:
+                self.assertEqual(run_worker.wait_worker(proc,Path(td)),(0,False))
+            killpg.assert_not_called()
+            proc.kill.assert_not_called()
 
 class PoisonedSessionTests(unittest.TestCase):
     def _attempt(self,root:Path,index:int,session="ses-poison"):
