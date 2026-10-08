@@ -630,6 +630,43 @@ class ComponentsTests(unittest.TestCase):
         after=candidate_evidence.candidate_fingerprint(parent)
         self.assertEqual(before['sha256'],after['sha256'])
 
+    def test_candidate_evidence_reuses_between_distinct_identical_worktrees(self):
+        project=self.root/'evidence-origin'; project.mkdir()
+        git(project,'init','-q'); git(project,'config','user.email','t@example.com'); git(project,'config','user.name','T')
+        (project/'app.txt').write_text('candidate\n')
+        (project/'package-lock.json').write_text('{"lockfileVersion":3}\n')
+        (project/'package.json').write_text('{"name":"evidence-reuse"}\n')
+        git(project,'add','.'); git(project,'commit','-qm','candidate')
+        mirror=self.root/'separate-worker-view'
+        subprocess.run(['git','clone','-q',str(project),str(mirror)],check=True)
+        run=project/'TBag'/'runs'/'R'; run.mkdir(parents=True)
+        (run/'run.json').write_text(json.dumps({'project_root':str(project)})+'\n')
+        counter=project/'TBag'/'counter.txt'
+        cmd=[sys.executable,'-c',f"from pathlib import Path; p=Path({str(counter)!r}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')"]
+        a=SimpleNamespace(run_root=str(run),project_root=str(project),label='suite',bind=[],reuse=True,fresh=False,argv=cmd)
+        b=SimpleNamespace(run_root=str(run),project_root=str(mirror),label='suite',bind=[],reuse=True,fresh=False,argv=cmd)
+        self.assertEqual(candidate_evidence.candidate_fingerprint(project)['sha256'],candidate_evidence.candidate_fingerprint(mirror)['sha256'])
+        self.assertEqual(candidate_evidence.files_fingerprint(project,candidate_evidence.DEPENDENCY_PATTERNS)['sha256'],
+                         candidate_evidence.files_fingerprint(mirror,candidate_evidence.DEPENDENCY_PATTERNS)['sha256'])
+        self.assertEqual(candidate_evidence.command_run(a),0)
+        self.assertEqual(candidate_evidence.command_run(b),0)
+        self.assertEqual(counter.read_text(),'1')
+
+    def test_candidate_evidence_does_not_promote_corrupt_record_to_success(self):
+        project=self.root/'evidence-corrupt'; project.mkdir()
+        git(project,'init','-q'); git(project,'config','user.email','t@example.com'); git(project,'config','user.name','T')
+        (project/'a.txt').write_text('x'); git(project,'add','.'); git(project,'commit','-qm','init')
+        run=project/'TBag'/'runs'/'R'; run.mkdir(parents=True)
+        (run/'run.json').write_text(json.dumps({'project_root':str(project)})+'\n')
+        counter=project/'TBag'/'counter.txt'
+        cmd=[sys.executable,'-c',f"from pathlib import Path; p=Path({str(counter)!r}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')"]
+        args=SimpleNamespace(run_root=str(run),project_root=str(project),label='suite',bind=[],reuse=True,fresh=False,argv=cmd)
+        self.assertEqual(candidate_evidence.command_run(args),0)
+        record=next((project/'TBag'/'cache'/'candidate-evidence').glob('*.json'))
+        record.write_text(json.dumps({'format':candidate_evidence.FORMAT,'result':{'duration_seconds':1}}))
+        self.assertEqual(candidate_evidence.command_run(args),0)
+        self.assertEqual(counter.read_text(),'2')
+
     def test_candidate_fingerprint_is_content_stable_across_checkpoint_commit(self):
         project=self.root/'candidate-tree'; project.mkdir()
         subprocess.run(['git','init','-q',str(project)],check=True)

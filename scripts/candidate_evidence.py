@@ -76,8 +76,15 @@ def files_fingerprint(root:Path,patterns:tuple[str,...],extra:list[Path]|None=No
         if key in seen: continue
         seen.add(key)
         row=path_digest(path)
-        try: row["relative"]=path.relative_to(root).as_posix()
-        except ValueError: row["relative"]=str(path)
+        try:
+            # Candidate/cache identity must be independent of the task's worktree
+            # mount path. Otherwise identical Reviewer/Implementer views cannot share
+            # a 16-minute suite result. External bound files keep absolute identity.
+            row["relative"]=path.relative_to(root).as_posix()
+            row.pop("path",None)
+        except ValueError:
+            row["relative"]=str(path.resolve())
+            row.pop("path",None)
         rows.append(row)
     payload=json.dumps(rows,sort_keys=True,separators=(",",":")).encode()
     return {"sha256":sha(payload),"files":rows}
@@ -203,6 +210,24 @@ def resolve_path(raw:str|None,env_name:str,flag_name:str)->Path:
     return Path(value).resolve()
 
 
+def valid_cached_result(record_path:Path, key:str, bound:dict[str,Any])->dict[str,Any]|None:
+    """Refuse incomplete/stale cache records, especially missing exit-code evidence."""
+    try: record=json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError,ValueError,json.JSONDecodeError): return None
+    if not isinstance(record,dict) or record.get("format")!=FORMAT or record.get("key")!=key:
+        return None
+    for name,value in bound.items():
+        if record.get(name)!=value: return None
+    result=record.get("result")
+    if not isinstance(result,dict) or type(result.get("exit_code")) is not int: return None
+    for stream in ("stdout","stderr"):
+        item=result.get(stream)
+        if not isinstance(item,dict) or not isinstance(item.get("sha256"),str) or type(item.get("bytes")) is not int or not isinstance(item.get("tail"),str):
+            return None
+    if not isinstance(result.get("duration_seconds"),(int,float)): return None
+    return result
+
+
 def command_run(args:argparse.Namespace)->int:
     project=resolve_path(args.project_root,"TBAG_PROJECT_VIEW","project-root")
     run_root=resolve_path(args.run_root,"TBAG_RUN_ROOT","run-root")
@@ -231,12 +256,16 @@ def command_run(args:argparse.Namespace)->int:
     key=sha(json.dumps(key_payload,sort_keys=True,separators=(",",":")).encode())
     record_path=cache/f"{key}.json"
     if args.reuse and record_path.is_file():
-        record=json.loads(record_path.read_text(encoding="utf-8"))
-        result=record.get("result",{}) if isinstance(record.get("result"),dict) else {}
-        exit_code=int(result.get("exit_code") or 0)
-        record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=True,result=result)
-        print(json.dumps({"reused":True,"key":key,"record":str(record_path),"exit_code":exit_code,"duration_seconds":result.get("duration_seconds")},sort_keys=True))
-        return exit_code
+        result=valid_cached_result(record_path,key,{
+            "candidate":candidate,"dependencies":dependencies,
+            "installed_dependencies":installed,"configuration":configuration,
+            "runtime":runtime,"command":command,
+        })
+        if result is not None:
+            exit_code=result["exit_code"]
+            record_attempt_reference(record_path=record_path,key=key,label=args.label,reused=True,result=result)
+            print(json.dumps({"reused":True,"key":key,"record":str(record_path),"exit_code":exit_code,"duration_seconds":result.get("duration_seconds")},sort_keys=True))
+            return exit_code
 
     started=time.time()
     with tempfile.NamedTemporaryFile(dir=cache,prefix=f".{key}.",suffix=".stdout",delete=False) as out, tempfile.NamedTemporaryFile(dir=cache,prefix=f".{key}.",suffix=".stderr",delete=False) as err:
