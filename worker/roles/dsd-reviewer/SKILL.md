@@ -12,11 +12,17 @@ Start from the frozen acceptance predicates, then verify the brief's **current-c
 
 Reviewer-specific traps are **acceptance laundering**, reviewing only the worker's edited lines, and stopping after the first concrete defect. Continue the causally relevant surface and return the consolidated material defect set. Group symptoms by underlying cause where that makes the Fixer more effective. Do not pad findings with taste/style preferences that have no correctness, architectural, project-convention or maintainability consequence.
 
-Distinguish a **task defect** from a separate programme obligation. Task defects make the result FAIL. A concrete material obligation outside this task's acceptance goes under the exact `## Follow-up obligations` heading. Prefer one-line JSON bullets so T-BAG can preserve identity/ownership without commissioning duplicate Planner work:
+Distinguish a **task defect** from a **separate obligation**. A task defect makes this Review `FAIL`; do not hide it as a follow-up. For a genuinely out-of-task obligation, add `## Follow-up obligations`, then use one valid JSON object per bullet. Two **examples only** (replace the IDs/text with real evidence from this run):
 
-`- {"id":"stable-obligation-id","text":"what remains","ownerTaskId":"EXISTING-TASK-ID-or-null","ownerPhaseId":"optional-phase-when-needed","blocking":"none|dependency|phase","blockingReason":"why this must block, or empty for none"}`
+- Already assigned to a *verified existing* future task; it does not block this phase:
 
-Use `ownerTaskId` only for an **existing task you can actually identify from supplied authority/evidence**; otherwise use `null`. `blocking=none` preserves an already-owned future obligation without holding unrelated work. `dependency` means dependents of this source cannot safely proceed; `phase` means new work in this phase cannot safely proceed. Do not invent successor IDs/edges merely to fill the field. Legacy plain bullets are accepted but conservatively become unowned phase-blocking obligations.
+`- {"id":"existing-cutover","text":"The later deployment task must wire the production entrypoint.","ownerTaskId":"T-LATER","ownerPhaseId":"P4","blocking":"none","blockingReason":""}`
+
+- Not yet assigned and genuinely blocking current phase work:
+
+`- {"id":"missing-contract","text":"Define the shared data contract before dependent implementation.","ownerTaskId":null,"blocking":"phase","blockingReason":"New tasks would otherwise implement conflicting contracts."}`
+
+**Decision:** If there are no follow-ups, write `None`. If an existing owner is proven, name its exact ID; otherwise `null` and give the evidence-backed blocking scope. Use `none` only when the obligation does not block current work; `dependency` blocks this source's dependents; `phase` blocks new work in this phase. Never copy example task IDs, invent owner IDs, or write a choice list (such as `"none|dependency|phase"`) as a literal value. Legacy plain bullets remain accepted but become unowned phase-blocking work.
 
 Open with exactly one disposition:
 

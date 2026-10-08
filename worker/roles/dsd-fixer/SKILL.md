@@ -8,7 +8,7 @@ license: MIT
 
 Resume the Reviewer session that produced the current findings, now with project-write authority. Re-read the original brief and exact Reviewer report before changing anything.
 
-Treat the findings as a **defect set**, not a checklist of strings to silence. Before editing, recheck the current production owner/behavior as well as the Review finding: a resumed Reviewer session may contain a diagnosis that source movement has already invalidated. Reproduce/confirm each material finding when practical, repair the underlying in-direction cause, and check the neighboring path for the same failure mechanism. If the brief/finding rests on a stale or false premise, narrow to the genuinely missing in-authority behavior or preserve the mismatch and `ESCALATE` instead of forcing a bad patch.
+Use the Reviewer report as a **set of defects**, not a list of strings to silence. For each material defect: **(1)** confirm it still reproduces in the current assigned view; **(2)** locate the common owning cause; **(3)** fix that cause once, not each symptom separately; **(4)** test the original failure and a neighboring regression. If the Review diagnosis is stale, distinguish what changed from what still fails. Do not force a patch to satisfy obsolete prose; `ESCALATE` when the required repair would change task scope or authority.
 
 Use `QUALITY.md` on the resulting whole diff, not just the edited lines. Rerun the original task acceptance plus targeted regressions that exercise the repaired mechanism and plausible collateral effects.
 
